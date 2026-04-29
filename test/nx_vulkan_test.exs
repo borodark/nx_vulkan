@@ -178,4 +178,125 @@ defmodule Nx.VulkanTest do
       assert List.last(result) == 2048.0
     end
   end
+
+  describe "v0.0.4-7 — unary, reductions, matmul, random" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "exp" do
+      {:ok, a} = Nx.Vulkan.upload_f32([0.0, 1.0, 2.0])
+      {:ok, e} = Nx.Vulkan.exp(a)
+      {:ok, [r0, r1, r2]} = Nx.Vulkan.download_f32(e, 3)
+      assert_in_delta r0, 1.0, 1.0e-3
+      assert_in_delta r1, 2.71828, 1.0e-3
+      assert_in_delta r2, 7.389, 1.0e-3
+    end
+
+    test "log inverse of exp" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.71828, 7.389])
+      {:ok, l} = Nx.Vulkan.log(a)
+      {:ok, [r0, r1, r2]} = Nx.Vulkan.download_f32(l, 3)
+      assert_in_delta r0, 0.0, 1.0e-3
+      assert_in_delta r1, 1.0, 1.0e-3
+      assert_in_delta r2, 2.0, 1.0e-3
+    end
+
+    test "relu" do
+      {:ok, a} = Nx.Vulkan.upload_f32([-2.0, -0.5, 0.0, 1.5, 3.0])
+      {:ok, r} = Nx.Vulkan.relu(a)
+      assert {:ok, [0.0, 0.0, 0.0, 1.5, 3.0]} = Nx.Vulkan.download_f32(r, 5)
+    end
+
+    test "sum" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      assert {:ok, 10.0} = Nx.Vulkan.sum(a)
+    end
+
+    test "reduce_min / reduce_max" do
+      {:ok, a} = Nx.Vulkan.upload_f32([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
+      assert {:ok, 1.0} = Nx.Vulkan.reduce_min(a)
+      assert {:ok, 9.0} = Nx.Vulkan.reduce_max(a)
+    end
+
+    test "mean" do
+      {:ok, a} = Nx.Vulkan.upload_f32([2.0, 4.0, 6.0, 8.0])
+      assert {:ok, 5.0} = Nx.Vulkan.mean(a)
+    end
+
+    test "matmul: 1x3 · 3x1 = dot product" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0])
+      {:ok, c} = Nx.Vulkan.matmul(a, b, 1, 1, 3)
+      assert {:ok, [140.0]} = Nx.Vulkan.download_f32(c, 1)
+    end
+
+    test "matmul: 2x2 · 2x2" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([5.0, 6.0, 7.0, 8.0])
+      {:ok, c} = Nx.Vulkan.matmul(a, b, 2, 2, 2)
+      # [[1,2],[3,4]] · [[5,6],[7,8]] = [[19,22],[43,50]]
+      assert {:ok, [19.0, 22.0, 43.0, 50.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    test "uniform random determinism" do
+      {:ok, r1} = Nx.Vulkan.uniform(8, 42)
+      {:ok, r2} = Nx.Vulkan.uniform(8, 42)
+      {:ok, l1} = Nx.Vulkan.download_f32(r1, 8)
+      {:ok, l2} = Nx.Vulkan.download_f32(r2, 8)
+      assert l1 == l2
+      assert Enum.all?(l1, fn x -> x >= 0.0 and x < 1.0 end)
+    end
+
+    test "uniform different seed → different output" do
+      {:ok, r1} = Nx.Vulkan.uniform(8, 1)
+      {:ok, r2} = Nx.Vulkan.uniform(8, 2)
+      {:ok, l1} = Nx.Vulkan.download_f32(r1, 8)
+      {:ok, l2} = Nx.Vulkan.download_f32(r2, 8)
+      refute l1 == l2
+    end
+  end
+
+  describe "v0.0.x — Nx.Backend integration" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "Nx.tensor with Vulkan backend round-trips through GPU" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(t) == [1.0, 2.0, 3.0, 4.0]
+    end
+
+    test "Nx.add dispatches through the Vulkan backend" do
+      t = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+      result = Nx.add(t, t)
+      assert Nx.to_flat_list(result) == [2.0, 4.0, 6.0]
+    end
+
+    test "Nx.multiply through Vulkan" do
+      a = Nx.tensor([1.0, 2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      b = Nx.tensor([10.0, 20.0, 30.0, 40.0], backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(Nx.multiply(a, b)) == [10.0, 40.0, 90.0, 160.0]
+    end
+
+    test "Nx.exp through Vulkan" do
+      t = Nx.tensor([0.0, 1.0], backend: Nx.Vulkan.Backend)
+      [r0, r1] = Nx.to_flat_list(Nx.exp(t))
+      assert_in_delta r0, 1.0, 1.0e-3
+      assert_in_delta r1, 2.71828, 1.0e-3
+    end
+
+    test "Nx.sum through Vulkan" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      assert Nx.to_number(Nx.sum(t)) == 10.0
+    end
+
+    test "Nx.backend_transfer to BinaryBackend works" do
+      t = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+      bin_t = Nx.backend_transfer(t, Nx.BinaryBackend)
+      assert Nx.to_flat_list(bin_t) == [1.0, 2.0, 3.0]
+    end
+  end
 end

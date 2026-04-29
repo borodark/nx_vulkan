@@ -66,6 +66,29 @@ int nxv_apply_binary(void* out, void* a, void* b,
                      unsigned int n, unsigned int op,
                      const char* spv_path);
 
+/* Elementwise unary op. `out`, `a` are buffers of `n` f32 elements.
+ * `op` spec constant: 0=exp, 1=log, 2=sqrt, 3=abs, 4=neg, 5=sigmoid,
+ * 6=tanh, 7=relu, 8=ceil, 9=floor, 10=sign, 11=reciprocal, 12=square. */
+int nxv_apply_unary(void* out, void* a,
+                    unsigned int n, unsigned int op,
+                    const char* spv_path);
+
+/* Reduction. `n` f32 elements reduced to one f32 written to `out_scalar`.
+ * `op`: 0=sum, 1=min, 2=max. */
+int nxv_reduce(float* out_scalar, void* in,
+               unsigned int n, unsigned int op,
+               const char* spv_path);
+
+/* Matmul (naive). C[M*N] = A[M*K] · B[K*N], all row-major f32. */
+int nxv_matmul(void* out, void* a, void* b,
+               unsigned int m, unsigned int n, unsigned int k,
+               const char* spv_path);
+
+/* Random. Fill `out` with `n` f32 values. dist=0 uniform [0,1),
+ * dist=1 normal N(0,1) via Box-Muller. */
+int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
+               const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

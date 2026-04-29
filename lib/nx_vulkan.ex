@@ -102,7 +102,9 @@ defmodule Nx.Vulkan do
     Nx.Vulkan.Native.download_binary(tensor, n_bytes)
   end
 
-  @doc "Byte size of an uploaded tensor."
+  import Kernel, except: [byte_size: 1]
+
+  @doc "Byte size of an uploaded tensor (in bytes)."
   defdelegate byte_size(tensor), to: Nx.Vulkan.Native
 
   # ------------------------------------------------------------------
@@ -129,10 +131,89 @@ defmodule Nx.Vulkan do
     end
   end
 
-  defp shader_path(name) do
+  @doc false
+  def shader_path(name) do
     :nx_vulkan
     |> :code.priv_dir()
     |> Path.join("shaders")
     |> Path.join(name)
+  end
+
+  # ------------------------------------------------------------------
+  # v0.0.4 — elementwise unary ops
+  # ------------------------------------------------------------------
+
+  @ops_unary %{
+    exp: 0,
+    log: 1,
+    sqrt: 2,
+    abs: 3,
+    negate: 4,
+    sigmoid: 5,
+    tanh: 6,
+    relu: 7,
+    ceil: 8,
+    floor: 9,
+    sign: 10,
+    reciprocal: 11,
+    square: 12
+  }
+
+  for {name, op_const} <- @ops_unary do
+    @doc "Elementwise `#{name}` of a GPU tensor."
+    def unquote(name)(a) do
+      Nx.Vulkan.Native.apply_unary(a, unquote(op_const), shader_path("elementwise_unary.spv"))
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # v0.0.5 — reductions (return host-side scalar)
+  # ------------------------------------------------------------------
+
+  @doc "Sum of all elements (returns a host-side f32)."
+  def sum(t), do: Nx.Vulkan.Native.reduce_scalar(t, 0, shader_path("reduce.spv"))
+
+  @doc "Min of all elements."
+  def reduce_min(t), do: Nx.Vulkan.Native.reduce_scalar(t, 1, shader_path("reduce.spv"))
+
+  @doc "Max of all elements."
+  def reduce_max(t), do: Nx.Vulkan.Native.reduce_scalar(t, 2, shader_path("reduce.spv"))
+
+  @doc "Mean of all elements (sum + host-side divide)."
+  def mean(t) do
+    case sum(t) do
+      {:ok, s} ->
+        n = div(Nx.Vulkan.Native.byte_size(t), 4)
+        {:ok, s / n}
+
+      err ->
+        err
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # v0.0.6 — matmul (naive)
+  # ------------------------------------------------------------------
+
+  @doc """
+  Matrix multiply: `C[M*N] = A[M*K] · B[K*N]`. All row-major f32.
+  Returns `{:ok, c_tensor}`.
+  """
+  def matmul(a, b, m, n, k) do
+    Nx.Vulkan.Native.matmul(a, b, m, n, k, shader_path("matmul.spv"))
+  end
+
+  # ------------------------------------------------------------------
+  # v0.0.7 — random
+  # ------------------------------------------------------------------
+
+  @doc "Generate `n` uniform [0,1) f32 values, deterministic via `seed`."
+  def uniform(n, seed \\ 42) when is_integer(n) and is_integer(seed) do
+    Nx.Vulkan.Native.random(n, seed, 0, shader_path("random_philox.spv"))
+  end
+
+  @doc "Generate `n` standard-normal N(0,1) f32 values via Box-Muller."
+  def normal(n, seed \\ 42) when is_integer(n) and is_integer(seed) do
+    Nx.Vulkan.Native.random(n, seed, 1, shader_path("random_philox.spv"))
   end
 end

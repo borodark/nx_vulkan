@@ -45,6 +45,40 @@ unsafe extern "C" {
         op: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_apply_unary(
+        out: *mut c_void,
+        a: *mut c_void,
+        n: u32,
+        op: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_reduce(
+        out_scalar: *mut f32,
+        input: *mut c_void,
+        n: u32,
+        op: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_matmul(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        m: u32,
+        n: u32,
+        k: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_random(
+        out: *mut c_void,
+        n: u32,
+        seed: u32,
+        dist: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -211,6 +245,132 @@ fn apply_binary<'a>(
     let rc = unsafe {
         nxv_apply_binary(out_handle, a.handle, b.handle, n_elems, op, cstr.as_ptr())
     };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Apply an elementwise unary op. Allocates a fresh output buffer.
+#[rustler::nif]
+fn apply_unary<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 12 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_bytes = a.n_bytes;
+    let n_elems = (n_bytes / 4) as u32;
+
+    let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_apply_unary(out_handle, a.handle, n_elems, op, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Reduction (sum/min/max). Returns a host-side f32 scalar.
+#[rustler::nif]
+fn reduce_scalar<'a>(
+    env: Env<'a>,
+    input: ResourceArc<VulkanTensor>,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 2 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_elems = (input.n_bytes / 4) as u32;
+    let mut out_scalar: f32 = 0.0;
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+
+    let rc = unsafe {
+        nxv_reduce(&mut out_scalar as *mut f32, input.handle, n_elems, op, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    Ok((atoms::ok(), out_scalar).encode(env))
+}
+
+/// Matmul C[M*N] = A[M*K] · B[K*N]. Allocates output.
+#[rustler::nif]
+fn matmul<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    m: u32,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let expected_a = (m * k * 4) as u64;
+    let expected_b = (k * n * 4) as u64;
+    if a.n_bytes != expected_a || b.n_bytes != expected_b {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let out_bytes = (m * n * 4) as u64;
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_matmul(out_handle, a.handle, b.handle, m, n, k, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Random fill. Allocates an output buffer of `n` f32 elements.
+/// dist: 0=uniform [0,1), 1=normal N(0,1).
+#[rustler::nif]
+fn random<'a>(
+    env: Env<'a>,
+    n: u32,
+    seed: u32,
+    dist: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if dist > 1 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_bytes = (n * 4) as u64;
+    let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_random(out_handle, n, seed, dist, cstr.as_ptr()) };
 
     if rc != 0 {
         unsafe { nxv_buf_free(out_handle) };

@@ -33,4 +33,16 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def apply_binary(_a, _b, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def apply_unary(_a, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def reduce_scalar(_a, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def matmul(_a, _b, _m, _n, _k, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def random(_n, _seed, _dist, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 end

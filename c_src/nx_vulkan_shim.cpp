@@ -21,19 +21,45 @@ static std::string g_device_name;
 
 /* Pipeline cache keyed on (spv_path, op_spec_constant). Persistent
  * across calls — first dispatch pays the create cost, subsequent ones
- * reuse the pipeline. Cleared in nxv_destroy. */
-static std::map<std::pair<std::string, unsigned int>, VkPipe*> g_pipe_cache;
+ * reuse the pipeline. Cleared in nxv_destroy.
+ *
+ * push_size for each shader family:
+ *   binary    : sizeof(uint)        (n)
+ *   unary     : sizeof(uint)        (n)
+ *   reduce    : sizeof(uint)        (n)        — handled by spirit's reduce()
+ *   matmul    : 3 * sizeof(uint)    (M, N, K)
+ *   random    : 2 * sizeof(uint)    (n, seed)
+ *
+ * For the cache key we add n_buffers because matmul/binary share a
+ * spec-const-0 path with different binding counts. */
+struct PipeKey {
+    std::string path;
+    unsigned int op;
+    unsigned int n_buffers;
+    bool operator<(const PipeKey& o) const {
+        if (path != o.path) return path < o.path;
+        if (op != o.op) return op < o.op;
+        return n_buffers < o.n_buffers;
+    }
+};
+static std::map<PipeKey, VkPipe*> g_pipe_cache;
 
-static VkPipe* get_or_create_binary_pipe(const std::string& spv_path, unsigned int op) {
-    auto key = std::make_pair(spv_path, op);
+static VkPipe* get_or_create_pipe(const std::string& spv_path, unsigned int op,
+                                  unsigned int n_buffers) {
+    PipeKey key{spv_path, op, n_buffers};
     auto it = g_pipe_cache.find(key);
     if (it != g_pipe_cache.end()) return it->second;
 
     VkShaderModule shader = load_shader(spv_path);
     if (!shader) return nullptr;
 
+    /* push_size: derive from n_buffers heuristic. binary/unary/random
+     * use 1 uint or 2 uints; matmul uses 3. The shaders accept up to
+     * 12 bytes, so we always declare 12 — Vulkan ignores unused. */
+    uint32_t push_size = 12;
+
     VkPipe* pipe = new VkPipe();
-    int rc = create_pipeline(pipe, shader, 3, sizeof(unsigned int), (int32_t) op);
+    int rc = create_pipeline(pipe, shader, n_buffers, push_size, (int32_t) op);
     if (rc != 0) {
         delete pipe;
         return nullptr;
@@ -116,7 +142,7 @@ int nxv_apply_binary(void* out, void* a, void* b,
                      const char* spv_path) {
     if (!out || !a || !b || !spv_path) return -1;
 
-    VkPipe* pipe = get_or_create_binary_pipe(std::string(spv_path), op);
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), op, 3);
     if (!pipe) return -2;
 
     VkBuf* buf_a   = (VkBuf*) a;
@@ -129,6 +155,118 @@ int nxv_apply_binary(void* out, void* a, void* b,
     unsigned int groups = (n + 255) / 256;
 
     return dispatch(pipe, bufs, 3, groups, sizeof(unsigned int), &push_n);
+}
+
+int nxv_apply_unary(void* out, void* a,
+                    unsigned int n, unsigned int op,
+                    const char* spv_path) {
+    if (!out || !a || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), op, 2);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader binding order: a, out. Push constant: n. */
+    VkBuffer bufs[2] = { buf_a->buffer, buf_out->buffer };
+    unsigned int push_n = n;
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 2, groups, sizeof(unsigned int), &push_n);
+}
+
+int nxv_reduce(float* out_scalar, void* in, unsigned int n, unsigned int op,
+               const char* spv_path) {
+    if (!out_scalar || !in || !spv_path) return -1;
+    VkBuf* buf_in = (VkBuf*) in;
+    *out_scalar = reduce(buf_in, (int) n, (ReduceOp) op, std::string(spv_path));
+    return 0;
+}
+
+int nxv_matmul(void* out, void* a, void* b,
+               unsigned int m, unsigned int n, unsigned int k,
+               const char* spv_path) {
+    if (!out || !a || !b || !spv_path) return -1;
+
+    /* matmul has no spec constant; cache key is just the spv path. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 3);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* matmul uses 2D dispatch (gx, gy) but spirit's dispatch helper is
+     * 1D-only. Inline the dispatch dance — same pattern as
+     * test_matmul.cpp. Push constants: M, N, K (12 bytes). */
+    auto& ctx = g_vk_ctx;
+
+    VkBuffer bufs[3] = { buf_a->buffer, buf_b->buffer, buf_out->buffer };
+
+    VkDescriptorBufferInfo bi[3];
+    VkWriteDescriptorSet w[3];
+    for (int i = 0; i < 3; i++) {
+        bi[i] = {bufs[i], 0, VK_WHOLE_SIZE};
+        w[i] = {};
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = pipe->descriptor_set;
+        w[i].dstBinding = (uint32_t) i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(ctx.device, 3, w, 0, nullptr);
+
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = ctx.command_pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(ctx.device, &ai, &cmd);
+
+    VkCommandBufferBeginInfo bb{};
+    bb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bb);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe->pipeline_layout, 0, 1, &pipe->descriptor_set, 0, nullptr);
+
+    unsigned int push[3] = { m, n, k };
+    vkCmdPushConstants(cmd, pipe->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(push), push);
+
+    unsigned int gx = (n + 15) / 16;
+    unsigned int gy = (m + 15) / 16;
+    vkCmdDispatch(cmd, gx, gy, 1);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(ctx.compute_queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx.compute_queue);
+    vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+
+    return 0;
+}
+
+int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
+               const char* spv_path) {
+    if (!out || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), dist, 1);
+    if (!pipe) return -2;
+
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader binding: out only. Push constants: {n, seed} = 8 bytes. */
+    VkBuffer bufs[1] = { buf_out->buffer };
+    struct { unsigned int n; unsigned int seed; } push = { n, seed };
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 1, groups, sizeof(push), &push);
 }
 
 }
