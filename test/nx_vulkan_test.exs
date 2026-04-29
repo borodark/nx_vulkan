@@ -879,4 +879,83 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(s) == [9.0, 12.0, 27.0, 30.0]
     end
   end
+
+  describe "v0.1 phase 1.9 — dense linalg (determinant, solve, cholesky, triangular_solve)" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "determinant of 2x2" do
+      t = Nx.tensor([[3.0, 1.0], [2.0, 4.0]], backend: Nx.Vulkan.Backend)
+      d = Nx.LinAlg.determinant(t)
+      assert_in_delta Nx.to_number(d), 10.0, 1.0e-5
+    end
+
+    test "determinant of 3x3" do
+      # det([[1,2,3],[0,1,4],[5,6,0]]) = 1*(1*0-4*6) - 2*(0*0-4*5) + 3*(0*6-1*5)
+      #                                = -24 + 40 - 15 = 1
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0], [0.0, 1.0, 4.0], [5.0, 6.0, 0.0]],
+                  backend: Nx.Vulkan.Backend)
+
+      d = Nx.LinAlg.determinant(t)
+      assert_in_delta Nx.to_number(d), 1.0, 1.0e-5
+    end
+
+    test "solve 2x2 system" do
+      # [[2, 1], [1, 3]] x = [4, 5]  →  x = [1.4, 1.2]
+      a = Nx.tensor([[2.0, 1.0], [1.0, 3.0]], backend: Nx.Vulkan.Backend)
+      b = Nx.tensor([4.0, 5.0], backend: Nx.Vulkan.Backend)
+      x = Nx.LinAlg.solve(a, b)
+
+      Enum.zip(Nx.to_flat_list(x), [1.4, 1.2])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
+    end
+
+    test "cholesky of SPD 3x3 (mass-matrix shape)" do
+      # SPD matrix: A = L L^T with L lower-triangular.
+      # [[4,2,2],[2,5,3],[2,3,6]] → L = [[2,0,0],[1,2,0],[1,1,2]]
+      a =
+        Nx.tensor([[4.0, 2.0, 2.0], [2.0, 5.0, 3.0], [2.0, 3.0, 6.0]],
+                  backend: Nx.Vulkan.Backend)
+
+      l = Nx.LinAlg.cholesky(a)
+
+      Enum.zip(Nx.to_flat_list(l), [2.0, 0.0, 0.0,  1.0, 2.0, 0.0,  1.0, 1.0, 2.0])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
+    end
+
+    test "triangular_solve lower" do
+      # [[2,0],[3,4]] x = [4, 17]  →  x = [2, 2.75]
+      a = Nx.tensor([[2.0, 0.0], [3.0, 4.0]], backend: Nx.Vulkan.Backend)
+      b = Nx.tensor([4.0, 17.0], backend: Nx.Vulkan.Backend)
+      x = Nx.LinAlg.triangular_solve(a, b, lower: true)
+
+      Enum.zip(Nx.to_flat_list(x), [2.0, 2.75])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
+    end
+
+    @tag :needs_transpose_shader
+    test "mass-matrix-style: cholesky → solve composition" do
+      # Realistic NUTS use: M is SPD, solve M x = grad via L L^T factorization.
+      m =
+        Nx.tensor([[4.0, 2.0], [2.0, 5.0]], backend: Nx.Vulkan.Backend)
+
+      grad = Nx.tensor([6.0, 12.0], backend: Nx.Vulkan.Backend)
+
+      l = Nx.LinAlg.cholesky(m)
+      # L y = grad
+      y = Nx.LinAlg.triangular_solve(l, grad, lower: true)
+      # L^T x = y
+      lt = Nx.transpose(l)
+      x = Nx.LinAlg.triangular_solve(lt, y, lower: false)
+
+      # Verify: M x ≈ grad
+      mx = Nx.dot(m, x)
+
+      Enum.zip(Nx.to_flat_list(mx), [6.0, 12.0])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+  end
 end

@@ -667,6 +667,55 @@ defmodule Nx.Vulkan.Backend do
 
   defp decode_f32(bin), do: for <<x::float-32-native <- bin>>, do: x
 
+  # ---------------------------------------------------------------- dense linalg (v0.1.9)
+
+  # determinant, solve, cholesky, triangular_solve all host-materialize.
+  # Compute is O(d^3); the upload/download is O(d^2). For exmc's mass
+  # matrix sizes (d ≤ 50) the GPU offload would lose to the trip cost
+  # by 10-100x — host BinaryBackend is the right answer here. A future
+  # cuBLAS-equivalent path would need Vulkan KHR cooperative-matrix or
+  # a hand-rolled LU shader; deferred.
+
+  @impl true
+  def determinant(%T{type: type} = out, %T{} = a) do
+    ensure_f32!(type)
+    a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+    res = Nx.LinAlg.determinant(a_host)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def solve(%T{type: type} = out, %T{} = a, %T{} = b) do
+    ensure_f32!(type)
+    a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+    b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
+    res = Nx.LinAlg.solve(a_host, b_host)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def cholesky(%T{type: type} = out, %T{} = a) do
+    ensure_f32!(type)
+    a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+    res = Nx.LinAlg.cholesky(a_host)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def triangular_solve(%T{type: type} = out, %T{} = a, %T{} = b, opts) do
+    ensure_f32!(type)
+    a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+    b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
+    res = Nx.LinAlg.triangular_solve(a_host, b_host, opts)
+    upload_host_tensor(out, res)
+  end
+
+  defp upload_host_tensor(%T{shape: shape, type: type} = out, host_tensor) do
+    bin = Nx.to_binary(host_tensor)
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  end
+
   # ---------------------------------------------------------------- as_type (v0.1.8)
 
   # Round-trip cast between numeric element types. Same-type is a
