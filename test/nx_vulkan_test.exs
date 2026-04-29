@@ -595,4 +595,51 @@ defmodule Nx.VulkanTest do
       assert Nx.to_number(s) == 10.0
     end
   end
+
+  describe "v0.1 phase 1.5 — construction (iota, eye)" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "iota 1D" do
+      t = Nx.iota({5}, type: :f32, backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(t) == [0.0, 1.0, 2.0, 3.0, 4.0]
+    end
+
+    test "iota 2D no axis (row-major flat)" do
+      t = Nx.iota({2, 3}, type: :f32, backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(t) == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    end
+
+    test "iota 2D along axis 0" do
+      t = Nx.iota({2, 3}, axis: 0, type: :f32, backend: Nx.Vulkan.Backend)
+      # row 0 → 0, row 1 → 1
+      assert Nx.to_flat_list(t) == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    end
+
+    test "iota 2D along axis 1" do
+      t = Nx.iota({2, 3}, axis: 1, type: :f32, backend: Nx.Vulkan.Backend)
+      # col 0,1,2 → 0,1,2 in each row
+      assert Nx.to_flat_list(t) == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+    end
+
+    test "eye 3x3" do
+      t = Nx.eye({3, 3}, type: :f32, backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(t) == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    end
+
+    test "eye non-square 2x4" do
+      t = Nx.eye({2, 4}, type: :f32, backend: Nx.Vulkan.Backend)
+      assert Nx.to_flat_list(t) == [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    end
+
+    test "eye 3D batched" do
+      # Nx.eye supports leading batch dims; identity in last two axes.
+      t = Nx.eye({2, 3, 3}, type: :f32, backend: Nx.Vulkan.Backend)
+      assert Nx.shape(t) == {2, 3, 3}
+      identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      assert Nx.to_flat_list(t) == identity ++ identity
+    end
+  end
 end

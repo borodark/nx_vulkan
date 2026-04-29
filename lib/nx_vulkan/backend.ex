@@ -93,6 +93,54 @@ defmodule Nx.Vulkan.Backend do
     put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
   end
 
+  # v0.1.5: iota and eye host-materialize. Both are tiny (mass-matrix
+  # init, index broadcasts) and the GPU shader version would be a
+  # one-liner that spends more on dispatch than compute. Upload once,
+  # reuse the resulting tensor. Iota with axis=nil flattens the
+  # shape; iota with axis=k counts along that axis.
+  @impl true
+  def iota(%T{shape: shape, type: type} = out, axis, _opts) do
+    ensure_f32!(type)
+    n = byte_size_of(shape)
+    dims = Tuple.to_list(shape)
+
+    floats =
+      if axis == nil do
+        for i <- 0..(n - 1)//1, do: i * 1.0
+      else
+        for flat <- 0..(n - 1)//1 do
+          coords = unflatten(flat, dims)
+          (Enum.at(coords, axis) || 0) * 1.0
+        end
+      end
+
+    bin = floats |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  end
+
+  @impl true
+  def eye(%T{shape: shape, type: type} = out, _opts) do
+    ensure_f32!(type)
+    dims = Tuple.to_list(shape)
+    rank = length(dims)
+    n = byte_size_of(shape)
+
+    floats =
+      for flat <- 0..(n - 1)//1 do
+        coords = unflatten(flat, dims)
+        # 1.0 where the last two coords are equal, 0.0 otherwise.
+        # Rank-1 falls through to all-1.0 (degenerate but consistent).
+        last = Enum.at(coords, rank - 1)
+        prev = Enum.at(coords, rank - 2)
+        if rank >= 2 and last == prev, do: 1.0, else: if(rank < 2, do: 1.0, else: 0.0)
+      end
+
+    bin = floats |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  end
+
   # ---------------------------------------------------------------- elementwise binary
 
   for {op, _} <- %{
