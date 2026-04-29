@@ -1,93 +1,111 @@
-# mac-248 — Quick TODO: extend fused_elementwise.comp with erf + expm1
+# mac-248 — Quick TODO: extend `elementwise_binary_broadcast.comp` with compare ops
 
-**Why**: `Nx.Vulkan.fused_chain/3` is wired on the Linux side and tests
-pass for ops 0..12 (binary + most unary). Cases 13 (erf) and 14 (expm1)
-have op codes assigned but `apply_unary` in `fused_elementwise.comp`
-only switches on cases 0..12 — `case 13` and `case 14` fall to the
-default and pass the register through unchanged. Adding two case arms
-+ pulling in the helper functions from `elementwise_unary.comp` closes
-this gap so erf/expm1 can participate in fused chains.
+**Why**: spirit already ships
+`shaders/elementwise_binary_broadcast.comp` with arithmetic ops 0..6
+(add/multiply/subtract/divide/pow/max/min). We're about to wire it
+into `Nx.Vulkan.Backend.do_binary` on the Linux side, replacing the
+host-fallback path for shape-mismatched elementwise ops (the highest-
+impact gap in `LIMITATIONS.md` §2).
 
-**Scope**: 2 case arms + 2 helper function copies (or `#include`-style
-re-paste). 5 minutes. Recompile, push.
+For parity with the non-broadcast `elementwise_binary.spv` (which
+covers ops 0..9), the broadcast variant needs the same three compare
+ops added: 7=equal, 8=less, 9=greater. Without them, `Nx.equal(a, b)`
+on mismatched shapes still hits host fallback, which defeats half the
+point of wiring this shader.
+
+**Scope**: 3 case arms in the switch. 5 minutes. Recompile, push.
 
 ## Layout note
 
-Mac-248 uses the flat layout: `~/spirit/` and `~/nx_vulkan/`.
+Mac-248 uses the flat layout: `~/spirit/`.
 
 ## Steps
 
 ```
 cd ~/spirit
 git pull
-git checkout -b feat/fused-erf-expm1
+git checkout -b feat/broadcast-compare-ops
 ```
 
-Edit `shaders/fused_elementwise.comp`. Above `void main()`, add the two
-helpers (same as in `elementwise_unary.comp` — copy verbatim):
+Edit `shaders/elementwise_binary_broadcast.comp`. The switch in
+`main()` currently ends at case 6:
 
 ```glsl
-float erf_approx(float x) {
-    // Abramowitz & Stegun 7.1.26 — error ≤ 1.5e-7
-    float a1 =  0.254829592;
-    float a2 = -0.284496736;
-    float a3 =  1.421413741;
-    float a4 = -1.453152027;
-    float a5 =  1.061405429;
-    float p  =  0.3275911;
-    float s  = sign(x);
-    float ax = abs(x);
-    float t  = 1.0 / (1.0 + p * ax);
-    float y  = 1.0 - (((((a5*t + a4)*t + a3)*t + a2)*t + a1)*t) * exp(-ax * ax);
-    return s * y;
-}
-
-float expm1_approx(float x) {
-    if (abs(x) < 0.5) {
-        float x2 = x * x;
-        return x
-             + x2 * 0.5
-             + x2 * x  * (1.0 / 6.0)
-             + x2 * x2 * (1.0 / 24.0)
-             + x2 * x2 * x * (1.0 / 120.0);
-    } else {
-        return exp(x) - 1.0;
-    }
-}
+        case 6: r = min(x, y); break;
+        default: r = 0.0; break;
 ```
 
-In `apply_unary`, extend the switch with two new cases (right after
-`case 12: return r * r;`):
+Add three more cases right before `default`:
 
 ```glsl
-        case 12: return r * r;                   // square
-        case 13: return erf_approx(r);           // erf
-        case 14: return expm1_approx(r);         // expm1
-        default: return r;
+        case 6: r = min(x, y); break;
+        case 7: r = (x == y) ? 1.0 : 0.0; break;   // equal
+        case 8: r = (x  < y) ? 1.0 : 0.0; break;   // less
+        case 9: r = (x  > y) ? 1.0 : 0.0; break;   // greater
+        default: r = 0.0; break;
 ```
+
+(Same 1.0/0.0 result convention as `elementwise_binary.comp`.)
 
 Compile and push:
 
 ```
-glslangValidator -V shaders/fused_elementwise.comp -o shaders/fused_elementwise.spv
-git add shaders/fused_elementwise.comp shaders/fused_elementwise.spv
-git commit -m "fused_elementwise: extend apply_unary with cases 13=erf, 14=expm1"
-git push origin feat/fused-erf-expm1
+glslangValidator -V shaders/elementwise_binary_broadcast.comp \
+                 -o shaders/elementwise_binary_broadcast.spv
+git add shaders/elementwise_binary_broadcast.comp \
+        shaders/elementwise_binary_broadcast.spv
+git commit -m "elementwise_binary_broadcast: add compare ops 7/8/9 for parity"
+git push origin feat/broadcast-compare-ops
 ```
 
 ## Sanity check (optional)
 
-Dispatch a chain `[:multiply, :add, :erf]` with `a=[1.0]`, `b=[0.0]` —
-shorthand for erf(a*0 + 0) = erf(0) = 0. With `b=[1.0]` and chain
-`[:add, :erf]`: erf(a+1) for a=[0.0] → erf(1.0) = 0.8427.
-
-Or skip — Linux side will validate via `mix test` once the .spv lands.
+Dispatch op 7 (equal) with `a=[1.0]` shape `{1}` broadcast against
+`b=[1.0, 2.0, 3.0]` shape `{3}`. Expected output `[1.0, 0.0, 0.0]`.
+Skip if no quick dispatcher — Linux side validates after wiring.
 
 ## After your push
 
 Linux side will:
-1. Merge `feat/fused-erf-expm1` to `feature/vulkan-backend` in spirit.
-2. Update the moduledoc on `Nx.Vulkan.fused_chain/3` to drop the
-   "erf/expm1 pass through unchanged" caveat.
-3. Add tests verifying erf/expm1 in mid-chain.
-4. Ping you to `cd ~/nx_vulkan && git pull && mix test` for parity.
+
+1. Merge `feat/broadcast-compare-ops` to `feature/vulkan-backend` in
+   spirit.
+2. **Bump push_size 40 → 56** in `nx_vulkan_shim.cpp`. The broadcast
+   shader's push constant block is `{n, ndim, out_shape[4],
+   a_strides[4], b_strides[4]} = 8 + 16 + 16 + 16 = 56 bytes`. Vulkan
+   ignores any push range bytes the shader doesn't read — bumping
+   doesn't break existing pipelines.
+3. Add `nxv_apply_binary_broadcast(out, a, b, op, ndim, out_shape[4],
+   a_strides[4], b_strides[4], spv_path)` to the C++ shim.
+4. Add Rust NIF that takes `out_shape` and `a_strides`/`b_strides` as
+   `Vec<u32>` (length-4, padded), builds the push constant struct.
+5. Add `Nx.Vulkan.Native.apply_binary_broadcast/...` stub.
+6. Add `Nx.Vulkan.<op>_broadcast/3` for each arithmetic op + the
+   three new compare ops (or one polymorphic helper that takes an
+   op atom).
+7. Rewire `Nx.Vulkan.Backend.do_binary`: when shapes differ, compute
+   the broadcast strides via `Nx.Shape.broadcast/3` semantics
+   (stride=0 on a broadcast axis, native stride otherwise), dispatch
+   the broadcast shader instead of host fallback.
+8. Tests:
+   - scalar `{1}` × vector `{4}` → vector
+   - vector `{4}` × matrix `{2, 4}` → matrix (broadcast along axis 0)
+   - broadcast in last dim: `{2, 1}` × `{2, 4}`
+   - 4-D broadcast (max ndim the shader supports)
+   - shape-mismatch for unsupported broadcast (shape that doesn't
+     broadcast, or ndim > 4) → falls back to host
+9. Ping you to `cd ~/nx_vulkan && git pull && mix test`.
+
+## Why this matters
+
+The post-Phase 3 failure breakdown showed `size_mismatch` was the
+**single largest remaining bucket** at 41 failures. Most of those are
+broadcast cases (e.g., `Nx.add(matrix, vector)` for per-row offsets).
+Wiring this shader closes that whole bucket. Combined with mac-248's
+fused chain work, the full exmc test suite should drop from "hangs at
+60min" to a tractable wall time — the precondition for an honest
+Phase 4 benchmark vs EXLA-CUDA.
+
+Estimated impact on full-suite pass rate: targeted-subset 91.9% →
+full-suite ~85% after this lands (the remaining gaps are the long tail
+of unimplemented backend callbacks documented in `LIMITATIONS.md` §2).
