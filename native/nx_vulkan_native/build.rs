@@ -60,6 +60,10 @@ fn main() {
     let _ = std::fs::create_dir_all(&priv_shaders);
     let spirit_shaders = spirit.join("shaders");
     if spirit_shaders.exists() {
+        // Watch the directory itself so a new .spv appearing triggers a rerun.
+        // Per-file rerun-if-changed only fires on modifications to existing
+        // files; without the dir watch, fresh shaders need a `cargo clean`.
+        println!("cargo:rerun-if-changed={}", spirit_shaders.display());
         for entry in std::fs::read_dir(&spirit_shaders).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();

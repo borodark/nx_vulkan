@@ -368,7 +368,6 @@ defmodule Nx.VulkanTest do
       :ok
     end
 
-    @tag :needs_compare_shader
     test "equal" do
       {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 2.0])
       {:ok, b} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0, 7.0])
@@ -376,7 +375,6 @@ defmodule Nx.VulkanTest do
       assert {:ok, [1.0, 0.0, 1.0, 0.0]} = Nx.Vulkan.download_f32(c, 4)
     end
 
-    @tag :needs_compare_shader
     test "less" do
       {:ok, a} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0])
       {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 3.0])
@@ -384,7 +382,6 @@ defmodule Nx.VulkanTest do
       assert {:ok, [1.0, 0.0, 0.0]} = Nx.Vulkan.download_f32(c, 3)
     end
 
-    @tag :needs_compare_shader
     test "greater" do
       {:ok, a} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0])
       {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 3.0])
@@ -936,7 +933,6 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
     end
 
-    @tag :needs_transpose_shader
     test "mass-matrix-style: cholesky → solve composition" do
       # Realistic NUTS use: M is SPD, solve M x = grad via L L^T factorization.
       m =
