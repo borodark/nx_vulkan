@@ -87,6 +87,24 @@ unsafe extern "C" {
 // error semantics on the Elixir side.
 static INIT_STATE: Mutex<bool> = Mutex::new(false);
 
+// Global submit serializer.
+//
+// Vulkan's VkQueue is "externally synchronized" — the spec says concurrent
+// vkQueueSubmit calls from multiple host threads to the same VkQueue is
+// undefined behaviour. Spirit's compute backend uses a single global
+// queue, so any pair of NIF calls that submit (dispatch, upload, download,
+// reduce, matmul, random) must NOT run on different threads at the same
+// time.
+//
+// Without this lock, a stress test with 100 concurrent processes
+// reproducibly triggers VK_ERROR_DEVICE_LOST within seconds.
+//
+// This lock serializes the entire submit-and-wait, which costs us
+// concurrency on the GPU — but Spirit's submit_and_wait is itself
+// blocking (no async dispatch), so we lose nothing real. Async dispatch
+// + multiple queues is a v0.2 optimization.
+static SUBMIT_LOCK: Mutex<()> = Mutex::new(());
+
 // VulkanTensor owns a heap-allocated VkBuf via the C++ shim. When the
 // Elixir reference is GC'd, ResourceArc drops this struct, which
 // frees the GPU buffer through nxv_buf_free.
@@ -158,6 +176,8 @@ fn has_f64<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 fn upload_binary<'a>(env: Env<'a>, data: Binary<'a>) -> NifResult<Term<'a>> {
     let n_bytes = data.len() as u64;
 
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let handle = unsafe { nxv_buf_alloc(n_bytes) };
     if handle.is_null() {
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
@@ -190,6 +210,8 @@ fn download_binary<'a>(
 
     let mut bin = OwnedBinary::new(n_bytes as usize)
         .ok_or_else(|| Error::Term(Box::new("could not allocate Elixir binary")))?;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
 
     let rc = unsafe {
         nxv_buf_download(
@@ -236,6 +258,8 @@ fn apply_binary<'a>(
     let n_bytes = a.n_bytes;
     let n_elems = (n_bytes / 4) as u32;     // f32 elements
 
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
     if out_handle.is_null() {
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
@@ -270,6 +294,8 @@ fn apply_unary<'a>(
     let n_bytes = a.n_bytes;
     let n_elems = (n_bytes / 4) as u32;
 
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
     if out_handle.is_null() {
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
@@ -303,6 +329,8 @@ fn reduce_scalar<'a>(
     let mut out_scalar: f32 = 0.0;
     let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
 
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let rc = unsafe {
         nxv_reduce(&mut out_scalar as *mut f32, input.handle, n_elems, op, cstr.as_ptr())
     };
@@ -332,6 +360,9 @@ fn matmul<'a>(
     }
 
     let out_bytes = (m * n * 4) as u64;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
     if out_handle.is_null() {
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
@@ -364,6 +395,9 @@ fn random<'a>(
     }
 
     let n_bytes = (n * 4) as u64;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
     let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
     if out_handle.is_null() {
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));

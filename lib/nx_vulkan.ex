@@ -81,19 +81,48 @@ defmodule Nx.Vulkan do
   @doc """
   Download a GPU buffer back into a list of f32 values. `n_elements`
   must match what was uploaded.
+
+  Non-finite values (NaN, +Inf, -Inf) are returned as the atoms
+  `:nan`, `:infinity`, `:neg_infinity`. Erlang's float pattern
+  `<<x::float-32-native>>` rejects these bit patterns; we decode
+  the raw 32-bit pattern and check the IEEE 754 exponent/mantissa
+  to recover them.
   """
   def download_f32(tensor, n_elements) when is_integer(n_elements) and n_elements >= 0 do
     case Nx.Vulkan.Native.download_binary(tensor, n_elements * 4) do
-      {:ok, bin} ->
-        floats =
-          for <<x::float-32-native <- bin>> do
-            x
-          end
+      {:ok, bin} -> {:ok, decode_f32_list(bin)}
+      err -> err
+    end
+  end
 
-        {:ok, floats}
+  defp decode_f32_list(<<>>), do: []
 
-      err ->
-        err
+  defp decode_f32_list(<<bits::32-native, rest::binary>>) do
+    [decode_f32(bits) | decode_f32_list(rest)]
+  end
+
+  # IEEE 754 binary32: 1 sign bit, 8 exponent, 23 mantissa.
+  # We only need the exponent==255 branch for special values; finite
+  # values are pulled directly via the float pattern.
+  defp decode_f32(bits) do
+    <<f::float-32-native>> = <<bits::32-native>>
+    f
+  rescue
+    MatchError -> decode_f32_special(bits)
+  end
+
+  # Big-endian view for the spec-defined breakdown — the field
+  # extraction is byte-order agnostic when we operate on the integer.
+  defp decode_f32_special(bits) do
+    sign = Bitwise.band(Bitwise.bsr(bits, 31), 1)
+    exponent = Bitwise.band(Bitwise.bsr(bits, 23), 0xFF)
+    mantissa = Bitwise.band(bits, 0x7FFFFF)
+
+    cond do
+      exponent == 255 and mantissa == 0 and sign == 0 -> :infinity
+      exponent == 255 and mantissa == 0 and sign == 1 -> :neg_infinity
+      exponent == 255 -> :nan
+      true -> raise MatchError, term: bits
     end
   end
 

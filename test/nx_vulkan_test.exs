@@ -299,4 +299,66 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(bin_t) == [1.0, 2.0, 3.0]
     end
   end
+
+  describe "stress findings" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "20 concurrent processes don't race the queue (mutex)" do
+      inputs = Enum.map(1..256, fn i -> i / 1.0 end)
+
+      tasks =
+        for _p <- 1..20 do
+          Task.async(fn ->
+            for _ <- 1..5 do
+              {:ok, a} = Nx.Vulkan.upload_f32(inputs)
+              {:ok, b} = Nx.Vulkan.upload_f32(inputs)
+              {:ok, c} = Nx.Vulkan.add(a, b)
+              {:ok, [head | _]} = Nx.Vulkan.download_f32(c, 256)
+              head
+            end
+          end)
+        end
+
+      results = Enum.map(tasks, &Task.await(&1, 60_000))
+
+      # Every process should have computed 1.0 + 1.0 = 2.0 each iter
+      Enum.each(results, fn list ->
+        Enum.each(list, fn h -> assert h == 2.0 end)
+      end)
+    end
+
+    test "divide-by-zero returns :infinity (not empty list)" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, -1.0, 0.0])
+      {:ok, z} = Nx.Vulkan.upload_f32([0.0, 0.0, 0.0])
+      {:ok, dz} = Nx.Vulkan.divide(a, z)
+      assert {:ok, [:infinity, :neg_infinity, :nan]} = Nx.Vulkan.download_f32(dz, 3)
+    end
+
+    test "log of negative returns :nan" do
+      {:ok, n} = Nx.Vulkan.upload_f32([-1.0, -2.0])
+      {:ok, l} = Nx.Vulkan.log(n)
+      assert {:ok, [:nan, :nan]} = Nx.Vulkan.download_f32(l, 2)
+    end
+
+    test "sqrt of negative returns :nan" do
+      {:ok, n} = Nx.Vulkan.upload_f32([-1.0, -4.0])
+      {:ok, s} = Nx.Vulkan.sqrt(n)
+      assert {:ok, [:nan, :nan]} = Nx.Vulkan.download_f32(s, 2)
+    end
+
+    test "5000 alloc/free cycles don't leak" do
+      # If ResourceArc::Drop is broken, this will OOM the GPU.
+      for _ <- 1..5_000 do
+        {:ok, _t} = Nx.Vulkan.upload_f32([42.0])
+      end
+      :erlang.garbage_collect()
+
+      # Verify the device is still alive after 5000 allocs.
+      {:ok, t} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      assert {:ok, [1.0, 2.0, 3.0]} = Nx.Vulkan.download_f32(t, 3)
+    end
+  end
 end
