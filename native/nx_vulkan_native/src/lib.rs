@@ -251,7 +251,10 @@ fn apply_binary<'a>(
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
     }
 
-    if op > 6 {
+    // Op range bumped 6→9 in v0.1 phase 1.1 — equal/less/greater
+    // added to elementwise_binary.spv. Update spirit's .comp + .spv
+    // when adding more.
+    if op > 9 {
         return Ok((atoms::error(), atoms::bad_op()).encode(env));
     }
 
