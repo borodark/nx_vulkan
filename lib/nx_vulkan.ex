@@ -188,7 +188,9 @@ defmodule Nx.Vulkan do
     floor: 9,
     sign: 10,
     reciprocal: 11,
-    square: 12
+    square: 12,
+    erf: 13,
+    expm1: 14
   }
 
   for {name, op_const} <- @ops_unary do

@@ -196,7 +196,9 @@ defmodule Nx.Vulkan.Backend do
     :tanh,
     :ceil,
     :floor,
-    :sign
+    :sign,
+    :erf,
+    :expm1
   ]
 
   for op <- @unary_ops do

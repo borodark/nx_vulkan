@@ -689,4 +689,63 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(out) == [5.0, 6.0, 1.0, 2.0, 3.0, 4.0]
     end
   end
+
+  describe "v0.1 phase 1.7 — transcendentals (erf, expm1)" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "erf direct via Nx.Vulkan API" do
+      {:ok, t} = Nx.Vulkan.upload_f32([-2.0, -1.0, 0.0, 1.0, 2.0])
+      {:ok, r} = Nx.Vulkan.erf(t)
+      {:ok, vals} = Nx.Vulkan.download_f32(r, 5)
+
+      expected = [-0.9953, -0.8427, 0.0, 0.8427, 0.9953]
+
+      Enum.zip(vals, expected)
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.5e-4 end)
+    end
+
+    test "expm1 direct via Nx.Vulkan API" do
+      {:ok, t} = Nx.Vulkan.upload_f32([-1.0, -0.1, 0.0, 0.1, 1.0])
+      {:ok, r} = Nx.Vulkan.expm1(t)
+      {:ok, vals} = Nx.Vulkan.download_f32(r, 5)
+
+      expected = [-0.6321, -0.0952, 0.0, 0.1052, 1.7183]
+
+      Enum.zip(vals, expected)
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+
+    test "erf via Nx.erf/1 backend dispatch" do
+      t = Nx.tensor([-1.0, 0.0, 1.0], backend: Nx.Vulkan.Backend)
+      out = Nx.erf(t)
+      vals = Nx.to_flat_list(out)
+
+      Enum.zip(vals, [-0.8427, 0.0, 0.8427])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.5e-4 end)
+    end
+
+    test "expm1 via Nx.expm1/1 backend dispatch" do
+      t = Nx.tensor([-0.5, 0.0, 0.5], backend: Nx.Vulkan.Backend)
+      out = Nx.expm1(t)
+      vals = Nx.to_flat_list(out)
+
+      # Boundary: Taylor for |x|<0.5, exp(x)-1 at |x|=0.5
+      Enum.zip(vals, [-0.3935, 0.0, 0.6487])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+
+    test "expm1 small-x precision (Taylor branch)" do
+      # exp(0.001) - 1 = 1.0005e-3 — direct exp(x)-1 cancellation loses
+      # ~5 sig figs in f32; Taylor recovers the missing precision.
+      {:ok, t} = Nx.Vulkan.upload_f32([0.001, -0.001])
+      {:ok, r} = Nx.Vulkan.expm1(t)
+      {:ok, [a, b]} = Nx.Vulkan.download_f32(r, 2)
+
+      assert_in_delta a, 1.0005e-3, 1.0e-7
+      assert_in_delta b, -0.99950e-3, 1.0e-7
+    end
+  end
 end

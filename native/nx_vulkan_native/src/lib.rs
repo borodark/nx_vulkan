@@ -298,7 +298,7 @@ fn apply_unary<'a>(
     op: u32,
     spv_path: String,
 ) -> NifResult<Term<'a>> {
-    if op > 12 {
+    if op > 14 {
         return Ok((atoms::error(), atoms::bad_op()).encode(env));
     }
 
