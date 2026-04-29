@@ -527,4 +527,72 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(out) == [1.0, 2.0, 3.0, 4.0, 97.0, 98.0, 7.0, 99.0, 100.0]
     end
   end
+
+  describe "v0.1 phase 1.4 — per-axis reductions" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "sum over axis 0 of 2D" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
+      s = Nx.sum(t, axes: [0])  # column sums
+      assert Nx.shape(s) == {3}
+      assert Nx.to_flat_list(s) == [5.0, 7.0, 9.0]
+    end
+
+    test "sum over axis 1 of 2D" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
+      s = Nx.sum(t, axes: [1])  # row sums
+      assert Nx.shape(s) == {2}
+      assert Nx.to_flat_list(s) == [6.0, 15.0]
+    end
+
+    test "sum with keep_axes" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
+      s = Nx.sum(t, axes: [1], keep_axes: true)
+      assert Nx.shape(s) == {2, 1}
+      assert Nx.to_flat_list(s) == [6.0, 15.0]
+    end
+
+    test "reduce_max over axis 1 of 2D" do
+      t = Nx.tensor([[1.0, 5.0, 2.0], [4.0, 3.0, 6.0]], backend: Nx.Vulkan.Backend)
+      s = Nx.reduce_max(t, axes: [1])
+      assert Nx.shape(s) == {2}
+      assert Nx.to_flat_list(s) == [5.0, 6.0]
+    end
+
+    test "reduce_min over axis 0 of 3D" do
+      t =
+        Nx.tensor(
+          [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 0.5], [7.0, 8.0]]],
+          backend: Nx.Vulkan.Backend
+        )
+
+      s = Nx.reduce_min(t, axes: [0])
+      assert Nx.shape(s) == {2, 2}
+      assert Nx.to_flat_list(s) == [1.0, 0.5, 3.0, 4.0]
+    end
+
+    test "sum over multiple axes (0 and 2 of 3D)" do
+      # 2x2x2 — reduce out axes 0 and 2, keep axis 1.
+      t =
+        Nx.tensor(
+          [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]],
+          backend: Nx.Vulkan.Backend
+        )
+
+      s = Nx.sum(t, axes: [0, 2])
+      assert Nx.shape(s) == {2}
+      # axis 1 = 0: [1,2,5,6] → 14; axis 1 = 1: [3,4,7,8] → 22
+      assert Nx.to_flat_list(s) == [14.0, 22.0]
+    end
+
+    test "full-axis sum still routes through GPU" do
+      t = Nx.tensor([[1.0, 2.0], [3.0, 4.0]], backend: Nx.Vulkan.Backend)
+      s = Nx.sum(t)
+      assert Nx.shape(s) == {}
+      assert Nx.to_number(s) == 10.0
+    end
+  end
 end

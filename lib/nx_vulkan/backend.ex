@@ -32,8 +32,8 @@ defmodule Nx.Vulkan.Backend do
       constant but the type-system wiring takes more work; deferred.
     - **No autograd.** `defn grad` won't work end-to-end. The forward
       path is what this backend proves.
-    - **All-axis reductions only.** Per-axis reductions are a
-      separate iteration.
+    - **Per-axis reductions are host-materialized.** Full-axis
+      reductions hit the GPU; per-axis go through download/walk/upload.
     - **No broadcasting in this backend.** Broadcasting happens in
       Nx's frontend before dispatch; we receive already-broadcast
       tensors. (Will swap to the broadcast shader later.)
@@ -158,29 +158,90 @@ defmodule Nx.Vulkan.Backend do
 
   # ---------------------------------------------------------------- reductions
 
+  # v0.1.4: full-axis reductions hit the GPU scalar path; per-axis
+  # reductions host-materialize. The shader version of partial-axis
+  # reduce is a v0.2 item — for the autograd workloads we're chasing,
+  # the per-axis reductions are typically over batch dims of modest
+  # size, and the download/upload is the dominant cost anyway.
   @impl true
-  def sum(%T{type: type} = out, %T{} = t, _opts) do
-    ensure_f32!(type)
-    t_data = to_vulkan!(t)
-    {:ok, scalar} = Nx.Vulkan.sum(t_data.ref)
-    scalar_to_tensor(out, scalar)
-  end
+  def sum(out, t, opts), do: do_reduce(out, t, opts, :sum)
 
   @impl true
-  def reduce_max(%T{type: type} = out, %T{} = t, _opts) do
-    ensure_f32!(type)
-    t_data = to_vulkan!(t)
-    {:ok, scalar} = Nx.Vulkan.reduce_max(t_data.ref)
-    scalar_to_tensor(out, scalar)
-  end
+  def reduce_max(out, t, opts), do: do_reduce(out, t, opts, :reduce_max)
 
   @impl true
-  def reduce_min(%T{type: type} = out, %T{} = t, _opts) do
+  def reduce_min(out, t, opts), do: do_reduce(out, t, opts, :reduce_min)
+
+  defp do_reduce(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = t, opts, op) do
     ensure_f32!(type)
-    t_data = to_vulkan!(t)
-    {:ok, scalar} = Nx.Vulkan.reduce_min(t_data.ref)
-    scalar_to_tensor(out, scalar)
+    rank = tuple_size(in_shape)
+    axes = opts[:axes] || Enum.to_list(0..(rank - 1)//1)
+
+    if length(axes) == rank do
+      t_data = to_vulkan!(t)
+      {:ok, scalar} = gpu_full_reduce(op, t_data.ref)
+      scalar_to_tensor(out, scalar)
+    else
+      axis_reduce(out, t, axes, opts[:keep_axes] == true, op)
+    end
   end
+
+  defp gpu_full_reduce(:sum, ref), do: Nx.Vulkan.sum(ref)
+  defp gpu_full_reduce(:reduce_max, ref), do: Nx.Vulkan.reduce_max(ref)
+  defp gpu_full_reduce(:reduce_min, ref), do: Nx.Vulkan.reduce_min(ref)
+
+  defp axis_reduce(%T{shape: out_shape, type: type} = out,
+                   %T{shape: in_shape} = tensor, axes, keep_axes, op) do
+    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+    input = for <<x::float-32-native <- in_bin>>, do: x
+
+    in_dims = Tuple.to_list(in_shape)
+    out_dims = Tuple.to_list(out_shape)
+    rank = length(in_dims)
+
+    reduced_sizes = Enum.map(axes, &Enum.at(in_dims, &1))
+    n_reduce = Enum.reduce(reduced_sizes, 1, &*/2)
+
+    reduce_set = MapSet.new(axes)
+    kept_axes = Enum.reject(0..(rank - 1)//1, &MapSet.member?(reduce_set, &1))
+
+    n_out = byte_size_of(out_shape)
+
+    output =
+      for flat_out <- 0..(n_out - 1) do
+        out_coords = unflatten(flat_out, out_dims)
+
+        kept_coord_map =
+          if keep_axes do
+            for k <- kept_axes, into: %{}, do: {k, Enum.at(out_coords, k)}
+          else
+            Enum.zip(kept_axes, out_coords) |> Map.new()
+          end
+
+        values =
+          for red_flat <- 0..(n_reduce - 1) do
+            red_coords = unflatten(red_flat, reduced_sizes)
+            red_map = Enum.zip(axes, red_coords) |> Map.new()
+
+            in_coords =
+              for i <- 0..(rank - 1)//1 do
+                Map.get(kept_coord_map, i) || Map.fetch!(red_map, i)
+              end
+
+            Enum.at(input, flatten(in_coords, in_dims))
+          end
+
+        reduce_values(op, values)
+      end
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  defp reduce_values(:sum, values), do: Enum.sum(values)
+  defp reduce_values(:reduce_max, values), do: Enum.max(values)
+  defp reduce_values(:reduce_min, values), do: Enum.min(values)
 
   defp scalar_to_tensor(%T{shape: shape, type: type} = out, scalar) do
     bin = :binary.copy(<<scalar::float-32-native>>, byte_size_of(shape))
