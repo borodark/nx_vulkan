@@ -1,111 +1,157 @@
-# mac-248 — Quick TODO: extend `elementwise_binary_broadcast.comp` with compare ops
+# mac-248 — Run exmc test suite under `:vulkan`
 
-**Why**: spirit already ships
-`shaders/elementwise_binary_broadcast.comp` with arithmetic ops 0..6
-(add/multiply/subtract/divide/pow/max/min). We're about to wire it
-into `Nx.Vulkan.Backend.do_binary` on the Linux side, replacing the
-host-fallback path for shape-mismatched elementwise ops (the highest-
-impact gap in `LIMITATIONS.md` §2).
+**Goal**: cross-host validation of the EXMC port. Linux already has
+117/0 on `nx_vulkan` and is timing the full `exmc` suite under
+`EXMC_COMPILER=vulkan`. Get the same numbers on FreeBSD GT 750M.
 
-For parity with the non-broadcast `elementwise_binary.spv` (which
-covers ops 0..9), the broadcast variant needs the same three compare
-ops added: 7=equal, 8=less, 9=greater. Without them, `Nx.equal(a, b)`
-on mismatched shapes still hits host fallback, which defeats half the
-point of wiring this shader.
+Two branches contain everything needed:
 
-**Scope**: 3 case arms in the switch. 5 minutes. Recompile, push.
+| Repo | Branch | Contains |
+|------|--------|----------|
+| `nx_vulkan` | `feat/exmc-port-phase3` | Phase 2 + Phase 3 backfill + Path A fused_chain + Path A.2 macro + broadcast wiring |
+| `phd` (parent of exmc) | `feat/exmc-vulkan-port` | Phase 2 wiring in `Exmc.JIT`, `EXMC_COMPILER` env, `mix.exs` nx_vulkan dep |
+| `spirit` | `feature/vulkan-backend` | All shaders (broadcast w/compare ops, fused_elementwise w/erf/expm1, transpose, reduce_axis, cast, matmul-tuning variants) |
 
-## Layout note
+## Step 1 — Sync the three repos
 
-Mac-248 uses the flat layout: `~/spirit/`.
-
-## Steps
+Mac-248 layout: `~/spirit/`, `~/nx_vulkan/`, and exmc lives somewhere
+under your phd checkout — the `phd` repo has it as `exmc/`. Adjust
+paths if your layout differs.
 
 ```
 cd ~/spirit
+git checkout feature/vulkan-backend
 git pull
-git checkout -b feat/broadcast-compare-ops
+
+cd ~/nx_vulkan
+git fetch
+git checkout feat/exmc-port-phase3
 ```
 
-Edit `shaders/elementwise_binary_broadcast.comp`. The switch in
-`main()` currently ends at case 6:
-
-```glsl
-        case 6: r = min(x, y); break;
-        default: r = 0.0; break;
-```
-
-Add three more cases right before `default`:
-
-```glsl
-        case 6: r = min(x, y); break;
-        case 7: r = (x == y) ? 1.0 : 0.0; break;   // equal
-        case 8: r = (x  < y) ? 1.0 : 0.0; break;   // less
-        case 9: r = (x  > y) ? 1.0 : 0.0; break;   // greater
-        default: r = 0.0; break;
-```
-
-(Same 1.0/0.0 result convention as `elementwise_binary.comp`.)
-
-Compile and push:
+For exmc: if you don't already have the `phd` repo cloned, clone it
+where convenient (e.g., `~/phd`). exmc is at `phd/exmc/`.
 
 ```
-glslangValidator -V shaders/elementwise_binary_broadcast.comp \
-                 -o shaders/elementwise_binary_broadcast.spv
-git add shaders/elementwise_binary_broadcast.comp \
-        shaders/elementwise_binary_broadcast.spv
-git commit -m "elementwise_binary_broadcast: add compare ops 7/8/9 for parity"
-git push origin feat/broadcast-compare-ops
+# If not yet cloned:
+git clone <phd-repo-url> ~/phd
+
+cd ~/phd
+git fetch
+git checkout feat/exmc-vulkan-port
 ```
 
-## Sanity check (optional)
+## Step 2 — Verify nx_vulkan tests pass first
 
-Dispatch op 7 (equal) with `a=[1.0]` shape `{1}` broadcast against
-`b=[1.0, 2.0, 3.0]` shape `{3}`. Expected output `[1.0, 0.0, 0.0]`.
-Skip if no quick dispatcher — Linux side validates after wiring.
+Three-host parity baseline before running anything bigger:
 
-## After your push
+```
+cd ~/nx_vulkan
+mix test
+```
+
+Expected: **117 tests, 0 failures**. If this fails, stop here and
+diagnose — the broadcast wiring or Path A.2 macro probably needs a
+fresh `mix compile --force` after the branch switch.
+
+## Step 3 — Set the NX_VULKAN_PATH env var
+
+`exmc/mix.exs` references `nx_vulkan` as an optional path dep, with
+`NX_VULKAN_PATH` env override. Set it once per shell:
+
+```
+export NX_VULKAN_PATH=$HOME/nx_vulkan
+```
+
+Or add to your `.profile` / `.shrc`.
+
+## Step 4 — Resolve exmc deps
+
+```
+cd ~/phd/exmc        # or wherever exmc lives in your layout
+mix deps.get
+```
+
+This should pull in `nx_vulkan` from the path dep. If it complains
+about `probnik_qr` or other internal deps, you may need to
+`PROBNIK_QR_PATH=...` similar to NX_VULKAN_PATH.
+
+## Step 5 — Run the targeted subset first (sanity)
+
+```
+cd ~/phd/exmc
+EXMC_COMPILER=vulkan mix test test/exmc_test.exs test/dist_test.exs \
+                              test/diagnostics_test.exs test/compiler_test.exs
+```
+
+Expected on Linux: **63 tests + 11 doctests, ~6 failures = 91.9%
+pass.** If your number is significantly different (>10pp), there's a
+host-specific issue worth flagging before the full suite.
+
+## Step 6 — Run the full suite
+
+```
+cd ~/phd/exmc
+EXMC_COMPILER=vulkan mix test 2>&1 | tee ~/exmc_vulkan_full.log
+```
+
+**Expectations**:
+
+- Pre-broadcast wiring, the Linux full suite **hung at 60+ minutes**
+  (the host-fallback round-trip on shape-mismatched ops dominated).
+- Post-broadcast wiring, much fewer host fallbacks. The suite should
+  complete in a tractable time — Linux is currently running this and
+  we'll have a number to compare against. Likely 10-30 minutes on a
+  fast host; potentially longer on the GT 750M.
+- Pass rate target: ~85% (the EXMC_PORT_PLAN projected 80%+ once
+  Phase 1 + 2 + Phase 3 broadcast landed).
+
+If the suite hangs past 60 minutes again, kill it (`Ctrl-C`) and
+report the test name it was stuck on. That points to whichever
+operator is still hitting host-fallback at scale.
+
+## Step 7 — Report numbers
+
+Once `mix test` finishes, send back:
+
+1. The summary line: `N tests, M failures, K excluded`.
+2. Wall time from `Finished in X seconds`.
+3. The `~/exmc_vulkan_full.log` file (or just the failure
+   classifications via `grep -E "^     \*\* "
+   ~/exmc_vulkan_full.log | sort | uniq -c | sort -rn | head -10`).
+
+Three-host comparison:
+
+| Host | OS | GPU | nx_vulkan | exmc full | Wall time |
+|------|-----|-----|---|---|---|
+| Linux | Linux 6.8 | RTX 3060 Ti | 117/0 | TBD (running now) | TBD |
+| mac-248 | FreeBSD 15.0 | GT 750M | TBD | TBD | TBD |
+| mac-247 | FreeBSD 15.0 | GT 650M | TBD | (skip — same results expected) | — |
+
+## Notes
+
+- The `propcheck` property tests inside exmc's test suite can take a
+  long time per test under Vulkan's per-op dispatch model. If a
+  property test specifically times out, it's not necessarily wrong —
+  it's the same number of statistical iterations running through the
+  GPU instead of CPU.
+- If you see `:size_mismatch` failures, that means a broadcast case
+  the shader doesn't yet handle (rank > 4, or non-broadcastable
+  shapes). Capture the test name; the missing case is documented in
+  `LIMITATIONS.md` §2.
+- If the BEAM crashes (segfault, DEVICE_LOST), that's a different
+  class of bug worth reporting immediately — the SUBMIT_LOCK in
+  Rust is meant to prevent it but mass concurrent dispatch under
+  property tests is a stress case we haven't fully exercised.
+
+## After your run completes
 
 Linux side will:
 
-1. Merge `feat/broadcast-compare-ops` to `feature/vulkan-backend` in
-   spirit.
-2. **Bump push_size 40 → 56** in `nx_vulkan_shim.cpp`. The broadcast
-   shader's push constant block is `{n, ndim, out_shape[4],
-   a_strides[4], b_strides[4]} = 8 + 16 + 16 + 16 = 56 bytes`. Vulkan
-   ignores any push range bytes the shader doesn't read — bumping
-   doesn't break existing pipelines.
-3. Add `nxv_apply_binary_broadcast(out, a, b, op, ndim, out_shape[4],
-   a_strides[4], b_strides[4], spv_path)` to the C++ shim.
-4. Add Rust NIF that takes `out_shape` and `a_strides`/`b_strides` as
-   `Vec<u32>` (length-4, padded), builds the push constant struct.
-5. Add `Nx.Vulkan.Native.apply_binary_broadcast/...` stub.
-6. Add `Nx.Vulkan.<op>_broadcast/3` for each arithmetic op + the
-   three new compare ops (or one polymorphic helper that takes an
-   op atom).
-7. Rewire `Nx.Vulkan.Backend.do_binary`: when shapes differ, compute
-   the broadcast strides via `Nx.Shape.broadcast/3` semantics
-   (stride=0 on a broadcast axis, native stride otherwise), dispatch
-   the broadcast shader instead of host fallback.
-8. Tests:
-   - scalar `{1}` × vector `{4}` → vector
-   - vector `{4}` × matrix `{2, 4}` → matrix (broadcast along axis 0)
-   - broadcast in last dim: `{2, 1}` × `{2, 4}`
-   - 4-D broadcast (max ndim the shader supports)
-   - shape-mismatch for unsupported broadcast (shape that doesn't
-     broadcast, or ndim > 4) → falls back to host
-9. Ping you to `cd ~/nx_vulkan && git pull && mix test`.
-
-## Why this matters
-
-The post-Phase 3 failure breakdown showed `size_mismatch` was the
-**single largest remaining bucket** at 41 failures. Most of those are
-broadcast cases (e.g., `Nx.add(matrix, vector)` for per-row offsets).
-Wiring this shader closes that whole bucket. Combined with mac-248's
-fused chain work, the full exmc test suite should drop from "hangs at
-60min" to a tractable wall time — the precondition for an honest
-Phase 4 benchmark vs EXLA-CUDA.
-
-Estimated impact on full-suite pass rate: targeted-subset 91.9% →
-full-suite ~85% after this lands (the remaining gaps are the long tail
-of unimplemented backend callbacks documented in `LIMITATIONS.md` §2).
+1. Compare Linux vs mac-248 numbers (looking for cross-host
+   regressions, not just absolute pass rate).
+2. If both finish: update `LIMITATIONS.md` §6 with real numbers.
+3. If mac-248 surfaces failures Linux didn't, triage the first one
+   together.
+4. Decide whether the next priority is matmul-variant selection
+   (route through tiled-32 or tiled-16x2 vs naive matmul) or the
+   long tail of remaining missing-op callbacks.
