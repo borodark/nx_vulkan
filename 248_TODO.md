@@ -6,7 +6,7 @@ compile, push.
 ## Steps
 
 ```
-cd ~/projects/learn_erl/spirit
+cd ~/spirit
 git pull
 git checkout -b feat/phase-1.7-shaders
 ```
@@ -69,12 +69,17 @@ git push origin feat/phase-1.7-shaders
 Skip if no quick dispatcher — Linux side will validate via `mix test` once the
 `.spv` lands.
 
+## Layout note
+
+Mac-248 uses the flat layout: `~/spirit/` and `~/nx_vulkan/` (no
+`projects/learn_erl/` prefix). All paths in this TODO assume that.
+
 ## After your push
 
 Linux side will:
 1. Merge `feat/phase-1.7-shaders` to `main` in `spirit`.
-2. Bump op cap in `nx_vulkan/native/nx_vulkan_native/src/lib.rs` from 12 → 14.
+2. Bump op cap in `~/nx_vulkan/native/nx_vulkan_native/src/lib.rs` from 12 → 14.
 3. Wire `erf`/`expm1` through `Nx.Vulkan` (`@ops_unary` map) and
    `Nx.Vulkan.Backend` (callbacks).
 4. Add tests; commit Phase 1.7 nx_vulkan side.
-5. Ping you to `git pull` nx_vulkan and re-run `mix test` for three-host parity.
+5. Ping you to `cd ~/nx_vulkan && git pull && mix test` for three-host parity.
