@@ -87,6 +87,23 @@ unsafe extern "C" {
         n: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_cast(
+        out: *mut c_void,
+        a: *mut c_void,
+        n: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_reduce_axis(
+        out: *mut c_void,
+        a: *mut c_void,
+        outer: u32,
+        reduce_size: u32,
+        inner: u32,
+        op: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -457,6 +474,75 @@ fn transpose<'a>(
     }
 
     let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Cast f32↔f64. The .spv file determines direction; output buffer
+/// width derives from the destination type. n is element count.
+#[rustler::nif]
+fn cast<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    n: u32,
+    out_elem_bytes: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let out_bytes = (n as u64) * (out_elem_bytes as u64);
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_cast(out_handle, a.handle, n, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Per-axis reduction over a virtual 3-D layout (outer, reduce, inner).
+/// Output is (outer, inner) row-major, n_out = outer * inner * 4 bytes (f32).
+#[rustler::nif]
+fn reduce_axis<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    outer: u32,
+    reduce_size: u32,
+    inner: u32,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 2 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_out = (outer as u64) * (inner as u64);
+    let out_bytes = n_out * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_reduce_axis(out_handle, a.handle, outer, reduce_size, inner, op, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 

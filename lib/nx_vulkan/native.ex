@@ -48,4 +48,11 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def transpose(_a, _m, _n, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def cast(_a, _n, _out_elem_bytes, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def reduce_axis(_a, _outer, _reduce, _inner, _op, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

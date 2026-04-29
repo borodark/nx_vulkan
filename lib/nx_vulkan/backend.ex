@@ -234,13 +234,30 @@ defmodule Nx.Vulkan.Backend do
     ensure_f32!(type)
     rank = tuple_size(in_shape)
     axes = opts[:axes] || Enum.to_list(0..(rank - 1)//1)
+    keep_axes = opts[:keep_axes] == true
 
-    if length(axes) == rank do
-      t_data = to_vulkan!(t)
-      {:ok, scalar} = gpu_full_reduce(op, t_data.ref)
-      scalar_to_tensor(out, scalar)
-    else
-      axis_reduce(out, t, axes, opts[:keep_axes] == true, op)
+    cond do
+      length(axes) == rank ->
+        t_data = to_vulkan!(t)
+        {:ok, scalar} = gpu_full_reduce(op, t_data.ref)
+        scalar_to_tensor(out, scalar)
+
+      length(axes) == 1 ->
+        # Single-axis reduction → GPU shader. Compute (outer, reduce, inner).
+        [axis] = axes
+        in_dims = Tuple.to_list(in_shape)
+        outer = in_dims |> Enum.take(axis) |> Enum.reduce(1, &*/2)
+        reduce_size = Enum.at(in_dims, axis)
+        inner = in_dims |> Enum.drop(axis + 1) |> Enum.reduce(1, &*/2)
+
+        t_data = to_vulkan!(t)
+        op_const = case op do :sum -> 0; :reduce_max -> 1; :reduce_min -> 2 end
+        {:ok, ref} = Nx.Vulkan.reduce_axis(t_data.ref, outer, reduce_size, inner, op_const)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+
+      true ->
+        # Multi-axis reduction → host-materialize for v0.1.
+        axis_reduce(out, t, axes, keep_axes, op)
     end
   end
 
@@ -660,17 +677,30 @@ defmodule Nx.Vulkan.Backend do
   # matrix accumulate in f64 and convert back to f32 before per-step ops.
   @impl true
   def as_type(%T{type: dst_type, shape: shape} = out, %T{type: src_type, data: %__MODULE__{ref: ref}} = tensor) do
-    if src_type == dst_type do
-      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: dst_type})
-    else
-      n_bytes_src = byte_size_of(shape) * element_bytes(src_type)
-      {:ok, src_bin} = Nx.Vulkan.Native.download_binary(ref, n_bytes_src)
+    n = byte_size_of(shape)
 
-      values = decode_typed(src_bin, src_type)
-      dst_bin = encode_typed(values, dst_type)
+    cond do
+      src_type == dst_type ->
+        put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: dst_type})
 
-      {:ok, new_ref} = Nx.Vulkan.Native.upload_binary(dst_bin)
-      put_in(out.data, %__MODULE__{ref: new_ref, shape: shape, type: dst_type})
+      src_type == {:f, 32} and dst_type == {:f, 64} ->
+        {:ok, new_ref} = Nx.Vulkan.cast_f32_to_f64(ref, n)
+        put_in(out.data, %__MODULE__{ref: new_ref, shape: shape, type: dst_type})
+
+      src_type == {:f, 64} and dst_type == {:f, 32} ->
+        {:ok, new_ref} = Nx.Vulkan.cast_f64_to_f32(ref, n)
+        put_in(out.data, %__MODULE__{ref: new_ref, shape: shape, type: dst_type})
+
+      true ->
+        # Integer ↔ float casts host-materialize.
+        n_bytes_src = n * element_bytes(src_type)
+        {:ok, src_bin} = Nx.Vulkan.Native.download_binary(ref, n_bytes_src)
+
+        values = decode_typed(src_bin, src_type)
+        dst_bin = encode_typed(values, dst_type)
+
+        {:ok, new_ref} = Nx.Vulkan.Native.upload_binary(dst_bin)
+        put_in(out.data, %__MODULE__{ref: new_ref, shape: shape, type: dst_type})
     end
   end
 

@@ -314,4 +314,31 @@ defmodule Nx.Vulkan do
   def transpose_2d(a, m, n) do
     Nx.Vulkan.Native.transpose(a, m, n, shader_path("transpose.spv"))
   end
+
+  # ------------------------------------------------------------------
+  # v0.1 phase 1.8 GPU path — f32↔f64 cast
+  # ------------------------------------------------------------------
+
+  @doc "Cast f32 tensor → f64 (allocates 8-byte output)."
+  def cast_f32_to_f64(a, n) do
+    Nx.Vulkan.Native.cast(a, n, 8, shader_path("cast_f32_to_f64.spv"))
+  end
+
+  @doc "Cast f64 tensor → f32 (allocates 4-byte output)."
+  def cast_f64_to_f32(a, n) do
+    Nx.Vulkan.Native.cast(a, n, 4, shader_path("cast_f64_to_f32.spv"))
+  end
+
+  # ------------------------------------------------------------------
+  # v0.1 phase 1.4 GPU path — per-axis reduce
+  # ------------------------------------------------------------------
+
+  @doc """
+  Per-axis reduction over a virtual 3-D layout (outer, reduce, inner).
+  `op`: 0=sum, 1=max, 2=min. Output is (outer * inner) f32.
+  """
+  def reduce_axis(a, outer, reduce_size, inner, op) do
+    Nx.Vulkan.Native.reduce_axis(a, outer, reduce_size, inner, op,
+                                  shader_path("reduce_axis.spv"))
+  end
 end

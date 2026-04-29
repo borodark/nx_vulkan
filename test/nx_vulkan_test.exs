@@ -818,4 +818,65 @@ defmodule Nx.VulkanTest do
       assert collapsed == 1.0
     end
   end
+
+  describe "v0.1 phase 1.8/1.4 — GPU shader paths" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "cast f32 → f64 direct API (GPU shader)" do
+      {:ok, t} = Nx.Vulkan.upload_f32([1.5, 2.5, 3.5, 4.5])
+      {:ok, t64_ref} = Nx.Vulkan.cast_f32_to_f64(t, 4)
+      {:ok, bin} = Nx.Vulkan.Native.download_binary(t64_ref, 4 * 8)
+
+      vals = for <<x::float-64-native <- bin>>, do: x
+      assert vals == [1.5, 2.5, 3.5, 4.5]
+    end
+
+    test "cast f64 → f32 direct API (GPU shader)" do
+      bin = <<1.5::float-64-native, 2.5::float-64-native, 3.5::float-64-native>>
+      {:ok, t64} = Nx.Vulkan.upload_binary(bin)
+      {:ok, t32_ref} = Nx.Vulkan.cast_f64_to_f32(t64, 3)
+      {:ok, out_bin} = Nx.Vulkan.Native.download_binary(t32_ref, 3 * 4)
+
+      vals = for <<x::float-32-native <- out_bin>>, do: x
+      assert vals == [1.5, 2.5, 3.5]
+    end
+
+    test "reduce_axis sum direct API (GPU shader)" do
+      # 2×3×2 row-major, reduce axis 1 → outer=2, reduce=3, inner=2.
+      vals = [1.0, 2.0,  3.0, 4.0,  5.0, 6.0,
+              7.0, 8.0,  9.0, 10.0, 11.0, 12.0]
+      {:ok, t} = Nx.Vulkan.upload_f32(vals)
+      {:ok, out_ref} = Nx.Vulkan.reduce_axis(t, 2, 3, 2, 0)
+      {:ok, out_vals} = Nx.Vulkan.download_f32(out_ref, 4)
+
+      # slot (0,0): 1+3+5=9, (0,1): 2+4+6=12, (1,0): 7+9+11=27, (1,1): 8+10+12=30
+      assert out_vals == [9.0, 12.0, 27.0, 30.0]
+    end
+
+    test "reduce_axis max direct API (GPU shader)" do
+      {:ok, t} = Nx.Vulkan.upload_f32([1.0, 5.0, 2.0, 4.0, 3.0, 6.0])
+      # 2×3 row-major, reduce axis 1 → outer=2, reduce=3, inner=1.
+      {:ok, out_ref} = Nx.Vulkan.reduce_axis(t, 2, 3, 1, 1)
+      {:ok, out_vals} = Nx.Vulkan.download_f32(out_ref, 2)
+
+      assert out_vals == [5.0, 6.0]
+    end
+
+    test "Nx.sum single-axis routes through GPU shader (correctness)" do
+      # Same shape as reduce_axis test above; verify backend dispatch.
+      t =
+        Nx.tensor(
+          [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+           [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]],
+          backend: Nx.Vulkan.Backend
+        )
+
+      s = Nx.sum(t, axes: [1])
+      assert Nx.shape(s) == {2, 2}
+      assert Nx.to_flat_list(s) == [9.0, 12.0, 27.0, 30.0]
+    end
+  end
 end

@@ -95,6 +95,20 @@ int nxv_transpose(void* out, void* a,
                   unsigned int m, unsigned int n,
                   const char* spv_path);
 
+/* Cast f32↔f64. Two-file split: spv_path picks the direction.
+ * `n` is the element count. In/out element widths differ; caller is
+ * responsible for sizing buffers correctly (n*4 vs n*8). */
+int nxv_cast(void* out, void* a,
+             unsigned int n,
+             const char* spv_path);
+
+/* Per-axis reduction. Input is a virtual 3-D tensor (outer, reduce, inner)
+ * row-major; output is (outer, inner) row-major. `op`: 0=sum, 1=max, 2=min. */
+int nxv_reduce_axis(void* out, void* a,
+                    unsigned int outer, unsigned int reduce_size, unsigned int inner,
+                    unsigned int op,
+                    const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

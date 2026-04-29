@@ -53,10 +53,10 @@ static VkPipe* get_or_create_pipe(const std::string& spv_path, unsigned int op,
     VkShaderModule shader = load_shader(spv_path);
     if (!shader) return nullptr;
 
-    /* push_size: derive from n_buffers heuristic. binary/unary/random
-     * use 1 uint or 2 uints; matmul uses 3. The shaders accept up to
-     * 12 bytes, so we always declare 12 — Vulkan ignores unused. */
-    uint32_t push_size = 12;
+    /* push_size: declare 16 (max across all shader families). Vulkan
+     * ignores any push range bytes the shader doesn't read. binary/
+     * unary/random/transpose all use ≤12; reduce_axis uses 16. */
+    uint32_t push_size = 16;
 
     VkPipe* pipe = new VkPipe();
     int rc = create_pipeline(pipe, shader, n_buffers, push_size, (int32_t) op);
@@ -267,6 +267,42 @@ int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
     unsigned int groups = (n + 255) / 256;
 
     return dispatch(pipe, bufs, 1, groups, sizeof(push), &push);
+}
+
+int nxv_cast(void* out, void* a, unsigned int n, const char* spv_path) {
+    if (!out || !a || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 2);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader binding order: a, out. Push: n. */
+    VkBuffer bufs[2] = { buf_a->buffer, buf_out->buffer };
+    unsigned int push_n = n;
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 2, groups, sizeof(unsigned int), &push_n);
+}
+
+int nxv_reduce_axis(void* out, void* a,
+                    unsigned int outer, unsigned int reduce_size, unsigned int inner,
+                    unsigned int op,
+                    const char* spv_path) {
+    if (!out || !a || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 2);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader binding order: a, out. Push: {outer, reduce_size, inner, op}. */
+    VkBuffer bufs[2] = { buf_a->buffer, buf_out->buffer };
+    unsigned int push[4] = { outer, reduce_size, inner, op };
+    unsigned int n_slots = outer * inner;
+    unsigned int groups = (n_slots + 255) / 256;
+
+    return dispatch(pipe, bufs, 2, groups, sizeof(push), push);
 }
 
 int nxv_transpose(void* out, void* a, unsigned int m, unsigned int n,
