@@ -204,6 +204,116 @@ defmodule Nx.Vulkan.Backend do
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
 
+  # ---------------------------------------------------------------- reshape
+
+  # Zero-copy on the buffer — the GPU stores byte_size + ResourceArc;
+  # shape is metadata in the Elixir tensor. Reshape just rewraps the
+  # existing reference under a new shape without touching the GPU.
+  @impl true
+  def reshape(%T{shape: new_shape, type: type} = out, %T{data: %__MODULE__{ref: ref}}) do
+    put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
+  end
+
+  @impl true
+  def squeeze(%T{shape: new_shape, type: type} = out, %T{data: %__MODULE__{ref: ref}}, _axes) do
+    # Same shape — squeeze drops trivial axes, but the byte layout is
+    # unchanged. Pure metadata update.
+    put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
+  end
+
+  # ---------------------------------------------------------------- transpose
+
+  # 2D only at v0.1.2. Higher-rank transpose materializes via host
+  # fallback (defer to v0.1.3 when slicing lands and we can do
+  # rank-N permutation natively).
+  @impl true
+  def transpose(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = a, axes) do
+    ensure_f32!(type)
+
+    case {Tuple.to_list(in_shape), axes} do
+      {[m, n], [1, 0]} ->
+        a_data = to_vulkan!(a)
+        {:ok, ref} = Nx.Vulkan.transpose_2d(a_data.ref, m, n)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+
+      _ ->
+        # Higher-rank or non-swap permutation — host materialize for now.
+        bin = to_binary(a, byte_size_of(in_shape) * 4)
+        floats = for <<x::float-32-native <- bin>>, do: x
+
+        in_dims = Tuple.to_list(in_shape)
+        out_dims = Tuple.to_list(out_shape)
+        n_total = byte_size_of(in_shape)
+
+        permuted =
+          for flat_idx <- 0..(n_total - 1) do
+            out_coords = unflatten(flat_idx, out_dims)
+            in_coords = Enum.map(0..(length(in_dims) - 1)//1,
+                                 fn i -> Enum.at(out_coords, Enum.find_index(axes, &(&1 == i))) end)
+            Enum.at(floats, flatten(in_coords, in_dims))
+          end
+
+        new_bin = permuted |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+        {:ok, ref} = Nx.Vulkan.Native.upload_binary(new_bin)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+    end
+  end
+
+  # ---------------------------------------------------------------- broadcast
+
+  # v0.1.2 cut: download → replicate on host → upload. Slow for large
+  # tensors but correct for any shape/axes combination. v0.2 wires the
+  # broadcast shader (spirit already has it as
+  # elementwise_binary_broadcast.spv) for the in-place fast path.
+  @impl true
+  def broadcast(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = tensor, _shape, axes) do
+    ensure_f32!(type)
+    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+
+    # Decode input as a flat list — it'll be re-indexed during expansion.
+    input = for <<x::float-32-native <- in_bin>>, do: x
+
+    in_dims = Tuple.to_list(in_shape)
+    out_dims = Tuple.to_list(out_shape)
+    n_out = byte_size_of(out_shape)
+
+    output =
+      for flat_idx <- 0..(n_out - 1) do
+        flat_in = flat_in_index(flat_idx, in_dims, out_dims, axes)
+        Enum.at(input, flat_in)
+      end
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  # Scalar input → every output position maps to flat_in=0.
+  defp flat_in_index(_flat_idx, [], _out_dims, _axes), do: 0
+
+  # General N-D: project the output coord onto the input coord using the
+  # axes mapping (axes[i] = j means input axis i corresponds to output
+  # axis j).
+  defp flat_in_index(flat_idx, in_dims, out_dims, axes) do
+    out_coords = unflatten(flat_idx, out_dims)
+    in_coords = Enum.map(0..(length(in_dims) - 1)//1, fn i -> Enum.at(out_coords, Enum.at(axes, i)) end)
+    flatten(in_coords, in_dims)
+  end
+
+  defp unflatten(flat, dims) do
+    {coords, _} =
+      Enum.reduce(Enum.reverse(dims), {[], flat}, fn d, {acc, rem} ->
+        {[rem(rem, d) | acc], div(rem, d)}
+      end)
+
+    coords
+  end
+
+  defp flatten(coords, dims) do
+    Enum.zip(coords, dims)
+    |> Enum.reduce(0, fn {c, d}, acc -> acc * d + c end)
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp ensure_f32!({:f, 32}), do: :ok

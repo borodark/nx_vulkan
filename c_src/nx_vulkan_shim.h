@@ -89,6 +89,12 @@ int nxv_matmul(void* out, void* a, void* b,
 int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
                const char* spv_path);
 
+/* 2D transpose. Input A is M×N row-major; output C is N×M row-major.
+ * C[j, i] = A[i, j] for i in 0..M, j in 0..N. */
+int nxv_transpose(void* out, void* a,
+                  unsigned int m, unsigned int n,
+                  const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

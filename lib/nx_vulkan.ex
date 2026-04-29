@@ -299,4 +299,17 @@ defmodule Nx.Vulkan do
     bin = :binary.copy(<<f::float-32-native>>, n)
     Nx.Vulkan.Native.upload_binary(bin)
   end
+
+  # ------------------------------------------------------------------
+  # v0.1 phase 1.2 — reshape (metadata-only) + broadcast (Backend) +
+  # transpose (new shader)
+  # ------------------------------------------------------------------
+
+  @doc """
+  2D transpose: `c = a^T` where `a` is M×N and `c` is N×M, both
+  row-major f32. Returns `{:ok, c_tensor}`.
+  """
+  def transpose_2d(a, m, n) do
+    Nx.Vulkan.Native.transpose(a, m, n, shader_path("transpose.spv"))
+  end
 end

@@ -79,6 +79,14 @@ unsafe extern "C" {
         dist: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_transpose(
+        out: *mut c_void,
+        a: *mut c_void,
+        m: u32,
+        n: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -415,6 +423,40 @@ fn random<'a>(
     }
 
     let out = VulkanTensor { handle: out_handle, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// 2D transpose. Input M×N row-major; output N×M row-major.
+/// Allocates the output buffer (same byte_size as input).
+#[rustler::nif]
+fn transpose<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    m: u32,
+    n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let expected = (m * n * 4) as u64;
+    if a.n_bytes != expected {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(a.n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_transpose(out_handle, a.handle, m, n, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 

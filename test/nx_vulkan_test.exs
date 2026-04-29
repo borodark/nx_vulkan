@@ -413,4 +413,65 @@ defmodule Nx.VulkanTest do
       assert {:ok, [1.0, 2.0, 3.0]} = Nx.Vulkan.download_f32(c, 3)
     end
   end
+
+  describe "v0.1 phase 1.2 — reshape / broadcast" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "reshape is metadata-only (zero copy on the buffer)" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], backend: Nx.Vulkan.Backend)
+      reshaped = Nx.reshape(t, {2, 3})
+      assert Nx.shape(reshaped) == {2, 3}
+      assert Nx.to_flat_list(reshaped) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    end
+
+    test "reshape across multiple permutations preserves byte order" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], backend: Nx.Vulkan.Backend)
+      r1 = Nx.reshape(t, {3, 2})
+      r2 = Nx.reshape(r1, {6})
+      assert Nx.to_flat_list(r2) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    end
+
+    test "squeeze drops a trivial axis" do
+      t = Nx.tensor([[1.0, 2.0, 3.0]], backend: Nx.Vulkan.Backend)  # shape {1, 3}
+      s = Nx.squeeze(t)
+      assert Nx.shape(s) == {3}
+      assert Nx.to_flat_list(s) == [1.0, 2.0, 3.0]
+    end
+
+    test "broadcast: scalar to vector" do
+      t = Nx.tensor(7.0, backend: Nx.Vulkan.Backend)  # shape {}
+      b = Nx.broadcast(t, {4})
+      assert Nx.shape(b) == {4}
+      assert Nx.to_flat_list(b) == [7.0, 7.0, 7.0, 7.0]
+    end
+
+    test "broadcast: 1D row to 2D matrix (row-replication)" do
+      t = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)  # shape {3}
+      b = Nx.broadcast(t, {2, 3})
+      # axes=[1] means input axis 0 maps to output axis 1
+      assert Nx.shape(b) == {2, 3}
+      assert Nx.to_flat_list(b) == [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+    end
+
+    @tag :needs_transpose_shader
+    test "transpose 2x3 via Nx.Backend (uses transpose.spv)" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
+      tt = Nx.transpose(t)
+      assert Nx.shape(tt) == {3, 2}
+      assert Nx.to_flat_list(tt) == [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    end
+
+    @tag :needs_transpose_shader
+    test "transpose 3x4" do
+      data = for r <- 0..2, c <- 0..3, do: r * 4.0 + c
+      t = Nx.tensor(Enum.chunk_every(data, 4), backend: Nx.Vulkan.Backend)
+      tt = Nx.transpose(t)
+      assert Nx.shape(tt) == {4, 3}
+      # Element (i, j) of the transpose = element (j, i) of the original
+      assert Nx.to_flat_list(tt) == [0.0, 4.0, 8.0, 1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0]
+    end
+  end
 end

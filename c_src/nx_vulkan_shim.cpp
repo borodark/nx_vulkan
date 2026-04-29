@@ -269,4 +269,69 @@ int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
     return dispatch(pipe, bufs, 1, groups, sizeof(push), &push);
 }
 
+int nxv_transpose(void* out, void* a, unsigned int m, unsigned int n,
+                  const char* spv_path) {
+    if (!out || !a || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 2);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* 2D dispatch — 16×16 tiles; same dance as matmul. The existing
+     * spirit dispatch() helper is 1D-only, so inline. */
+    auto& ctx = g_vk_ctx;
+
+    VkBuffer bufs[2] = { buf_a->buffer, buf_out->buffer };
+
+    VkDescriptorBufferInfo bi[2];
+    VkWriteDescriptorSet w[2];
+    for (int i = 0; i < 2; i++) {
+        bi[i] = {bufs[i], 0, VK_WHOLE_SIZE};
+        w[i] = {};
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = pipe->descriptor_set;
+        w[i].dstBinding = (uint32_t) i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(ctx.device, 2, w, 0, nullptr);
+
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = ctx.command_pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(ctx.device, &ai, &cmd);
+
+    VkCommandBufferBeginInfo bb{};
+    bb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bb);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe->pipeline_layout, 0, 1, &pipe->descriptor_set, 0, nullptr);
+
+    unsigned int push[2] = { m, n };
+    vkCmdPushConstants(cmd, pipe->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(push), push);
+
+    unsigned int gx = (n + 15) / 16;
+    unsigned int gy = (m + 15) / 16;
+    vkCmdDispatch(cmd, gx, gy, 1);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(ctx.compute_queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx.compute_queue);
+    vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+
+    return 0;
+}
+
 }
