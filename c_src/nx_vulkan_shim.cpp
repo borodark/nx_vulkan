@@ -39,24 +39,43 @@ int nxv_has_f64(void) {
     return g_vk_ctx.has_float64 ? 1 : 0;
 }
 
-/* Tensor primitives — stubs returning failure so Rust can declare them
- * but they're not yet wired. v0.0.2 implements these against
- * VkBuf + buf_alloc / upload / download. */
+/* Tensor primitives — heap-allocate a VkBuf so the handle survives
+ * across NIF calls. Lifetime is owned by the Rust ResourceArc; when
+ * the Elixir reference is GC'd, Rust calls nxv_buf_free which
+ * delegates to spirit's buf_free + delete. */
 
-void* nxv_buf_alloc(unsigned long /*n_bytes*/) {
-    return nullptr;  /* TODO v0.0.2 */
+void* nxv_buf_alloc(unsigned long n_bytes) {
+    VkBuf* buf = new VkBuf();
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkMemoryPropertyFlags mem = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    int rc = buf_alloc(buf, (VkDeviceSize) n_bytes, usage, mem);
+    if (rc != 0) {
+        delete buf;
+        return nullptr;
+    }
+    return (void*) buf;
 }
 
-void nxv_buf_free(void* /*handle*/) {
-    /* TODO v0.0.2 */
+void nxv_buf_free(void* handle) {
+    if (!handle) return;
+    VkBuf* buf = (VkBuf*) handle;
+    buf_free(buf);
+    delete buf;
 }
 
-int nxv_buf_upload(void* /*handle*/, const void* /*data*/, unsigned long /*n_bytes*/) {
-    return -1;  /* TODO v0.0.2 */
+int nxv_buf_upload(void* handle, const void* data, unsigned long n_bytes) {
+    if (!handle || !data) return -1;
+    VkBuf* buf = (VkBuf*) handle;
+    return upload(buf, data, (VkDeviceSize) n_bytes);
 }
 
-int nxv_buf_download(void* /*handle*/, void* /*data*/, unsigned long /*n_bytes*/) {
-    return -1;  /* TODO v0.0.2 */
+int nxv_buf_download(void* handle, void* data, unsigned long n_bytes) {
+    if (!handle || !data) return -1;
+    VkBuf* buf = (VkBuf*) handle;
+    return download(buf, data, (VkDeviceSize) n_bytes);
 }
 
 }

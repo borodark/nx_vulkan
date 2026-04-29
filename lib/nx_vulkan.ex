@@ -49,4 +49,59 @@ defmodule Nx.Vulkan do
 
   @doc "Returns true if the selected device supports f64 (double precision)."
   defdelegate has_f64?(), to: Nx.Vulkan.Native, as: :has_f64
+
+  # ------------------------------------------------------------------
+  # v0.0.2 — tensor lifetime + round-trip
+  # ------------------------------------------------------------------
+
+  @doc """
+  Upload a list of f32 values to a freshly-allocated GPU buffer.
+  Returns `{:ok, tensor_ref}` where `tensor_ref` is an opaque
+  `ResourceArc` whose underlying VkBuf is freed when GC'd.
+
+      iex> Nx.Vulkan.init()
+      :ok
+      iex> {:ok, t} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      iex> {:ok, [1.0, 2.0, 3.0, 4.0]} = Nx.Vulkan.download_f32(t, 4)
+  """
+  def upload_f32(list) when is_list(list) do
+    bin =
+      list
+      |> Enum.flat_map(fn x -> [<<x::float-32-native>>] end)
+      |> IO.iodata_to_binary()
+
+    Nx.Vulkan.Native.upload_binary(bin)
+  end
+
+  @doc "Upload a raw binary (already packed f32 little-endian) to GPU memory."
+  def upload_binary(bin) when is_binary(bin) do
+    Nx.Vulkan.Native.upload_binary(bin)
+  end
+
+  @doc """
+  Download a GPU buffer back into a list of f32 values. `n_elements`
+  must match what was uploaded.
+  """
+  def download_f32(tensor, n_elements) when is_integer(n_elements) and n_elements >= 0 do
+    case Nx.Vulkan.Native.download_binary(tensor, n_elements * 4) do
+      {:ok, bin} ->
+        floats =
+          for <<x::float-32-native <- bin>> do
+            x
+          end
+
+        {:ok, floats}
+
+      err ->
+        err
+    end
+  end
+
+  @doc "Download as a raw binary (caller does the unpack)."
+  def download_binary(tensor, n_bytes) do
+    Nx.Vulkan.Native.download_binary(tensor, n_bytes)
+  end
+
+  @doc "Byte size of an uploaded tensor."
+  defdelegate byte_size(tensor), to: Nx.Vulkan.Native
 end

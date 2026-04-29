@@ -21,4 +21,13 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def has_f64(), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def upload_binary(_data), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def download_binary(_tensor, _n_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def byte_size(_tensor), do: :erlang.nif_error(:nif_not_loaded)
 end
