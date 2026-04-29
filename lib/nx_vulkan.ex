@@ -131,7 +131,7 @@ defmodule Nx.Vulkan do
     Nx.Vulkan.Native.download_binary(tensor, n_bytes)
   end
 
-  import Kernel, except: [byte_size: 1]
+  import Kernel, except: [byte_size: 1, max: 2, min: 2]
 
   @doc "Byte size of an uploaded tensor (in bytes)."
   defdelegate byte_size(tensor), to: Nx.Vulkan.Native
@@ -147,7 +147,10 @@ defmodule Nx.Vulkan do
     divide: 3,
     pow: 4,
     max: 5,
-    min: 6
+    min: 6,
+    equal: 7,
+    less: 8,
+    greater: 9
   }
 
   for {name, op_const} <- @ops_binary do
@@ -244,5 +247,56 @@ defmodule Nx.Vulkan do
   @doc "Generate `n` standard-normal N(0,1) f32 values via Box-Muller."
   def normal(n, seed \\ 42) when is_integer(n) and is_integer(seed) do
     Nx.Vulkan.Native.random(n, seed, 1, shader_path("random_philox.spv"))
+  end
+
+  # ------------------------------------------------------------------
+  # v0.1 phase 1.1 — comparisons via composition
+  # ------------------------------------------------------------------
+
+  @doc """
+  Branchless select: `cond_true_or_false ? t : f`. `cond` is a 0/1
+  tensor (typically the output of `equal/2`, `less/2`, `greater/2`).
+
+  Implemented compositionally as `cond * t + (1 - cond) * f`. Once
+  the v0.1 broadcast shader supports scalar broadcast we'll switch
+  to a 3-input shader; today this composition is the right shape
+  and adds two dispatches' worth of overhead per select.
+  """
+  def select(cond, t, f) do
+    n_bytes = Nx.Vulkan.Native.byte_size(cond)
+    n = div(n_bytes, 4)
+
+    with {:ok, ones} <- upload_constant(1.0, n),
+         {:ok, inv} <- subtract(ones, cond),
+         {:ok, on_t} <- multiply(cond, t),
+         {:ok, on_f} <- multiply(inv, f),
+         {:ok, out} <- add(on_t, on_f) do
+      {:ok, out}
+    end
+  end
+
+  @doc """
+  Clip every element to `[low, high]`. Implemented as
+  `max(low, min(high, a))` with broadcasted scalar tensors.
+  Replaceable with a single-shader `clip.comp` once the broadcast
+  story matures (currently materializes scalars to N-element
+  buffers).
+  """
+  def clip(a, low, high) when is_number(low) and is_number(high) do
+    n_bytes = Nx.Vulkan.Native.byte_size(a)
+    n = div(n_bytes, 4)
+
+    with {:ok, low_t} <- upload_constant(low, n),
+         {:ok, high_t} <- upload_constant(high, n),
+         {:ok, capped} <- min(a, high_t),
+         {:ok, floored} <- max(low_t, capped) do
+      {:ok, floored}
+    end
+  end
+
+  defp upload_constant(value, n) when is_number(value) do
+    f = value / 1.0
+    bin = :binary.copy(<<f::float-32-native>>, n)
+    Nx.Vulkan.Native.upload_binary(bin)
   end
 end

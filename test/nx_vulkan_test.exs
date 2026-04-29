@@ -361,4 +361,56 @@ defmodule Nx.VulkanTest do
       assert {:ok, [1.0, 2.0, 3.0]} = Nx.Vulkan.download_f32(t, 3)
     end
   end
+
+  describe "v0.1 phase 1.1 — comparisons" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    @tag :needs_compare_shader
+    test "equal" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 2.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0, 7.0])
+      {:ok, c} = Nx.Vulkan.equal(a, b)
+      assert {:ok, [1.0, 0.0, 1.0, 0.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    @tag :needs_compare_shader
+    test "less" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 3.0])
+      {:ok, c} = Nx.Vulkan.less(a, b)
+      assert {:ok, [1.0, 0.0, 0.0]} = Nx.Vulkan.download_f32(c, 3)
+    end
+
+    @tag :needs_compare_shader
+    test "greater" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 3.0])
+      {:ok, c} = Nx.Vulkan.greater(a, b)
+      assert {:ok, [0.0, 1.0, 0.0]} = Nx.Vulkan.download_f32(c, 3)
+    end
+
+    test "select with hand-built 0/1 condition (no shader needed)" do
+      # cond=[1,0,1,0] picks t else f → [10, 200, 30, 400]
+      {:ok, cond} = Nx.Vulkan.upload_f32([1.0, 0.0, 1.0, 0.0])
+      {:ok, t} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0, 40.0])
+      {:ok, f} = Nx.Vulkan.upload_f32([100.0, 200.0, 300.0, 400.0])
+      {:ok, c} = Nx.Vulkan.select(cond, t, f)
+      assert {:ok, [10.0, 200.0, 30.0, 400.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    test "clip via compositional max+min" do
+      {:ok, a} = Nx.Vulkan.upload_f32([-2.0, -0.5, 0.0, 1.5, 3.0, 7.0])
+      {:ok, c} = Nx.Vulkan.clip(a, 0.0, 5.0)
+      assert {:ok, [0.0, 0.0, 0.0, 1.5, 3.0, 5.0]} = Nx.Vulkan.download_f32(c, 6)
+    end
+
+    test "clip is the identity when the range covers all values" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      {:ok, c} = Nx.Vulkan.clip(a, -10.0, 10.0)
+      assert {:ok, [1.0, 2.0, 3.0]} = Nx.Vulkan.download_f32(c, 3)
+    end
+  end
 end
