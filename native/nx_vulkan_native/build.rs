@@ -25,7 +25,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", spirit.join("core/src/engine/Backend_par_vulkan.cpp").display());
     println!("cargo:rerun-if-env-changed=SPIRIT_DIR");
 
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .cpp(true)
         .std("c++14")
         .flag_if_supported("-Wno-unused-result")
@@ -34,8 +35,19 @@ fn main() {
         .include(shim_c.clone())
         .include(spirit.join("core/include"))
         .file(shim_c.join("nx_vulkan_shim.cpp"))
-        .file(spirit.join("core/src/engine/Backend_par_vulkan.cpp"))
-        .compile("nx_vulkan_shim");
+        .file(spirit.join("core/src/engine/Backend_par_vulkan.cpp"));
+
+    // FreeBSD + macOS install Vulkan headers under /usr/local/include
+    // (FreeBSD: pkg install vulkan-headers; macOS: brew install vulkan-headers).
+    // Linux's clang searches /usr/include automatically; FreeBSD's
+    // does not search /usr/local/include without being asked.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "freebsd" || target_os == "macos" {
+        build.include("/usr/local/include");
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
+    }
+
+    build.compile("nx_vulkan_shim");
 
     // Link Vulkan loader. On Linux this is libvulkan.so; on FreeBSD
     // the same; on macOS, MoltenVK provides libvulkan.dylib.
