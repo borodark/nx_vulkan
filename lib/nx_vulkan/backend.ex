@@ -177,23 +177,30 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp do_binary(%T{shape: shape, type: type} = out, %T{} = a, %T{} = b, op) do
-    ensure_f32!(type)
-    a_data = to_vulkan!(a)
-    b_data = to_vulkan!(b)
+    if type != {:f, 32} or a.type != {:f, 32} or b.type != {:f, 32} or a.shape != b.shape do
+      # Mixed types or shape mismatch (broadcast cases): host fallback.
+      # Vulkan elementwise shaders are f32-only and require equal shapes;
+      # for everything else BinaryBackend round-trip is correct, slow,
+      # and semantically transparent.
+      host_fallback_binary(out, a, b, op)
+    else
+      a_data = to_vulkan!(a)
+      b_data = to_vulkan!(b)
 
-    apply_op =
-      case op do
-        :add -> &Nx.Vulkan.add/2
-        :multiply -> &Nx.Vulkan.multiply/2
-        :subtract -> &Nx.Vulkan.subtract/2
-        :divide -> &Nx.Vulkan.divide/2
-        :pow -> &Nx.Vulkan.pow/2
-        :max -> &Nx.Vulkan.max/2
-        :min -> &Nx.Vulkan.min/2
-      end
+      apply_op =
+        case op do
+          :add -> &Nx.Vulkan.add/2
+          :multiply -> &Nx.Vulkan.multiply/2
+          :subtract -> &Nx.Vulkan.subtract/2
+          :divide -> &Nx.Vulkan.divide/2
+          :pow -> &Nx.Vulkan.pow/2
+          :max -> &Nx.Vulkan.max/2
+          :min -> &Nx.Vulkan.min/2
+        end
 
-    {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
-    put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+      {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    end
   end
 
   # ---------------------------------------------------------------- elementwise unary
@@ -216,11 +223,15 @@ defmodule Nx.Vulkan.Backend do
   for op <- @unary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a) do
-      ensure_f32!(type)
-      a_data = to_vulkan!(a)
-      apply_op = Function.capture(Nx.Vulkan, unquote(op), 1)
-      {:ok, ref} = apply_op.(a_data.ref)
-      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+      if type != {:f, 32} or a.type != {:f, 32} do
+        a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+        upload_host_tensor(out, apply(Nx, unquote(op), [a_host]))
+      else
+        a_data = to_vulkan!(a)
+        apply_op = Function.capture(Nx.Vulkan, unquote(op), 1)
+        {:ok, ref} = apply_op.(a_data.ref)
+        put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+      end
     end
   end
 
@@ -741,6 +752,130 @@ defmodule Nx.Vulkan.Backend do
     bin = Nx.to_binary(host_tensor)
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  end
+
+  # ---------------------------------------------------------------- backend backfill (Phase 3)
+
+  # Comparisons: equal/less/greater have shader paths (ops 7/8/9 in
+  # elementwise_binary); less_equal/greater_equal/not_equal compose.
+  @impl true
+  def equal(out, a, b),         do: do_compare(out, a, b, :equal)
+  @impl true
+  def less(out, a, b),          do: do_compare(out, a, b, :less)
+  @impl true
+  def greater(out, a, b),       do: do_compare(out, a, b, :greater)
+  @impl true
+  def less_equal(out, a, b),    do: host_fallback_binary(out, a, b, :less_equal)
+  @impl true
+  def greater_equal(out, a, b), do: host_fallback_binary(out, a, b, :greater_equal)
+  @impl true
+  def not_equal(out, a, b),     do: host_fallback_binary(out, a, b, :not_equal)
+
+  defp do_compare(%T{type: type} = out, %T{} = a, %T{} = b, op) when type == {:f, 32} do
+    a_data = to_vulkan!(a)
+    b_data = to_vulkan!(b)
+
+    apply_op =
+      case op do
+        :equal -> &Nx.Vulkan.equal/2
+        :less -> &Nx.Vulkan.less/2
+        :greater -> &Nx.Vulkan.greater/2
+      end
+
+    {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+  end
+
+  defp do_compare(out, a, b, op), do: host_fallback_binary(out, a, b, op)
+
+  # Selection / clipping — host fallback; Phase 1.1 already wired the
+  # compositional path for the direct API but the backend protocol
+  # callbacks weren't bound.
+  @impl true
+  def select(out, pred, on_true, on_false) do
+    p = Nx.backend_transfer(pred, Nx.BinaryBackend)
+    t = Nx.backend_transfer(on_true, Nx.BinaryBackend)
+    f = Nx.backend_transfer(on_false, Nx.BinaryBackend)
+    res = Nx.select(p, t, f)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def clip(out, t, lo, hi) do
+    a = Nx.backend_transfer(t, Nx.BinaryBackend)
+    l = Nx.backend_transfer(lo, Nx.BinaryBackend)
+    h = Nx.backend_transfer(hi, Nx.BinaryBackend)
+    res = Nx.clip(a, l, h)
+    upload_host_tensor(out, res)
+  end
+
+  # Shape ops missing from Phase 1: concatenate, stack, pad. All
+  # host-materialize for v0.1 — small allocations dominated by the
+  # Nx.BinaryBackend op, GPU shader version is a v0.2 item.
+  @impl true
+  def concatenate(out, tensors, axis) do
+    hosts = Enum.map(tensors, &Nx.backend_transfer(&1, Nx.BinaryBackend))
+    res = Nx.concatenate(hosts, axis: axis)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def stack(out, tensors, axis) do
+    hosts = Enum.map(tensors, &Nx.backend_transfer(&1, Nx.BinaryBackend))
+    res = Nx.stack(hosts, axis: axis)
+    upload_host_tensor(out, res)
+  end
+
+  @impl true
+  def pad(out, t, pad_value, padding_config) do
+    a = Nx.backend_transfer(t, Nx.BinaryBackend)
+    pv = Nx.backend_transfer(pad_value, Nx.BinaryBackend)
+    res = Nx.pad(a, pv, padding_config)
+    upload_host_tensor(out, res)
+  end
+
+  # Transcendentals beyond the Phase 1.7 set: log1p, log2, log10,
+  # cos/sin/atan if exmc reaches them. log1p first (the only one Phase 3
+  # surfaced); rest land on demand.
+  @impl true
+  def log1p(out, t) do
+    a = Nx.backend_transfer(t, Nx.BinaryBackend)
+    upload_host_tensor(out, Nx.log1p(a))
+  end
+
+  @impl true
+  def is_infinity(out, t) do
+    a = Nx.backend_transfer(t, Nx.BinaryBackend)
+    upload_host_tensor(out, Nx.is_infinity(a))
+  end
+
+  @impl true
+  def right_shift(out, a, b), do: host_fallback_binary(out, a, b, :right_shift)
+
+  @impl true
+  def left_shift(out, a, b), do: host_fallback_binary(out, a, b, :left_shift)
+
+  @impl true
+  def remainder(out, a, b), do: host_fallback_binary(out, a, b, :remainder)
+
+  @impl true
+  def quotient(out, a, b), do: host_fallback_binary(out, a, b, :quotient)
+
+  @impl true
+  def bitwise_and(out, a, b), do: host_fallback_binary(out, a, b, :bitwise_and)
+
+  @impl true
+  def bitwise_or(out, a, b), do: host_fallback_binary(out, a, b, :bitwise_or)
+
+  @impl true
+  def bitwise_xor(out, a, b), do: host_fallback_binary(out, a, b, :bitwise_xor)
+
+  # Shared host fallback for binary ops we haven't wired natively.
+  defp host_fallback_binary(out, a, b, op) do
+    a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+    b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
+    res = apply(Nx, op, [a_host, b_host])
+    upload_host_tensor(out, res)
   end
 
   # ---------------------------------------------------------------- as_type (v0.1.8)
