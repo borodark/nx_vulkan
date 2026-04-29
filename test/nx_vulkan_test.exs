@@ -474,4 +474,57 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(tt) == [0.0, 4.0, 8.0, 1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0]
     end
   end
+
+  describe "v0.1 phase 1.3 — slicing" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "slice 1D simple range" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0], backend: Nx.Vulkan.Backend)
+      s = Nx.slice(t, [1], [3])  # elements 1..3
+      assert Nx.to_flat_list(s) == [2.0, 3.0, 4.0]
+    end
+
+    test "slice 1D with stride 2" do
+      # Nx's slice: lengths is the INPUT region length. length=5, stride=2
+      # walks input positions 0..4 picking every 2nd → output positions
+      # [0, 2, 4] = [1.0, 3.0, 5.0].
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], backend: Nx.Vulkan.Backend)
+      s = Nx.slice(t, [0], [5], strides: [2])
+      assert Nx.to_flat_list(s) == [1.0, 3.0, 5.0]
+    end
+
+    test "slice 2D — extract a 2x2 block" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+                    backend: Nx.Vulkan.Backend)
+      s = Nx.slice(t, [0, 1], [2, 2])  # rows 0..1, cols 1..2
+      assert Nx.shape(s) == {2, 2}
+      assert Nx.to_flat_list(s) == [2.0, 3.0, 5.0, 6.0]
+    end
+
+    test "slice_along_axis (Nx-built helper that calls slice/5)" do
+      t = Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+                    backend: Nx.Vulkan.Backend)
+      s = Nx.slice_along_axis(t, 1, 2, axis: 1)  # cols 1..2
+      assert Nx.shape(s) == {2, 2}
+      assert Nx.to_flat_list(s) == [2.0, 3.0, 6.0, 7.0]
+    end
+
+    test "put_slice 1D" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0], backend: Nx.Vulkan.Backend)
+      patch = Nx.tensor([99.0, 88.0], backend: Nx.Vulkan.Backend)
+      out = Nx.put_slice(t, [2], patch)
+      assert Nx.to_flat_list(out) == [1.0, 2.0, 99.0, 88.0, 5.0]
+    end
+
+    test "put_slice 2D — overwrite a 2x2 block" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+                    backend: Nx.Vulkan.Backend)
+      patch = Nx.tensor([[97.0, 98.0], [99.0, 100.0]], backend: Nx.Vulkan.Backend)
+      out = Nx.put_slice(t, [1, 1], patch)
+      assert Nx.to_flat_list(out) == [1.0, 2.0, 3.0, 4.0, 97.0, 98.0, 7.0, 99.0, 100.0]
+    end
+  end
 end

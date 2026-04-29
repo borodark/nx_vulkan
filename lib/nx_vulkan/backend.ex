@@ -314,6 +314,97 @@ defmodule Nx.Vulkan.Backend do
     |> Enum.reduce(0, fn {c, d}, acc -> acc * d + c end)
   end
 
+  # ---------------------------------------------------------------- slicing
+
+  # v0.1.3 cut: host-materialize. Walk output coords, project onto
+  # input coords via start_indices + out_coord * strides, read from
+  # input. v0.2 introduces a strided-copy shader; for now the small
+  # slice patterns Nx.Defn produces (mostly axis-aligned, contiguous)
+  # are bandwidth-bound on the download/upload anyway.
+  @impl true
+  def slice(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = tensor,
+            start_indices, lengths, strides) do
+    ensure_f32!(type)
+
+    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+    input = for <<x::float-32-native <- in_bin>>, do: x
+
+    in_dims = Tuple.to_list(in_shape)
+    out_dims = Tuple.to_list(out_shape)
+
+    # Nx may pass start_indices as scalar tensors (for dynamic slices)
+    # or as plain integers. For v0.1.3 we accept integers only — if
+    # the caller passed tensor indices, materialize them to host
+    # numbers via to_number/1.
+    start_ints = Enum.map(start_indices, &to_int/1)
+    length_ints = Enum.map(lengths, &to_int/1)
+    stride_ints = Enum.map(strides, &to_int/1)
+
+    n_out = byte_size_of(out_shape)
+
+    output =
+      for flat_idx <- 0..(n_out - 1) do
+        out_coords = unflatten(flat_idx, out_dims)
+
+        in_coords =
+          Enum.zip([out_coords, start_ints, stride_ints])
+          |> Enum.map(fn {c, s, st} -> s + c * st end)
+
+        Enum.at(input, flatten(in_coords, in_dims))
+      end
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  # put_slice writes `slice` into `target` starting at `start_indices`,
+  # leaving the rest of `target` unchanged. Same host-materialize
+  # strategy as slice/5 — read both, walk target coords, write either
+  # source.
+  @impl true
+  def put_slice(%T{shape: out_shape, type: type} = out, %T{shape: target_shape} = target,
+                start_indices, %T{shape: slice_shape} = slice_t) do
+    ensure_f32!(type)
+    ^out_shape = target_shape
+
+    target_bin = to_binary(target, byte_size_of(target_shape) * 4)
+    slice_bin  = to_binary(slice_t, byte_size_of(slice_shape) * 4)
+
+    target_floats = for <<x::float-32-native <- target_bin>>, do: x
+    slice_floats  = for <<x::float-32-native <- slice_bin>>, do: x
+
+    target_dims = Tuple.to_list(target_shape)
+    slice_dims  = Tuple.to_list(slice_shape)
+    start_ints  = Enum.map(start_indices, &to_int/1)
+
+    n = byte_size_of(target_shape)
+
+    output =
+      for flat_idx <- 0..(n - 1) do
+        coords = unflatten(flat_idx, target_dims)
+        # Each axis: in slice if start <= coord < start + slice_dim
+        slice_coords =
+          Enum.zip([coords, start_ints, slice_dims])
+          |> Enum.map(fn {c, s, sd} ->
+            if c >= s and c < s + sd, do: c - s, else: :outside
+          end)
+
+        if Enum.any?(slice_coords, &(&1 == :outside)) do
+          Enum.at(target_floats, flat_idx)
+        else
+          Enum.at(slice_floats, flatten(slice_coords, slice_dims))
+        end
+      end
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  defp to_int(n) when is_integer(n), do: n
+  defp to_int(%T{} = t), do: Nx.to_number(t)
+
   # ---------------------------------------------------------------- helpers
 
   defp ensure_f32!({:f, 32}), do: :ok
