@@ -341,4 +341,41 @@ defmodule Nx.Vulkan do
     Nx.Vulkan.Native.reduce_axis(a, outer, reduce_size, inner, op,
                                   shader_path("reduce_axis.spv"))
   end
+
+  # ------------------------------------------------------------------
+  # Phase 2 — Nx.Defn JIT integration
+  # ------------------------------------------------------------------
+
+  @doc """
+  JIT-compile a function so each op dispatches through the Vulkan backend.
+
+  Symmetric counterpart of `EXLA.jit/2` and `EMLX.jit/2`. There's no
+  kernel fusion in v0.1 — each `Nx.*` call inside the defn becomes one
+  shader dispatch via `Nx.Defn.Evaluator`. Combined-shader fusion is the
+  v0.2 work (see FUSION_RESEARCH.md).
+
+  Sets `Nx.Vulkan.Backend` as the global default if it isn't already, so
+  scalars and tensors created inside the defn land on the GPU. Calls
+  `Nx.Vulkan.init/0` (idempotent).
+
+      iex> Nx.Vulkan.init()
+      :ok
+      iex> f = fn x -> Nx.add(x, x) end
+      iex> Nx.Vulkan.jit(f).(Nx.tensor([1.0, 2.0]))
+      #Nx.Tensor<f32[2] [2.0, 4.0]>
+  """
+  def jit(fun, opts \\ []) do
+    ensure_default_backend!()
+    Nx.Defn.jit(fun, [{:compiler, Nx.Defn.Evaluator} | opts])
+  end
+
+  defp ensure_default_backend! do
+    case Nx.default_backend() do
+      {Nx.Vulkan.Backend, _} -> :ok
+      _ ->
+        :ok = init()
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+        :ok
+    end
+  end
 end

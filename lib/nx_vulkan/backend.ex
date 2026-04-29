@@ -94,12 +94,22 @@ defmodule Nx.Vulkan.Backend do
 
   @impl true
   def constant(%T{shape: shape, type: type} = tensor, scalar, _opts) do
-    ensure_f32!(type)
     n = byte_size_of(shape)
-    bin = :binary.copy(<<:erlang.float(scalar)::float-32-native>>, n)
+    bin = :binary.copy(encode_scalar(scalar, type), n)
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
   end
+
+  defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
+  defp encode_scalar(s, {:f, 64}), do: <<s / 1.0::float-64-native>>
+  defp encode_scalar(s, {:s, 8}),  do: <<trunc(s)::signed-8>>
+  defp encode_scalar(s, {:s, 16}), do: <<trunc(s)::signed-16-native>>
+  defp encode_scalar(s, {:s, 32}), do: <<trunc(s)::signed-32-native>>
+  defp encode_scalar(s, {:s, 64}), do: <<trunc(s)::signed-64-native>>
+  defp encode_scalar(s, {:u, 8}),  do: <<trunc(s)::unsigned-8>>
+  defp encode_scalar(s, {:u, 16}), do: <<trunc(s)::unsigned-16-native>>
+  defp encode_scalar(s, {:u, 32}), do: <<trunc(s)::unsigned-32-native>>
+  defp encode_scalar(s, {:u, 64}), do: <<trunc(s)::unsigned-64-native>>
 
   # v0.1.5: iota and eye host-materialize. Both are tiny (mass-matrix
   # init, index broadcasts) and the GPU shader version would be a

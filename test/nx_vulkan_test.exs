@@ -933,6 +933,26 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
     end
 
+    test "Nx.Vulkan.jit/2 evaluates a defn through the GPU backend" do
+      :ok = Nx.Vulkan.init()
+
+      # jit/2 wires Nx.Vulkan.Backend as global default. Save and restore
+      # so subsequent tests aren't poisoned with a backend they didn't ask for.
+      previous = Nx.default_backend()
+
+      try do
+        f = fn a, b -> Nx.add(Nx.multiply(a, b), b) end
+        a = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        b = Nx.tensor([4.0, 5.0, 6.0], backend: Nx.Vulkan.Backend)
+        out = Nx.Vulkan.jit(f).(a, b)
+
+        assert Nx.to_flat_list(out) == [8.0, 15.0, 24.0]
+        assert match?(%Nx.Vulkan.Backend{}, out.data)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "mass-matrix-style: cholesky → solve composition" do
       # Realistic NUTS use: M is SPD, solve M x = grad via L L^T factorization.
       m =
