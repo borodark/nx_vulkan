@@ -343,6 +343,55 @@ defmodule Nx.Vulkan do
   end
 
   # ------------------------------------------------------------------
+  # Path A — fused elementwise chain (FUSION_RESEARCH.md)
+  # ------------------------------------------------------------------
+
+  @op_codes %{
+    # Binary ops — second operand is always buffer `b`.
+    add: 0, multiply: 1, subtract: 2, divide: 3, pow: 4, max: 5, min: 6,
+    # Unary ops — operate on the running register only.
+    exp: 100, log: 101, sqrt: 102, abs: 103, negate: 104,
+    sigmoid: 105, tanh: 106, relu: 107, ceil: 108, floor: 109,
+    sign: 110, reciprocal: 111, square: 112, erf: 113, expm1: 114
+  }
+
+  @doc """
+  Run a chain of up to 8 elementwise ops in a single shader dispatch.
+
+  Replaces N separate dispatches with one. Each binary step combines the
+  running register with `b`; each unary step transforms the register only.
+
+      iex> {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      iex> {:ok, b} = Nx.Vulkan.upload_f32([0.5, 0.5, 0.5])
+      iex> # (a * b) + b → exp
+      iex> {:ok, c} = Nx.Vulkan.fused_chain(a, b, [:multiply, :add, :exp])
+      iex> {:ok, vals} = Nx.Vulkan.download_f32(c, 3)
+      iex> vals  # exp((a*b)+b) = exp(1.0), exp(1.5), exp(2.0)
+      [2.71828..., 4.48168..., 7.38905...]
+
+  Op atoms supported:
+
+    * Binary (combine register with `b`): `:add`, `:multiply`, `:subtract`,
+      `:divide`, `:pow`, `:max`, `:min`
+    * Unary (transform register): `:exp`, `:log`, `:sqrt`, `:abs`,
+      `:negate`, `:sigmoid`, `:tanh`, `:relu`, `:ceil`, `:floor`,
+      `:sign`, `:reciprocal`, `:square`
+
+  Note: `:erf` and `:expm1` have op codes 113/114 but the v0.2 fused
+  shader's switch doesn't yet implement them — those will pass through
+  the chain unchanged. Use the per-op shader dispatch for chains that
+  include erf/expm1.
+
+  Chains longer than 8 ops should be split: dispatch fused_chain twice
+  with the running tensor used as `a` for the second call.
+  """
+  def fused_chain(a_ref, b_ref, ops) when is_list(ops) do
+    codes = Enum.map(ops, &Map.fetch!(@op_codes, &1))
+    Nx.Vulkan.Native.fused_chain(a_ref, b_ref, codes,
+                                  shader_path("fused_elementwise.spv"))
+  end
+
+  # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------
 

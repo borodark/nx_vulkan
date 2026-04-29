@@ -109,6 +109,18 @@ int nxv_reduce_axis(void* out, void* a,
                     unsigned int op,
                     const char* spv_path);
 
+/* Fused n-way elementwise chain — up to 8 ops in one dispatch.
+ * `ops` is an array of length 8 (pad with 255 = nop). Op codes:
+ *   binary 0..6 (add/mul/sub/div/pow/max/min) — second operand is buf B
+ *   unary  100..114 (exp/log/sqrt/abs/neg/sigmoid/tanh/relu/ceil/floor/
+ *                    sign/reciprocal/square/erf/expm1)
+ * The chain applies left-to-right starting from a[i], using b[i] for
+ * binary steps. Output is c[i] of length n. */
+int nxv_fused_chain(void* out, void* a, void* b,
+                    unsigned int n, unsigned int n_ops,
+                    const unsigned int* ops,
+                    const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

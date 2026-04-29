@@ -55,4 +55,7 @@ defmodule Nx.Vulkan.Native do
   @doc false
   def reduce_axis(_a, _outer, _reduce, _inner, _op, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def fused_chain(_a, _b, _ops, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 end

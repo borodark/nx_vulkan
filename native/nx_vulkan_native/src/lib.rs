@@ -104,6 +104,16 @@ unsafe extern "C" {
         op: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_fused_chain(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        n: u32,
+        n_ops: u32,
+        ops: *const u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -543,6 +553,51 @@ fn reduce_axis<'a>(
     }
 
     let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Path A — fused elementwise chain. `ops` is a Vec<u32> of length ≤8;
+/// shorter chains are padded with 255 (nop). Op codes:
+///   0..6   binary (add/mul/sub/div/pow/max/min)
+///   100..114 unary (exp..expm1)
+#[rustler::nif]
+fn fused_chain<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    ops: Vec<u32>,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if ops.is_empty() || ops.len() > 8 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+    if a.n_bytes != b.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n = (a.n_bytes / 4) as u32;
+    let n_ops = ops.len() as u32;
+    let mut padded: [u32; 8] = [255; 8];
+    for (i, &c) in ops.iter().enumerate() { padded[i] = c; }
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(a.n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_fused_chain(out_handle, a.handle, b.handle, n, n_ops, padded.as_ptr(), cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 

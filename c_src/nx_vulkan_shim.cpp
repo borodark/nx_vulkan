@@ -53,10 +53,11 @@ static VkPipe* get_or_create_pipe(const std::string& spv_path, unsigned int op,
     VkShaderModule shader = load_shader(spv_path);
     if (!shader) return nullptr;
 
-    /* push_size: declare 16 (max across all shader families). Vulkan
+    /* push_size: declare 40 (max across all shader families). Vulkan
      * ignores any push range bytes the shader doesn't read. binary/
-     * unary/random/transpose all use ≤12; reduce_axis uses 16. */
-    uint32_t push_size = 16;
+     * unary/random/transpose all use ≤12; reduce_axis uses 16;
+     * fused_elementwise uses 40 (n + n_ops + 8 op slots). */
+    uint32_t push_size = 40;
 
     VkPipe* pipe = new VkPipe();
     int rc = create_pipeline(pipe, shader, n_buffers, push_size, (int32_t) op);
@@ -303,6 +304,34 @@ int nxv_reduce_axis(void* out, void* a,
     unsigned int groups = (n_slots + 255) / 256;
 
     return dispatch(pipe, bufs, 2, groups, sizeof(push), push);
+}
+
+int nxv_fused_chain(void* out, void* a, void* b,
+                    unsigned int n, unsigned int n_ops,
+                    const unsigned int* ops,
+                    const char* spv_path) {
+    if (!out || !a || !b || !ops || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 3);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader bindings: a, b, out. Push: {n, n_ops, ops[8]} = 40 bytes. */
+    VkBuffer bufs[3] = { buf_a->buffer, buf_b->buffer, buf_out->buffer };
+
+    struct {
+        unsigned int n;
+        unsigned int n_ops;
+        unsigned int ops[8];
+    } push;
+    push.n = n;
+    push.n_ops = n_ops;
+    for (int i = 0; i < 8; i++) push.ops[i] = ops[i];
+
+    unsigned int groups = (n + 255) / 256;
+    return dispatch(pipe, bufs, 3, groups, sizeof(push), &push);
 }
 
 int nxv_transpose(void* out, void* a, unsigned int m, unsigned int n,

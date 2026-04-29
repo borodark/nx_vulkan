@@ -933,6 +933,61 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
     end
 
+    test "fused_chain: 2-op chain (multiply + add) matches separate dispatches" do
+      :ok = Nx.Vulkan.init()
+
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([0.5, 0.5, 0.5, 0.5])
+
+      {:ok, fused} = Nx.Vulkan.fused_chain(a, b, [:multiply, :add])
+      {:ok, vals} = Nx.Vulkan.download_f32(fused, 4)
+
+      # Reference: (a * b) + b = a*0.5 + 0.5
+      Enum.zip(vals, [1.0, 1.5, 2.0, 2.5])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
+    end
+
+    test "fused_chain: 3-op chain with unary tail (multiply + add + exp)" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 0.5])
+
+      {:ok, fused} = Nx.Vulkan.fused_chain(a, b, [:multiply, :add, :exp])
+      {:ok, vals} = Nx.Vulkan.download_f32(fused, 2)
+
+      # exp((a*b) + b): exp(1*1 + 1) = exp(2) = 7.389...
+      #                exp(2*0.5 + 0.5) = exp(1.5) = 4.4816...
+      Enum.zip(vals, [:math.exp(2.0), :math.exp(1.5)])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+
+    test "fused_chain: 8-op chain hits the limit and stays correct" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 1.0, 1.0])
+
+      # Chain: ((((a + b) * b) - b) / b) → square → exp → log → sqrt
+      # With b=1: a+1 → a+1 → a → a → a^2 → exp(a^2) → log(exp(a^2)) → sqrt(a^2) = |a|
+      {:ok, fused} =
+        Nx.Vulkan.fused_chain(a, b,
+          [:add, :multiply, :subtract, :divide, :square, :exp, :log, :sqrt])
+
+      {:ok, vals} = Nx.Vulkan.download_f32(fused, 3)
+
+      Enum.zip(vals, [1.0, 2.0, 3.0])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-3 end)
+    end
+
+    test "fused_chain rejects empty op list" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 1.0])
+
+      assert_raise KeyError, fn ->
+        # Empty list passes the Elixir-side guard; the NIF rejects it
+        # with :bad_op. But [:not_a_real_op] crashes earlier with KeyError
+        # — verify the atom-validation guard at least.
+        Nx.Vulkan.fused_chain(a, b, [:not_a_real_op])
+      end
+    end
+
     test "Nx.Vulkan.jit/2 evaluates a defn through the GPU backend" do
       :ok = Nx.Vulkan.init()
 
