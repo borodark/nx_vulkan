@@ -1,85 +1,119 @@
-# mac-248 — Phase 1.7 shader work
+# mac-248 — Optional speedup shader: `reduce_axis.comp`
 
-**Target:** add `erf` (op 13) and `expm1` (op 14) to `elementwise_unary.comp`,
-compile, push.
+**Goal**: replace the Phase 1.4 host-materialize partial-axis reduction
+with a real GPU shader. The current path downloads → walks output coords
+in Erlang → uploads. For exmc's per-window Welford updates (sum/max along
+a batch axis with thousands of elements per kept slot) the host loop is
+the bottleneck.
+
+**Scope**: per-axis `sum`, `reduce_max`, `reduce_min` over a single
+contiguous axis. Multi-axis reduce can stay host-materialized for v0.1
+(or compose: dispatch the shader N times for N reduced axes — second
+dispatch onward operates on the previous output).
+
+## Layout note
+
+Mac-248 uses the flat layout: `~/spirit/` and `~/nx_vulkan/` (no
+`projects/learn_erl/` prefix). Paths below assume that.
 
 ## Steps
 
 ```
 cd ~/spirit
 git pull
-git checkout -b feat/phase-1.7-shaders
+git checkout -b feat/reduce-axis-shader
 ```
 
-Edit `shaders/elementwise_unary.comp`. Add both helpers near the top of the file
-(above `void main()`):
+### New file: `shaders/reduce_axis.comp`
+
+The trick is the layout: any partial-axis reduction can be flattened
+into a 3-D iteration `(outer, reduce, inner)` where:
+- `outer` = product of dim sizes before the reduced axis
+- `reduce` = size of the reduced axis itself
+- `inner` = product of dim sizes after the reduced axis
+
+Output is `outer × inner` row-major. Each invocation handles one
+`(outer, inner)` slot and folds across `reduce`.
 
 ```glsl
-float erf_approx(float x) {
-    // Abramowitz & Stegun 7.1.26 — error ≤ 1.5e-7
-    float a1 =  0.254829592;
-    float a2 = -0.284496736;
-    float a3 =  1.421413741;
-    float a4 = -1.453152027;
-    float a5 =  1.061405429;
-    float p  =  0.3275911;
-    float s  = sign(x);
-    float ax = abs(x);
-    float t  = 1.0 / (1.0 + p * ax);
-    float y  = 1.0 - (((((a5*t + a4)*t + a3)*t + a2)*t + a1)*t) * exp(-ax * ax);
-    return s * y;
-}
+#version 450
 
-float expm1_approx(float x) {
-    if (abs(x) < 0.5) {
-        // Taylor: x + x^2/2 + x^3/6 + x^4/24 + x^5/120
-        float x2 = x * x;
-        return x
-             + x2 * 0.5
-             + x2 * x  * (1.0 / 6.0)
-             + x2 * x2 * (1.0 / 24.0)
-             + x2 * x2 * x * (1.0 / 120.0);
-    } else {
-        return exp(x) - 1.0;
+layout (local_size_x = 256) in;
+
+layout (push_constant) uniform Push {
+    uint outer;        // product of dims before reduced axis
+    uint reduce_size;  // size of the reduced axis
+    uint inner;        // product of dims after reduced axis
+    uint op;           // 0 = sum, 1 = max, 2 = min
+} pc;
+
+layout (std430, binding = 0) readonly  buffer In  { float a[]; };
+layout (std430, binding = 1) writeonly buffer Out { float c[]; };
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint n_slots = pc.outer * pc.inner;
+    if (slot >= n_slots) return;
+
+    uint o = slot / pc.inner;
+    uint i = slot % pc.inner;
+    uint stride_outer = pc.reduce_size * pc.inner;
+    uint base = o * stride_outer + i;
+
+    float acc;
+    if (pc.op == 0u) acc = 0.0;
+    else if (pc.op == 1u) acc = -1.0/0.0;   // -inf
+    else                  acc =  1.0/0.0;   // +inf
+
+    for (uint k = 0u; k < pc.reduce_size; ++k) {
+        float v = a[base + k * pc.inner];
+        if (pc.op == 0u)      acc += v;
+        else if (pc.op == 1u) acc = max(acc, v);
+        else                  acc = min(acc, v);
     }
+
+    c[slot] = acc;
 }
 ```
 
-In the op switch, add both new arms:
+**Optimization note (optional, v0.2)**: for very large `reduce_size`
+(>1024), tree-reduce within a workgroup using shared memory. For exmc's
+typical `reduce_size` of 100..2000 the linear-scan is fine and avoids
+shared-memory complexity. Skip the tree variant for now; ship the simple
+linear loop.
 
-```glsl
-else if (pc.op == 13u) v = erf_approx(in_v);
-else if (pc.op == 14u) v = expm1_approx(in_v);
+### Compile + push
+
+```
+glslangValidator -V shaders/reduce_axis.comp -o shaders/reduce_axis.spv
+git add shaders/reduce_axis.comp shaders/reduce_axis.spv
+git commit -m "shaders: reduce_axis — per-axis sum/max/min (Phase 1.4 GPU path)"
+git push origin feat/reduce-axis-shader
 ```
 
-Compile and push:
+### Sanity check (optional)
 
-```
-glslangValidator -V shaders/elementwise_unary.comp -o shaders/elementwise_unary.spv
-git add shaders/elementwise_unary.comp shaders/elementwise_unary.spv
-git commit -m "elementwise_unary: op 13 = erf, op 14 = expm1 (Phase 1.7)"
-git push origin feat/phase-1.7-shaders
-```
+Dispatch with `outer=2, reduce_size=3, inner=2, op=0` on input
+`[1,2, 3,4, 5,6, 7,8, 9,10, 11,12]` (a 2×3×2 row-major tensor reducing
+axis 1):
+- slot (0,0): a[0]+a[2]+a[4] = 1+3+5 = 9
+- slot (0,1): a[1]+a[3]+a[5] = 2+4+6 = 12
+- slot (1,0): a[6]+a[8]+a[10] = 7+9+11 = 27
+- slot (1,1): a[7]+a[9]+a[11] = 8+10+12 = 30
 
-## Sanity check (optional)
-
-- op 13 with `[-2.0, -1.0, 0.0, 1.0, 2.0]` → `[-0.9953, -0.8427, 0.0, 0.8427, 0.9953]` (±1.5e-7)
-- op 14 with `[-1.0, -0.1, 0.0, 0.1, 1.0]`  → `[-0.6321, -0.0952, 0.0, 0.1052, 1.7183]`
-
-Skip if no quick dispatcher — Linux side will validate via `mix test` once the
-`.spv` lands.
-
-## Layout note
-
-Mac-248 uses the flat layout: `~/spirit/` and `~/nx_vulkan/` (no
-`projects/learn_erl/` prefix). All paths in this TODO assume that.
+Expected output: `[9, 12, 27, 30]`.
 
 ## After your push
 
 Linux side will:
-1. Merge `feat/phase-1.7-shaders` to `main` in `spirit`.
-2. Bump op cap in `~/nx_vulkan/native/nx_vulkan_native/src/lib.rs` from 12 → 14.
-3. Wire `erf`/`expm1` through `Nx.Vulkan` (`@ops_unary` map) and
-   `Nx.Vulkan.Backend` (callbacks).
-4. Add tests; commit Phase 1.7 nx_vulkan side.
-5. Ping you to `cd ~/nx_vulkan && git pull && mix test` for three-host parity.
+1. Merge `feat/reduce-axis-shader` to `feature/vulkan-backend` in `spirit`.
+2. Add `nxv_reduce_axis(in, out, outer, reduce_size, inner, op)` to the
+   C++ shim + a `reduce_axis` Rust NIF.
+3. Add `Nx.Vulkan.reduce_axis/4` API + rewire
+   `Nx.Vulkan.Backend.do_reduce/4` to:
+   - compute `outer`/`reduce`/`inner` from the IR layout,
+   - dispatch to the shader for single-axis reduce,
+   - fold N times for multi-axis reduce, OR fall back to host for the
+     multi-axis case if the layout permutation is awkward.
+4. Add tests + benchmark vs the host path; merge.
+5. Ping you to `cd ~/nx_vulkan && git pull && mix test` for parity.
