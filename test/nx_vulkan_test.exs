@@ -642,4 +642,51 @@ defmodule Nx.VulkanTest do
       assert Nx.to_flat_list(t) == identity ++ identity
     end
   end
+
+  describe "v0.1 phase 1.6 — indexing (gather, indexed_put, indexed_add, take_diagonal)" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "take_diagonal of 3x3 (composes through gather)" do
+      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+                    backend: Nx.Vulkan.Backend)
+      d = Nx.take_diagonal(t)
+      assert Nx.to_flat_list(d) == [1.0, 5.0, 9.0]
+    end
+
+    test "take_diagonal of non-square 2x4" do
+      t = Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+                    backend: Nx.Vulkan.Backend)
+      d = Nx.take_diagonal(t)
+      assert Nx.to_flat_list(d) == [1.0, 6.0]
+    end
+
+    test "indexed_put writes scattered values" do
+      t = Nx.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], backend: Nx.Vulkan.Backend)
+      idx = Nx.tensor([[0, 1], [1, 2]])
+      upd = Nx.tensor([7.0, 9.0], backend: Nx.Vulkan.Backend)
+      out = Nx.indexed_put(t, idx, upd)
+      assert Nx.to_flat_list(out) == [0.0, 7.0, 0.0, 0.0, 0.0, 9.0]
+    end
+
+    test "indexed_add accumulates at scattered positions" do
+      t = Nx.tensor([1.0, 1.0, 1.0, 1.0], backend: Nx.Vulkan.Backend)
+      idx = Nx.tensor([[0], [2], [2]])
+      upd = Nx.tensor([5.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      out = Nx.indexed_add(t, idx, upd)
+      # idx [0]: +5 → 6.0, idx [2] twice: +3+4 → 8.0
+      assert Nx.to_flat_list(out) == [6.0, 1.0, 8.0, 1.0]
+    end
+
+    test "gather direct: pick rows from 2D" do
+      t = Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], backend: Nx.Vulkan.Backend)
+      # Single-axis gather over axis 0 — pick rows 2, 0, 1.
+      idx = Nx.tensor([[2], [0], [1]])
+      out = Nx.gather(t, idx, axes: [0])
+      assert Nx.shape(out) == {3, 2}
+      assert Nx.to_flat_list(out) == [5.0, 6.0, 1.0, 2.0, 3.0, 4.0]
+    end
+  end
 end

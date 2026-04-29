@@ -51,16 +51,20 @@ defmodule Nx.Vulkan.Backend do
 
   # ---------------------------------------------------------------- transfers
 
+  # from_binary / to_binary accept any element type. The compute ops
+  # below still gate on f32 (the shaders are f32-only). Non-f32 buffers
+  # are transparent storage for things like integer indices that need
+  # to round-trip through the backend before being consumed by gather
+  # or indexed_put.
   @impl true
   def from_binary(%T{shape: shape, type: type} = tensor, binary, _opts) do
-    ensure_f32!(type)
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(binary)
     put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref, shape: shape}}, _limit) do
-    n_bytes = byte_size_of(shape) * 4
+  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type, shape: shape}, _limit) do
+    n_bytes = byte_size_of(shape) * element_bytes(type)
 
     case Nx.Vulkan.Native.download_binary(ref, n_bytes) do
       {:ok, bin} -> bin
@@ -68,9 +72,11 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
+  defp element_bytes({_, bits}), do: div(bits, 8)
+
   @impl true
   def backend_copy(%T{} = tensor, backend, opts) do
-    bin = to_binary(tensor, byte_size_of(tensor.shape) * 4)
+    bin = to_binary(tensor, byte_size_of(tensor.shape) * element_bytes(tensor.type))
     backend.from_binary(tensor, bin, opts)
   end
 
@@ -514,6 +520,132 @@ defmodule Nx.Vulkan.Backend do
   defp to_int(n) when is_integer(n), do: n
   defp to_int(%T{} = t), do: Nx.to_number(t)
 
+  # ---------------------------------------------------------------- indexing (v0.1.6)
+
+  # gather: indices is a tensor of shape `{..., d}` where d = length(axes)
+  # is the number of input axes addressed. For each row of indices, pick
+  # one element from input. Output shape = indices.shape minus the last
+  # axis (when axes covers the full input rank). When axes is partial,
+  # remaining input axes are preserved tail-side.
+  @impl true
+  def gather(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = input, indices, opts) do
+    ensure_f32!(type)
+
+    axes = opts[:axes] || Enum.to_list(0..(tuple_size(in_shape) - 1)//1)
+    in_dims = Tuple.to_list(in_shape)
+
+    in_floats = to_binary(input, byte_size_of(in_shape) * 4) |> decode_f32()
+    idx_list = Nx.to_flat_list(indices)
+
+    indices_shape = Tuple.to_list(indices.shape)
+    d = List.last(indices_shape)
+    n_picks = div(Enum.reduce(indices_shape, 1, &*/2), d)
+
+    # Determine the "kept" input axes (not in `axes`) — those become
+    # the trailing dims of each gathered slice.
+    axes_set = MapSet.new(axes)
+    kept_axes = Enum.reject(0..(tuple_size(in_shape) - 1)//1, &MapSet.member?(axes_set, &1))
+    kept_sizes = Enum.map(kept_axes, &Enum.at(in_dims, &1))
+    n_kept = Enum.reduce(kept_sizes, 1, &*/2)
+
+    # For each pick: indices row gives values for `axes`. Iterate kept
+    # coords for the slice. Total output count = n_picks * n_kept.
+    output =
+      for pick_idx <- 0..(n_picks - 1)//1, kept_flat <- 0..(n_kept - 1)//1 do
+        coord_for_axis =
+          for {ax, k} <- Enum.with_index(axes), into: %{} do
+            {ax, Enum.at(idx_list, pick_idx * d + k)}
+          end
+
+        kept_coords = unflatten(kept_flat, kept_sizes)
+
+        kept_for_axis =
+          Enum.zip(kept_axes, kept_coords) |> Map.new()
+
+        in_coords =
+          for ax <- 0..(tuple_size(in_shape) - 1)//1 do
+            Map.get(coord_for_axis, ax) || Map.fetch!(kept_for_axis, ax)
+          end
+
+        Enum.at(in_floats, flatten(in_coords, in_dims))
+      end
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  # indexed_put writes scattered values: for each row of indices and
+  # corresponding update, set target[idx_row] = update_value. Last write
+  # wins on collisions (matching Nx.BinaryBackend semantics).
+  @impl true
+  def indexed_put(out, target, indices, updates, opts) do
+    do_indexed(out, target, indices, updates, opts, :put)
+  end
+
+  # indexed_add: same as indexed_put but accumulates. Repeated indices
+  # sum, which is what autograd's scatter dual needs.
+  @impl true
+  def indexed_add(out, target, indices, updates, opts) do
+    do_indexed(out, target, indices, updates, opts, :add)
+  end
+
+  defp do_indexed(%T{shape: out_shape, type: type} = out, %T{shape: target_shape} = target,
+                  indices, updates, opts, mode) do
+    ensure_f32!(type)
+    axes = opts[:axes] || Enum.to_list(0..(tuple_size(target_shape) - 1)//1)
+    target_dims = Tuple.to_list(target_shape)
+
+    target_floats = to_binary(target, byte_size_of(target_shape) * 4) |> decode_f32()
+    update_floats = Nx.to_flat_list(updates)
+    idx_list = Nx.to_flat_list(indices)
+
+    indices_shape = Tuple.to_list(indices.shape)
+    d = List.last(indices_shape)
+    n_writes = div(Enum.reduce(indices_shape, 1, &*/2), d)
+
+    axes_set = MapSet.new(axes)
+    kept_axes = Enum.reject(0..(tuple_size(target_shape) - 1)//1, &MapSet.member?(axes_set, &1))
+    kept_sizes = Enum.map(kept_axes, &Enum.at(target_dims, &1))
+    n_kept = Enum.reduce(kept_sizes, 1, &*/2)
+
+    output =
+      Enum.reduce(0..(n_writes - 1)//1, target_floats, fn pick_idx, acc ->
+        coord_for_axis =
+          for {ax, k} <- Enum.with_index(axes), into: %{} do
+            {ax, Enum.at(idx_list, pick_idx * d + k)}
+          end
+
+        Enum.reduce(0..(n_kept - 1)//1, acc, fn kept_flat, inner_acc ->
+          kept_coords = unflatten(kept_flat, kept_sizes)
+          kept_for_axis = Enum.zip(kept_axes, kept_coords) |> Map.new()
+
+          target_coords =
+            for ax <- 0..(tuple_size(target_shape) - 1)//1 do
+              Map.get(coord_for_axis, ax) || Map.fetch!(kept_for_axis, ax)
+            end
+
+          flat = flatten(target_coords, target_dims)
+          v = Enum.at(update_floats, pick_idx * n_kept + kept_flat)
+          old = Enum.at(inner_acc, flat)
+
+          new_val =
+            case mode do
+              :put -> v
+              :add -> old + v
+            end
+
+          List.replace_at(inner_acc, flat, new_val)
+        end)
+      end)
+
+    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+  end
+
+  defp decode_f32(bin), do: for <<x::float-32-native <- bin>>, do: x
+
   # ---------------------------------------------------------------- helpers
 
   defp ensure_f32!({:f, 32}), do: :ok
@@ -539,6 +671,7 @@ defmodule Nx.Vulkan.Backend do
 
   @impl true
   def inspect(%T{} = tensor, opts) do
-    Nx.Backend.inspect(tensor, to_binary(tensor, byte_size_of(tensor.shape) * 4), opts)
+    bin = to_binary(tensor, byte_size_of(tensor.shape) * element_bytes(tensor.type))
+    Nx.Backend.inspect(tensor, bin, opts)
   end
 end
