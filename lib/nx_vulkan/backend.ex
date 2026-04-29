@@ -330,14 +330,31 @@ defmodule Nx.Vulkan.Backend do
   def dot(%T{shape: out_shape, type: type} = out, %T{shape: a_shape} = a, _ca, _ba,
           %T{shape: b_shape} = b, _cb, _bb) do
     ensure_f32!(type)
-    {m, k} = a_shape
-    {^k, n} = b_shape
-    {^m, ^n} = out_shape
 
-    a_data = to_vulkan!(a)
-    b_data = to_vulkan!(b)
-    {:ok, ref} = Nx.Vulkan.matmul(a_data.ref, b_data.ref, m, n, k)
-    put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+    case {a_shape, b_shape} do
+      {{m, k}, {k2, n}} when k == k2 ->
+        # Standard rank-2 × rank-2 matmul.
+        a_data = to_vulkan!(a)
+        b_data = to_vulkan!(b)
+        {:ok, ref} = Nx.Vulkan.matmul(a_data.ref, b_data.ref, m, n, k)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+
+      {{m, k}, {k2}} when k == k2 ->
+        # Matrix-vector: reshape b to {k, 1}, matmul → {m, 1}, return {m}.
+        a_data = to_vulkan!(a)
+        b_data = to_vulkan!(b)
+        {:ok, ref} = Nx.Vulkan.matmul(a_data.ref, b_data.ref, m, 1, k)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+
+      _ ->
+        # Anything else (vector-matrix, vector-vector, batched contractions,
+        # ≥3D) → host fallback. Rare in MCMC and shape complexity isn't
+        # worth a special path for v0.1.
+        a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+        b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
+        res = Nx.dot(a_host, b_host)
+        upload_host_tensor(out, res)
+    end
   end
 
   # ---------------------------------------------------------------- reshape
