@@ -1,0 +1,18 @@
+[package]
+name = "nx_vulkan_native"
+version = "0.0.1"
+authors = ["Igor Ostaptchenko <igor@octanix.com>"]
+edition = "2021"
+
+[lib]
+name = "nx_vulkan_native"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.30"
+
+[build-dependencies]
+# build.rs compiles the extern "C" shim against spirit's
+# Backend_par_vulkan.cpp. cc handles the C++ compile.
+cc = "1.0"
