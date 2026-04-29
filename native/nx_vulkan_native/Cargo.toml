@@ -10,7 +10,9 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.30"
+# Rust-side rustler crate (separate from the Hex orchestrator package
+# in mix.exs). 0.36 has the term-type fix that 0.30 lacked.
+rustler = "0.36"
 
 [build-dependencies]
 # build.rs compiles the extern "C" shim against spirit's

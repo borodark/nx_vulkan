@@ -79,19 +79,13 @@ mix deps.get
 mix compile
 ```
 
-### Toolchain note (April 2026)
+### Toolchain pin (April 2026)
 
-Rustler 0.36 / 0.37 emits a `rustler-sys` borrow that rustc 1.90
-rejects (`&self.as_c_arg()` where `self.as_c_arg()` is wanted in
-`enif_term_type`). Two workarounds while the upstream patch lands:
-
-  1. **Pin rustc to 1.85** via `rustup default 1.85`, OR
-  2. **Apply the patch in this PR**:
-     <https://github.com/rusterlium/rustler/pull/...>  (TBD; track upstream)
-
-The Rust source in this repo is otherwise valid against any
-rustler 0.36+ — only the deeper `rustler-sys` macro generation is
-the issue.
+`rust-toolchain.toml` pins rustc to **1.85** because rustler 0.36's
+upstream `rustler-sys` macro generation produces a `&usize` where
+`usize` is wanted in `enif_term_type` against rustc 1.90's stricter
+borrow-checker. 1.85 accepts the older form. Bump the pin once
+upstream rustler emits a corrected signature.
 
 ## Usage (target — v0.1)
 
@@ -114,8 +108,10 @@ iex> Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend) |> Nx.exp()
 ```
 
 Today (v0.0.1): only `init/0`, `device_name/0`, `has_f64?/0` are
-wired. Tensor operations land in v0.0.2 once the resource lifetime
-plumbing is verified.
+wired. End-to-end smoke verified on RTX 3060 Ti — the Elixir call
+reaches Spirit's `vk_init` and reports the device. Tensor
+operations land in v0.0.2 once the resource lifetime plumbing is
+verified.
 
 ## License
 

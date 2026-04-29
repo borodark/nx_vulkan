@@ -7,7 +7,7 @@
 //! v0.0.1 only wires the bootstrap path: vk_init, device_name, has_f64.
 //! Tensor allocation + dispatch land in v0.0.2.
 
-use rustler::{Atom, Encoder, Env, Error, NifResult, Term};
+use rustler::{Encoder, Env, Error, NifResult, Term};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::Mutex;
@@ -17,14 +17,12 @@ mod atoms {
         ok,
         error,
         no_device,
-        already_initialized,
     }
 }
 
 // extern "C" declarations matching c_src/nx_vulkan_shim.h.
-extern "C" {
+unsafe extern "C" {
     fn nxv_init() -> i32;
-    fn nxv_destroy();
     fn nxv_device_name() -> *const c_char;
     fn nxv_has_f64() -> i32;
 }
@@ -75,4 +73,6 @@ fn has_f64<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     Ok((rc != 0).encode(env))
 }
 
-rustler::init!("Elixir.Nx.Vulkan.Native", [init, device_name, has_f64]);
+// rustler 0.36 deprecated the second arg (functions are auto-discovered
+// via the #[rustler::nif] attribute). One-arg form is the new shape.
+rustler::init!("Elixir.Nx.Vulkan.Native");

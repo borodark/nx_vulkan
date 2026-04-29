@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to 1.85 because rustler 0.36/0.37 hit a rustler-sys borrow
+# signature mismatch on rustc 1.90 (`&self.as_c_arg()` vs
+# `self.as_c_arg()` in `enif_term_type`). Track upstream rustler for
+# a fix and bump this when it lands.
+channel = "1.85.0"
+profile = "minimal"
+components = ["rustc", "cargo"]
