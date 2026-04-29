@@ -28,8 +28,10 @@ defmodule Nx.Vulkan.Backend do
 
   ## Limitations
 
-    - **f32 only.** f64 is supported by Spirit's shaders via spec
-      constant but the type-system wiring takes more work; deferred.
+    - **Compute is f32 only.** Storage round-trips any type
+      (f32/f64/s8..s64/u8..u64) via `from_binary`/`to_binary`/`as_type`.
+      Per-element ops still dispatch f32 shaders. Use `as_type` to cast
+      f64 accumulators to f32 before computing.
     - **No autograd.** `defn grad` won't work end-to-end. The forward
       path is what this backend proves.
     - **Per-axis reductions are host-materialized.** Full-axis
@@ -647,6 +649,63 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp decode_f32(bin), do: for <<x::float-32-native <- bin>>, do: x
+
+  # ---------------------------------------------------------------- as_type (v0.1.8)
+
+  # Round-trip cast between numeric element types. Same-type is a
+  # zero-copy ref rewrap. Different types host-materialize: download
+  # → decode per source type → re-encode per destination type → upload.
+  #
+  # The compute shaders are still f32-only; this path lets exmc's mass
+  # matrix accumulate in f64 and convert back to f32 before per-step ops.
+  @impl true
+  def as_type(%T{type: dst_type, shape: shape} = out, %T{type: src_type, data: %__MODULE__{ref: ref}} = tensor) do
+    if src_type == dst_type do
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: dst_type})
+    else
+      n_bytes_src = byte_size_of(shape) * element_bytes(src_type)
+      {:ok, src_bin} = Nx.Vulkan.Native.download_binary(ref, n_bytes_src)
+
+      values = decode_typed(src_bin, src_type)
+      dst_bin = encode_typed(values, dst_type)
+
+      {:ok, new_ref} = Nx.Vulkan.Native.upload_binary(dst_bin)
+      put_in(out.data, %__MODULE__{ref: new_ref, shape: shape, type: dst_type})
+    end
+  end
+
+  defp decode_typed(<<>>, _), do: []
+  defp decode_typed(bin, {:f, 32}), do: for <<x::float-32-native <- bin>>, do: x
+  defp decode_typed(bin, {:f, 64}), do: for <<x::float-64-native <- bin>>, do: x
+  defp decode_typed(bin, {:s, 8}),  do: for <<x::signed-8 <- bin>>, do: x
+  defp decode_typed(bin, {:s, 16}), do: for <<x::signed-16-native <- bin>>, do: x
+  defp decode_typed(bin, {:s, 32}), do: for <<x::signed-32-native <- bin>>, do: x
+  defp decode_typed(bin, {:s, 64}), do: for <<x::signed-64-native <- bin>>, do: x
+  defp decode_typed(bin, {:u, 8}),  do: for <<x::unsigned-8 <- bin>>, do: x
+  defp decode_typed(bin, {:u, 16}), do: for <<x::unsigned-16-native <- bin>>, do: x
+  defp decode_typed(bin, {:u, 32}), do: for <<x::unsigned-32-native <- bin>>, do: x
+  defp decode_typed(bin, {:u, 64}), do: for <<x::unsigned-64-native <- bin>>, do: x
+
+  defp encode_typed(values, {:f, 32}),
+    do: values |> Enum.map(fn v -> <<v / 1.0::float-32-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:f, 64}),
+    do: values |> Enum.map(fn v -> <<v / 1.0::float-64-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:s, 8}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::signed-8>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:s, 16}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::signed-16-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:s, 32}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::signed-32-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:s, 64}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::signed-64-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:u, 8}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-8>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:u, 16}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-16-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:u, 32}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-32-native>> end) |> IO.iodata_to_binary()
+  defp encode_typed(values, {:u, 64}),
+    do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-64-native>> end) |> IO.iodata_to_binary()
 
   # ---------------------------------------------------------------- helpers
 

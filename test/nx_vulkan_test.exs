@@ -748,4 +748,74 @@ defmodule Nx.VulkanTest do
       assert_in_delta b, -0.99950e-3, 1.0e-7
     end
   end
+
+  describe "v0.1 phase 1.8 — f64 + casts (as_type)" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "f64 storage round-trip" do
+      # f64 doesn't go through Nx.Vulkan.upload_f32 (that's f32); use
+      # raw binary path. Phase 1.6 generalized from_binary/to_binary
+      # to accept any element type.
+      bin = <<1.5::float-64-native, 2.5::float-64-native, 3.5::float-64-native>>
+      t = Nx.from_binary(bin, :f64, backend: Nx.Vulkan.Backend)
+      assert Nx.shape(t) == {3}
+      assert Nx.type(t) == {:f, 64}
+      assert Nx.to_flat_list(t) == [1.5, 2.5, 3.5]
+    end
+
+    test "as_type f32 → f64 preserves values" do
+      t = Nx.tensor([1.5, 2.5, 3.5], type: :f32, backend: Nx.Vulkan.Backend)
+      t64 = Nx.as_type(t, :f64)
+      assert Nx.type(t64) == {:f, 64}
+      assert Nx.to_flat_list(t64) == [1.5, 2.5, 3.5]
+    end
+
+    test "as_type f64 → f32 (allow precision loss)" do
+      bin = <<1.5::float-64-native, 2.25::float-64-native>>
+      t64 = Nx.from_binary(bin, :f64, backend: Nx.Vulkan.Backend)
+      t32 = Nx.as_type(t64, :f32)
+      assert Nx.type(t32) == {:f, 32}
+      assert Nx.to_flat_list(t32) == [1.5, 2.25]
+    end
+
+    test "as_type f32 → s32 truncates toward zero" do
+      t = Nx.tensor([1.7, -1.7, 3.0, -0.5], type: :f32, backend: Nx.Vulkan.Backend)
+      ti = Nx.as_type(t, :s32)
+      assert Nx.type(ti) == {:s, 32}
+      assert Nx.to_flat_list(ti) == [1, -1, 3, 0]
+    end
+
+    test "as_type s64 → f32" do
+      bin = <<1::signed-64-native, 2::signed-64-native, -3::signed-64-native>>
+      ti = Nx.from_binary(bin, :s64, backend: Nx.Vulkan.Backend)
+      tf = Nx.as_type(ti, :f32)
+      assert Nx.type(tf) == {:f, 32}
+      assert Nx.to_flat_list(tf) == [1.0, 2.0, -3.0]
+    end
+
+    test "as_type same-type is zero-copy ref rewrap" do
+      t = Nx.tensor([1.0, 2.0, 3.0], type: :f32, backend: Nx.Vulkan.Backend)
+      t2 = Nx.as_type(t, :f32)
+      # Same underlying ref — both should point to identical GPU buffer.
+      assert t.data.ref == t2.data.ref
+      assert Nx.to_flat_list(t2) == [1.0, 2.0, 3.0]
+    end
+
+    test "f64 round-trip preserves precision a 1e-15 f32 cannot" do
+      # 1.0 + 1.0e-15 collapses to 1.0 in f32; f64 keeps it.
+      v = 1.0 + 1.0e-15
+      bin = <<v::float-64-native>>
+      t64 = Nx.from_binary(bin, :f64, backend: Nx.Vulkan.Backend)
+      [back] = Nx.to_flat_list(t64)
+      assert back == v
+
+      # Cast to f32 and observe the collapse.
+      t32 = Nx.as_type(t64, :f32)
+      [collapsed] = Nx.to_flat_list(t32)
+      assert collapsed == 1.0
+    end
+  end
 end
