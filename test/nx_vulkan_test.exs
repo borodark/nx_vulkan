@@ -96,4 +96,86 @@ defmodule Nx.VulkanTest do
       assert results == Enum.map(1..50, &(&1 * 1.0))
     end
   end
+
+  describe "v0.0.3 — elementwise binary" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "add" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0, 40.0])
+      {:ok, c} = Nx.Vulkan.add(a, b)
+      assert {:ok, [11.0, 22.0, 33.0, 44.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    test "multiply" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0, 40.0])
+      {:ok, c} = Nx.Vulkan.multiply(a, b)
+      assert {:ok, [10.0, 40.0, 90.0, 160.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    test "subtract" do
+      {:ok, a} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      {:ok, c} = Nx.Vulkan.subtract(a, b)
+      assert {:ok, [9.0, 18.0, 27.0]} = Nx.Vulkan.download_f32(c, 3)
+    end
+
+    test "divide" do
+      {:ok, a} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0, 40.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 5.0, 8.0])
+      {:ok, c} = Nx.Vulkan.divide(a, b)
+      assert {:ok, [5.0, 5.0, 6.0, 5.0]} = Nx.Vulkan.download_f32(c, 4)
+    end
+
+    test "max + min" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 5.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([2.0, 4.0, 3.0])
+
+      {:ok, mx} = Nx.Vulkan.max(a, b)
+      assert {:ok, [2.0, 5.0, 3.0]} = Nx.Vulkan.download_f32(mx, 3)
+
+      {:ok, mn} = Nx.Vulkan.min(a, b)
+      assert {:ok, [1.0, 4.0, 3.0]} = Nx.Vulkan.download_f32(mn, 3)
+    end
+
+    test "pow" do
+      {:ok, a} = Nx.Vulkan.upload_f32([2.0, 3.0, 4.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([2.0, 2.0, 0.5])
+      {:ok, c} = Nx.Vulkan.pow(a, b)
+      {:ok, [r1, r2, r3]} = Nx.Vulkan.download_f32(c, 3)
+      assert_in_delta r1, 4.0, 1.0e-3
+      assert_in_delta r2, 9.0, 1.0e-3
+      assert_in_delta r3, 2.0, 1.0e-3
+    end
+
+    test "size mismatch returns :size_mismatch" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      assert {:error, :size_mismatch} = Nx.Vulkan.add(a, b)
+    end
+
+    test "chained ops keep producing fresh tensors" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([10.0, 20.0, 30.0])
+
+      # (a + b) * a = [11, 22, 33] * [1, 2, 3] = [11, 44, 99]
+      {:ok, c} = Nx.Vulkan.add(a, b)
+      {:ok, d} = Nx.Vulkan.multiply(c, a)
+      assert {:ok, [11.0, 44.0, 99.0]} = Nx.Vulkan.download_f32(d, 3)
+    end
+
+    test "1024 elements (multi-workgroup)" do
+      input = Enum.map(1..1024, fn i -> i * 1.0 end)
+      {:ok, a} = Nx.Vulkan.upload_f32(input)
+      {:ok, b} = Nx.Vulkan.upload_f32(input)
+      {:ok, c} = Nx.Vulkan.add(a, b)
+      {:ok, result} = Nx.Vulkan.download_f32(c, 1024)
+      assert hd(result) == 2.0
+      assert List.last(result) == 2048.0
+    end
+  end
 end

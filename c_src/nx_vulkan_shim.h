@@ -52,6 +52,20 @@ int nxv_buf_upload(void* handle, const void* data, unsigned long n_bytes);
 /* Download `n_bytes` from the buffer to host memory. Returns 0 on success. */
 int nxv_buf_download(void* handle, void* data, unsigned long n_bytes);
 
+/* Compute primitives (v0.0.3) ----------------------------------------- */
+
+/* Elementwise binary op. `out`, `a`, `b` are buffers of `n` f32 elements.
+ * `op` is the elementwise_binary.spv spec constant:
+ *   0=add, 1=mul, 2=sub, 3=div, 4=pow, 5=max, 6=min.
+ * Returns 0 on success.
+ *
+ * Pipeline is created on first use per (shader_path, op) and cached in
+ * the shim — avoids the ~22 ms pipeline-create overhead documented in
+ * spirit's RESULTS_RTX_3060_TI.md reductions section. */
+int nxv_apply_binary(void* out, void* a, void* b,
+                     unsigned int n, unsigned int op,
+                     const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

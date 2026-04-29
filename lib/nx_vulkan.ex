@@ -104,4 +104,35 @@ defmodule Nx.Vulkan do
 
   @doc "Byte size of an uploaded tensor."
   defdelegate byte_size(tensor), to: Nx.Vulkan.Native
+
+  # ------------------------------------------------------------------
+  # v0.0.3 — elementwise binary ops
+  # ------------------------------------------------------------------
+
+  @ops_binary %{
+    add: 0,
+    multiply: 1,
+    subtract: 2,
+    divide: 3,
+    pow: 4,
+    max: 5,
+    min: 6
+  }
+
+  for {name, op_const} <- @ops_binary do
+    @doc """
+    Elementwise `#{name}` of two GPU tensors of equal length.
+    Returns `{:ok, tensor}` or `{:error, reason}`.
+    """
+    def unquote(name)(a, b) do
+      Nx.Vulkan.Native.apply_binary(a, b, unquote(op_const), shader_path("elementwise_binary.spv"))
+    end
+  end
+
+  defp shader_path(name) do
+    :nx_vulkan
+    |> :code.priv_dir()
+    |> Path.join("shaders")
+    |> Path.join(name)
+  end
 end

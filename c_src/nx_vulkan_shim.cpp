@@ -9,13 +9,39 @@
 #include "nx_vulkan_shim.h"
 #include <engine/Backend_par_vulkan.hpp>
 #include <cstring>
+#include <map>
 #include <string>
+#include <utility>
 
 using namespace Engine::Backend::vulkan;
 
 /* The selected device name, cached after nxv_init so we can hand out
  * a stable pointer to Rust. */
 static std::string g_device_name;
+
+/* Pipeline cache keyed on (spv_path, op_spec_constant). Persistent
+ * across calls — first dispatch pays the create cost, subsequent ones
+ * reuse the pipeline. Cleared in nxv_destroy. */
+static std::map<std::pair<std::string, unsigned int>, VkPipe*> g_pipe_cache;
+
+static VkPipe* get_or_create_binary_pipe(const std::string& spv_path, unsigned int op) {
+    auto key = std::make_pair(spv_path, op);
+    auto it = g_pipe_cache.find(key);
+    if (it != g_pipe_cache.end()) return it->second;
+
+    VkShaderModule shader = load_shader(spv_path);
+    if (!shader) return nullptr;
+
+    VkPipe* pipe = new VkPipe();
+    int rc = create_pipeline(pipe, shader, 3, sizeof(unsigned int), (int32_t) op);
+    if (rc != 0) {
+        delete pipe;
+        return nullptr;
+    }
+
+    g_pipe_cache[key] = pipe;
+    return pipe;
+}
 
 extern "C" {
 
@@ -27,6 +53,13 @@ int nxv_init(void) {
 }
 
 void nxv_destroy(void) {
+    /* Tear down cached pipelines first (they reference the device). */
+    for (auto& kv : g_pipe_cache) {
+        destroy_pipeline(kv.second);
+        delete kv.second;
+    }
+    g_pipe_cache.clear();
+
     vk_destroy();
     g_device_name.clear();
 }
@@ -76,6 +109,26 @@ int nxv_buf_download(void* handle, void* data, unsigned long n_bytes) {
     if (!handle || !data) return -1;
     VkBuf* buf = (VkBuf*) handle;
     return download(buf, data, (VkDeviceSize) n_bytes);
+}
+
+int nxv_apply_binary(void* out, void* a, void* b,
+                     unsigned int n, unsigned int op,
+                     const char* spv_path) {
+    if (!out || !a || !b || !spv_path) return -1;
+
+    VkPipe* pipe = get_or_create_binary_pipe(std::string(spv_path), op);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Shader binding order: a, b, out. Push constant: n. */
+    VkBuffer bufs[3] = { buf_a->buffer, buf_b->buffer, buf_out->buffer };
+    unsigned int push_n = n;
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 3, groups, sizeof(unsigned int), &push_n);
 }
 
 }

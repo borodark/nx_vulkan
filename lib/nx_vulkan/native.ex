@@ -30,4 +30,7 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def byte_size(_tensor), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def apply_binary(_a, _b, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 end

@@ -40,4 +40,22 @@ fn main() {
     // Link Vulkan loader. On Linux this is libvulkan.so; on FreeBSD
     // the same; on macOS, MoltenVK provides libvulkan.dylib.
     println!("cargo:rustc-link-lib=dylib=vulkan");
+
+    // Copy Spirit's pre-compiled SPIR-V shaders into the priv/shaders
+    // directory so Elixir-side code can resolve them via
+    // :code.priv_dir(:nx_vulkan). On every build (cheap; small files).
+    let priv_shaders = nx_vulkan_root.join("priv").join("shaders");
+    let _ = std::fs::create_dir_all(&priv_shaders);
+    let spirit_shaders = spirit.join("shaders");
+    if spirit_shaders.exists() {
+        for entry in std::fs::read_dir(&spirit_shaders).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("spv") {
+                let dst = priv_shaders.join(path.file_name().unwrap());
+                let _ = std::fs::copy(&path, &dst);
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
 }

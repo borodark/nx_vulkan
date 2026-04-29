@@ -21,6 +21,8 @@ mod atoms {
         upload_failed,
         download_failed,
         size_mismatch,
+        dispatch_failed,
+        bad_op,
     }
 }
 
@@ -34,6 +36,15 @@ unsafe extern "C" {
     fn nxv_buf_free(handle: *mut c_void);
     fn nxv_buf_upload(handle: *mut c_void, data: *const c_void, n_bytes: u64) -> i32;
     fn nxv_buf_download(handle: *mut c_void, data: *mut c_void, n_bytes: u64) -> i32;
+
+    fn nxv_apply_binary(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        n: u32,
+        op: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -165,6 +176,49 @@ fn download_binary<'a>(
 #[rustler::nif]
 fn byte_size<'a>(env: Env<'a>, tensor: ResourceArc<VulkanTensor>) -> NifResult<Term<'a>> {
     Ok((tensor.n_bytes).encode(env))
+}
+
+/// Apply an elementwise binary op to two GPU tensors. Allocates the
+/// output buffer (same byte_size as inputs) and dispatches the
+/// elementwise_binary shader. Returns a new ResourceArc.
+///
+/// op spec constant: 0=add, 1=mul, 2=sub, 3=div, 4=pow, 5=max, 6=min.
+#[rustler::nif]
+fn apply_binary<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if a.n_bytes != b.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    if op > 6 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_bytes = a.n_bytes;
+    let n_elems = (n_bytes / 4) as u32;     // f32 elements
+
+    let out_handle = unsafe { nxv_buf_alloc(n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_apply_binary(out_handle, a.handle, b.handle, n_elems, op, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 
 fn on_load(env: Env, _info: Term) -> bool {
