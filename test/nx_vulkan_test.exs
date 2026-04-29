@@ -976,6 +976,37 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-3 end)
     end
 
+    test "fused_chain with erf in middle (cases 13/14 now wired)" do
+      :ok = Nx.Vulkan.init()
+
+      # Chain: (a + b) → erf
+      # With a=[0.0], b=[1.0]: erf(0+1) = erf(1) = 0.8427
+      # With a=[-1.0], b=[1.0]: erf(-1+1) = erf(0) = 0
+      {:ok, a} = Nx.Vulkan.upload_f32([0.0, -1.0, 1.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 1.0, 1.0])
+
+      {:ok, fused} = Nx.Vulkan.fused_chain(a, b, [:add, :erf])
+      {:ok, vals} = Nx.Vulkan.download_f32(fused, 3)
+
+      Enum.zip(vals, [:math.erf(1.0), 0.0, :math.erf(2.0)])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.5e-4 end)
+    end
+
+    test "fused_chain with expm1 in chain" do
+      # exp(0.001) - 1 ≈ 1.0005e-3 — Taylor branch.
+      {:ok, a} = Nx.Vulkan.upload_f32([0.001, 0.0, 1.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([0.0, 0.0, 0.0])
+
+      {:ok, fused} = Nx.Vulkan.fused_chain(a, b, [:add, :expm1])
+      {:ok, vals} = Nx.Vulkan.download_f32(fused, 3)
+
+      # :math doesn't have expm1; compute via exp(x)-1.
+      expected = [:math.exp(0.001) - 1, 0.0, :math.exp(1.0) - 1]
+
+      Enum.zip(vals, expected)
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
+    end
+
     test "fused_chain rejects empty op list" do
       {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0])
       {:ok, b} = Nx.Vulkan.upload_f32([1.0, 1.0])
@@ -986,6 +1017,33 @@ defmodule Nx.VulkanTest do
         # — verify the atom-validation guard at least.
         Nx.Vulkan.fused_chain(a, b, [:not_a_real_op])
       end
+    end
+
+    test "Path A.2 — Fuse.fuse macro detects 3-op chain" do
+      :ok = Nx.Vulkan.init()
+      import Nx.Vulkan.Fuse
+
+      # exp(a*b + b)
+      f = fuse(fn a, b -> Nx.exp(Nx.add(Nx.multiply(a, b), b)) end)
+
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0])
+      {:ok, b} = Nx.Vulkan.upload_f32([1.0, 0.5])
+
+      {:ok, ref} = f.(a, b)
+      {:ok, vals} = Nx.Vulkan.download_f32(ref, 2)
+
+      # exp(1*1 + 1) = exp(2); exp(2*0.5 + 0.5) = exp(1.5)
+      Enum.zip(vals, [:math.exp(2.0), :math.exp(1.5)])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+
+    test "Path A.2 — Fuse falls back when body isn't a recognized chain" do
+      import Nx.Vulkan.Fuse
+
+      # Not a chain — body uses a third tensor `c` (not bound). The
+      # macro returns the original function unchanged.
+      f = fuse(fn a, b -> Nx.add(a, Nx.tensor([1.0, 2.0])) end)
+      assert is_function(f, 2)
     end
 
     test "Nx.Vulkan.jit/2 evaluates a defn through the GPU backend" do

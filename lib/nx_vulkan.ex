@@ -377,10 +377,10 @@ defmodule Nx.Vulkan do
       `:negate`, `:sigmoid`, `:tanh`, `:relu`, `:ceil`, `:floor`,
       `:sign`, `:reciprocal`, `:square`
 
-  Note: `:erf` and `:expm1` have op codes 113/114 but the v0.2 fused
-  shader's switch doesn't yet implement them — those will pass through
-  the chain unchanged. Use the per-op shader dispatch for chains that
-  include erf/expm1.
+  Note: `:erf` (113) and `:expm1` (114) became fully functional in
+  the chain after spirit `161296d1` — `apply_unary` switched in cases
+  13 and 14. Earlier versions of the fused shader passed them through
+  unchanged.
 
   Chains longer than 8 ops should be split: dispatch fused_chain twice
   with the running tensor used as `a` for the second call.
