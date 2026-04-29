@@ -58,4 +58,8 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def fused_chain(_a, _b, _ops, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def apply_binary_broadcast(_a, _b, _op, _ndim, _out_shape, _a_strides, _b_strides, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

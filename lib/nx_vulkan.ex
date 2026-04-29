@@ -427,4 +427,70 @@ defmodule Nx.Vulkan do
         :ok
     end
   end
+
+  # ------------------------------------------------------------------
+  # Broadcast elementwise binary
+  # ------------------------------------------------------------------
+
+  @doc """
+  Dispatch the broadcast variant of an elementwise binary op. `op` is
+  one of the binary atom keys in `@ops_binary`, ndim ≤ 4. Stride of 0
+  on an axis means broadcast on that axis. `out_shape`, `a_strides`,
+  `b_strides` are lists; the helper pads to length 4.
+
+  Use `Nx.Vulkan.broadcast_strides/2` to compute strides from a source
+  shape against the output shape.
+  """
+  def apply_binary_broadcast(a, b, op, ndim, out_shape, a_strides, b_strides) do
+    op_const = Map.fetch!(@ops_binary, op)
+    Nx.Vulkan.Native.apply_binary_broadcast(
+      a, b, op_const, ndim,
+      pad4(out_shape), pad4(a_strides), pad4(b_strides),
+      shader_path("elementwise_binary_broadcast.spv")
+    )
+  end
+
+  @doc """
+  Per-axis strides for broadcasting `src_shape` to `out_shape`.
+
+  Returns a length-4 list (zero-padded). Stride is 0 on a broadcast axis
+  (size 1 in `src` but >1 in `out`); otherwise it's the row-major
+  product of trailing source dims.
+
+      iex> Nx.Vulkan.broadcast_strides({1, 4}, {3, 4})
+      [0, 1, 0, 0]
+      iex> Nx.Vulkan.broadcast_strides({2, 1}, {2, 4})
+      [1, 0, 0, 0]
+  """
+  def broadcast_strides(src_shape, out_shape) do
+    src = Tuple.to_list(src_shape)
+    out = Tuple.to_list(out_shape)
+    rank = length(out)
+
+    # Right-align: pad src with 1s on the left so the trailing dims align.
+    pad = rank - length(src)
+    src_aligned = List.duplicate(1, pad) ++ src
+
+    {strides, _} =
+      Enum.zip(src_aligned, out)
+      |> Enum.reverse()
+      |> Enum.reduce({[], 1}, fn {sd, od}, {acc, running} ->
+        cond do
+          sd == od -> {[running | acc], running * sd}
+          sd == 1 -> {[0 | acc], running}
+          true ->
+            raise ArgumentError,
+                  "shapes don't broadcast: #{inspect(src_shape)} → #{inspect(out_shape)}"
+        end
+      end)
+
+    pad4(strides)
+  end
+
+  defp pad4(list) do
+    # Kernel.max because Kernel.max/2 is excluded at the top of this
+    # module (Nx.Vulkan.max/2 is the GPU op, not the integer max).
+    n_pad = Kernel.max(0, 4 - length(list))
+    Enum.take(list, 4) ++ List.duplicate(0, n_pad)
+  end
 end

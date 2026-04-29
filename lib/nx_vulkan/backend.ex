@@ -177,29 +177,58 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp do_binary(%T{shape: shape, type: type} = out, %T{} = a, %T{} = b, op) do
-    if type != {:f, 32} or a.type != {:f, 32} or b.type != {:f, 32} or a.shape != b.shape do
-      # Mixed types or shape mismatch (broadcast cases): host fallback.
-      # Vulkan elementwise shaders are f32-only and require equal shapes;
-      # for everything else BinaryBackend round-trip is correct, slow,
-      # and semantically transparent.
-      host_fallback_binary(out, a, b, op)
-    else
+    cond do
+      # Mixed precision: host fallback. Compute shaders are f32-only.
+      type != {:f, 32} or a.type != {:f, 32} or b.type != {:f, 32} ->
+        host_fallback_binary(out, a, b, op)
+
+      # Same shape: existing shader path.
+      a.shape == b.shape ->
+        a_data = to_vulkan!(a)
+        b_data = to_vulkan!(b)
+
+        apply_op =
+          case op do
+            :add -> &Nx.Vulkan.add/2
+            :multiply -> &Nx.Vulkan.multiply/2
+            :subtract -> &Nx.Vulkan.subtract/2
+            :divide -> &Nx.Vulkan.divide/2
+            :pow -> &Nx.Vulkan.pow/2
+            :max -> &Nx.Vulkan.max/2
+            :min -> &Nx.Vulkan.min/2
+          end
+
+        {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
+        put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+
+      # Shape mismatch + ≤4D: broadcast shader path.
+      tuple_size(shape) <= 4 ->
+        try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
+
+      # Higher rank: host fallback (broadcast shader supports up to 4D).
+      true ->
+        host_fallback_binary(out, a, b, op)
+    end
+  end
+
+  defp try_broadcast(%T{shape: out_shape, type: type} = out, %T{} = a, %T{} = b, op) do
+    try do
+      a_strides = Nx.Vulkan.broadcast_strides(a.shape, out_shape)
+      b_strides = Nx.Vulkan.broadcast_strides(b.shape, out_shape)
+      out_dims = Tuple.to_list(out_shape)
+      ndim = length(out_dims)
+
       a_data = to_vulkan!(a)
       b_data = to_vulkan!(b)
 
-      apply_op =
-        case op do
-          :add -> &Nx.Vulkan.add/2
-          :multiply -> &Nx.Vulkan.multiply/2
-          :subtract -> &Nx.Vulkan.subtract/2
-          :divide -> &Nx.Vulkan.divide/2
-          :pow -> &Nx.Vulkan.pow/2
-          :max -> &Nx.Vulkan.max/2
-          :min -> &Nx.Vulkan.min/2
-        end
+      {:ok, ref} =
+        Nx.Vulkan.apply_binary_broadcast(
+          a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+        )
 
-      {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
-      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+      put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
+    rescue
+      ArgumentError -> nil
     end
   end
 
@@ -771,19 +800,32 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def not_equal(out, a, b),     do: host_fallback_binary(out, a, b, :not_equal)
 
-  defp do_compare(%T{type: type} = out, %T{} = a, %T{} = b, op) when type == {:f, 32} do
-    a_data = to_vulkan!(a)
-    b_data = to_vulkan!(b)
+  defp do_compare(%T{type: type} = out, %T{} = a, %T{} = b, op)
+       when type == {:f, 32} do
+    cond do
+      a.type != {:f, 32} or b.type != {:f, 32} ->
+        host_fallback_binary(out, a, b, op)
 
-    apply_op =
-      case op do
-        :equal -> &Nx.Vulkan.equal/2
-        :less -> &Nx.Vulkan.less/2
-        :greater -> &Nx.Vulkan.greater/2
-      end
+      a.shape == b.shape ->
+        a_data = to_vulkan!(a)
+        b_data = to_vulkan!(b)
 
-    {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
-    put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+        apply_op =
+          case op do
+            :equal -> &Nx.Vulkan.equal/2
+            :less -> &Nx.Vulkan.less/2
+            :greater -> &Nx.Vulkan.greater/2
+          end
+
+        {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
+        put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+
+      tuple_size(out.shape) <= 4 ->
+        try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
+
+      true ->
+        host_fallback_binary(out, a, b, op)
+    end
   end
 
   defp do_compare(out, a, b, op), do: host_fallback_binary(out, a, b, op)

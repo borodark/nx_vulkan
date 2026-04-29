@@ -109,6 +109,18 @@ int nxv_reduce_axis(void* out, void* a,
                     unsigned int op,
                     const char* spv_path);
 
+/* Broadcast elementwise binary op. Op spec constant 0..9
+ * (add/mul/sub/div/pow/max/min/equal/less/greater). `ndim` is 1..4.
+ * `out_shape`, `a_strides`, `b_strides` are 4-element arrays;
+ * unused trailing entries should be 0. A stride of 0 broadcasts on
+ * that axis. */
+int nxv_apply_binary_broadcast(void* out, void* a, void* b,
+                                unsigned int op, unsigned int ndim,
+                                const unsigned int* out_shape,
+                                const unsigned int* a_strides,
+                                const unsigned int* b_strides,
+                                const char* spv_path);
+
 /* Fused n-way elementwise chain — up to 8 ops in one dispatch.
  * `ops` is an array of length 8 (pad with 255 = nop). Op codes:
  *   binary 0..6 (add/mul/sub/div/pow/max/min) — second operand is buf B

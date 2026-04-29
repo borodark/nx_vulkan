@@ -53,11 +53,13 @@ static VkPipe* get_or_create_pipe(const std::string& spv_path, unsigned int op,
     VkShaderModule shader = load_shader(spv_path);
     if (!shader) return nullptr;
 
-    /* push_size: declare 40 (max across all shader families). Vulkan
+    /* push_size: declare 56 (max across all shader families). Vulkan
      * ignores any push range bytes the shader doesn't read. binary/
      * unary/random/transpose all use ≤12; reduce_axis uses 16;
-     * fused_elementwise uses 40 (n + n_ops + 8 op slots). */
-    uint32_t push_size = 40;
+     * fused_elementwise uses 40 (n + n_ops + 8 op slots);
+     * elementwise_binary_broadcast uses 56 (n + ndim + out_shape[4] +
+     * a_strides[4] + b_strides[4]). */
+    uint32_t push_size = 56;
 
     VkPipe* pipe = new VkPipe();
     int rc = create_pipeline(pipe, shader, n_buffers, push_size, (int32_t) op);
@@ -304,6 +306,49 @@ int nxv_reduce_axis(void* out, void* a,
     unsigned int groups = (n_slots + 255) / 256;
 
     return dispatch(pipe, bufs, 2, groups, sizeof(push), push);
+}
+
+int nxv_apply_binary_broadcast(void* out, void* a, void* b,
+                                unsigned int op, unsigned int ndim,
+                                const unsigned int* out_shape,
+                                const unsigned int* a_strides,
+                                const unsigned int* b_strides,
+                                const char* spv_path) {
+    if (!out || !a || !b || !out_shape || !a_strides || !b_strides || !spv_path)
+        return -1;
+
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), op, 3);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Compute total output count from shape (multiply non-zero dims).
+     * Shape entries beyond ndim are zero-padded. */
+    unsigned int n = 1;
+    for (unsigned int d = 0; d < ndim; d++) n *= out_shape[d];
+
+    /* Push: {n, ndim, out_shape[4], a_strides[4], b_strides[4]} = 56 bytes. */
+    struct {
+        unsigned int n;
+        unsigned int ndim;
+        unsigned int out_shape[4];
+        unsigned int a_strides[4];
+        unsigned int b_strides[4];
+    } push;
+    push.n = n;
+    push.ndim = ndim;
+    for (int i = 0; i < 4; i++) {
+        push.out_shape[i] = out_shape[i];
+        push.a_strides[i] = a_strides[i];
+        push.b_strides[i] = b_strides[i];
+    }
+
+    VkBuffer bufs[3] = { buf_a->buffer, buf_b->buffer, buf_out->buffer };
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 3, groups, sizeof(push), &push);
 }
 
 int nxv_fused_chain(void* out, void* a, void* b,

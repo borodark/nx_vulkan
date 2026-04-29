@@ -105,6 +105,18 @@ unsafe extern "C" {
         spv_path: *const c_char,
     ) -> i32;
 
+    fn nxv_apply_binary_broadcast(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        op: u32,
+        ndim: u32,
+        out_shape: *const u32,
+        a_strides: *const u32,
+        b_strides: *const u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
     fn nxv_fused_chain(
         out: *mut c_void,
         a: *mut c_void,
@@ -546,6 +558,60 @@ fn reduce_axis<'a>(
 
     let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
     let rc = unsafe { nxv_reduce_axis(out_handle, a.handle, outer, reduce_size, inner, op, cstr.as_ptr()) };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Broadcast elementwise binary op. `out_shape`, `a_strides`,
+/// `b_strides` are length-4 vectors padded with 0. A stride of 0
+/// on an axis means broadcast (any coord on that axis maps to index 0).
+#[rustler::nif]
+fn apply_binary_broadcast<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    op: u32,
+    ndim: u32,
+    out_shape: Vec<u32>,
+    a_strides: Vec<u32>,
+    b_strides: Vec<u32>,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 9 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+    if ndim == 0 || ndim > 4 || out_shape.len() != 4
+       || a_strides.len() != 4 || b_strides.len() != 4 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n: u64 = (0..ndim as usize)
+        .map(|d| out_shape[d] as u64)
+        .product();
+    let out_bytes = n * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_apply_binary_broadcast(
+            out_handle, a.handle, b.handle,
+            op, ndim,
+            out_shape.as_ptr(), a_strides.as_ptr(), b_strides.as_ptr(),
+            cstr.as_ptr(),
+        )
+    };
 
     if rc != 0 {
         unsafe { nxv_buf_free(out_handle) };

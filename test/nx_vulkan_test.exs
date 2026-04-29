@@ -1019,6 +1019,55 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "broadcast: scalar {1} × vector {4} via direct API" do
+      :ok = Nx.Vulkan.init()
+
+      {:ok, scalar} = Nx.Vulkan.upload_f32([5.0])
+      {:ok, vec} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+
+      {:ok, c} =
+        Nx.Vulkan.apply_binary_broadcast(
+          scalar, vec, :add, 1, [4, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]
+        )
+
+      {:ok, vals} = Nx.Vulkan.download_f32(c, 4)
+      assert vals == [6.0, 7.0, 8.0, 9.0]
+    end
+
+    test "broadcast_strides/2 row-major math" do
+      assert Nx.Vulkan.broadcast_strides({1, 4}, {3, 4}) == [0, 1, 0, 0]
+      assert Nx.Vulkan.broadcast_strides({2, 1}, {2, 4}) == [1, 0, 0, 0]
+      # {3} aligns to axis 1 of {2, 3}; axis 0 broadcasts → stride [0, 1]
+      assert Nx.Vulkan.broadcast_strides({3}, {2, 3}) == [0, 1, 0, 0]
+      assert Nx.Vulkan.broadcast_strides({}, {3, 4}) == [0, 0, 0, 0]
+    end
+
+    test "broadcast: backend dispatches Nx.add(matrix, vector) via shader" do
+      m = Nx.tensor([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], backend: Nx.Vulkan.Backend)
+      v = Nx.tensor([100.0, 200.0, 300.0], backend: Nx.Vulkan.Backend)
+
+      out = Nx.add(m, v)
+      assert Nx.shape(out) == {2, 3}
+      assert Nx.to_flat_list(out) == [101.0, 202.0, 303.0, 110.0, 220.0, 330.0]
+    end
+
+    test "broadcast: backend dispatches column-broadcast {2,1} × {2,4}" do
+      col = Nx.tensor([[10.0], [20.0]], backend: Nx.Vulkan.Backend)
+      m = Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], backend: Nx.Vulkan.Backend)
+
+      out = Nx.add(col, m)
+      assert Nx.shape(out) == {2, 4}
+      assert Nx.to_flat_list(out) == [11.0, 12.0, 13.0, 14.0, 25.0, 26.0, 27.0, 28.0]
+    end
+
+    test "broadcast: equal/less work via shader" do
+      v = Nx.tensor([1.0, 2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      threshold = Nx.tensor([2.5], backend: Nx.Vulkan.Backend)
+
+      out = Nx.less(v, threshold)
+      assert Nx.to_flat_list(out) == [1.0, 1.0, 0.0, 0.0]
+    end
+
     test "Path A.2 — Fuse.fuse macro detects 3-op chain" do
       :ok = Nx.Vulkan.init()
       import Nx.Vulkan.Fuse
