@@ -35,3 +35,4 @@ priv/native/
 
 Cargo.lock
 /mix.lock
+priv/shaders/
