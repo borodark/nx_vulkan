@@ -988,7 +988,18 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp upload_host_tensor(%T{shape: shape, type: type} = out, host_tensor) do
-    bin = Nx.to_binary(host_tensor)
+    # The out template's type is the contract — if the host op produced
+    # a different type (e.g., promoted f32+f64→f64 while the template
+    # said f32), cast before serializing so the buffer's element width
+    # matches the declared type.
+    aligned =
+      if Nx.type(host_tensor) == type do
+        host_tensor
+      else
+        Nx.as_type(host_tensor, type)
+      end
+
+    bin = Nx.to_binary(aligned)
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
   end
