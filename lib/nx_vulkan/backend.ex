@@ -323,7 +323,7 @@ defmodule Nx.Vulkan.Backend do
 
   defp axis_reduce(%T{shape: out_shape, type: type} = out,
                    %T{shape: in_shape} = tensor, axes, keep_axes, op) do
-    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+    in_bin = Nx.to_binary(tensor)
     input = for <<x::float-32-native <- in_bin>>, do: x
 
     in_dims = Tuple.to_list(in_shape)
@@ -498,7 +498,7 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp do_broadcast_f32(%T{shape: out_shape, type: type} = out, tensor, in_shape, _out_shape, _type, axes) do
-    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+    in_bin = Nx.to_binary(tensor)
 
     # Decode input as a flat list — it'll be re-indexed during expansion.
     input = for <<x::float-32-native <- in_bin>>, do: x
@@ -562,7 +562,7 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp do_slice_f32(%T{} = out, tensor, start_indices, lengths, strides, in_shape, out_shape, type) do
-    in_bin = to_binary(tensor, byte_size_of(in_shape) * 4)
+    in_bin = Nx.to_binary(tensor)
     input = for <<x::float-32-native <- in_bin>>, do: x
 
     in_dims = Tuple.to_list(in_shape)
@@ -611,8 +611,8 @@ defmodule Nx.Vulkan.Backend do
   defp do_put_slice_f32(%T{} = out, target, start_indices, slice_t, target_shape, slice_shape, out_shape, type) do
     ^out_shape = target_shape
 
-    target_bin = to_binary(target, byte_size_of(target_shape) * 4)
-    slice_bin  = to_binary(slice_t, byte_size_of(slice_shape) * 4)
+    target_bin = Nx.to_binary(target)
+    slice_bin = Nx.to_binary(slice_t)
 
     target_floats = for <<x::float-32-native <- target_bin>>, do: x
     slice_floats  = for <<x::float-32-native <- slice_bin>>, do: x
@@ -668,7 +668,7 @@ defmodule Nx.Vulkan.Backend do
     axes = opts[:axes] || Enum.to_list(0..(tuple_size(in_shape) - 1)//1)
     in_dims = Tuple.to_list(in_shape)
 
-    in_floats = to_binary(input, byte_size_of(in_shape) * 4) |> decode_f32()
+    in_floats = Nx.to_binary(input) |> decode_f32()
     idx_list = Nx.to_flat_list(indices)
 
     indices_shape = Tuple.to_list(indices.shape)
@@ -738,7 +738,7 @@ defmodule Nx.Vulkan.Backend do
     axes = opts[:axes] || Enum.to_list(0..(tuple_size(target_shape) - 1)//1)
     target_dims = Tuple.to_list(target_shape)
 
-    target_floats = to_binary(target, byte_size_of(target_shape) * 4) |> decode_f32()
+    target_floats = Nx.to_binary(target) |> decode_f32()
     update_floats = Nx.to_flat_list(updates)
     idx_list = Nx.to_flat_list(indices)
 
@@ -804,16 +804,16 @@ defmodule Nx.Vulkan.Backend do
   defp encode_f32_bits(:neg_infinity), do: @neg_inf_f32
   defp encode_f32_bits(true), do: <<1.0::float-32-native>>
   defp encode_f32_bits(false), do: <<0.0::float-32-native>>
+  defp encode_f32_bits(nil), do: @nan_f32
   defp encode_f32_bits(x) when is_number(x), do: <<x / 1.0::float-32-native>>
-  defp encode_f32_bits(x), do: raise ArgumentError, "encode_f32_bits: unsupported value #{inspect(x)}"
 
   defp encode_f64_bits(:nan), do: @nan_f64
   defp encode_f64_bits(:infinity), do: @inf_f64
   defp encode_f64_bits(:neg_infinity), do: @neg_inf_f64
   defp encode_f64_bits(true), do: <<1.0::float-64-native>>
   defp encode_f64_bits(false), do: <<0.0::float-64-native>>
+  defp encode_f64_bits(nil), do: @nan_f64
   defp encode_f64_bits(x) when is_number(x), do: <<x / 1.0::float-64-native>>
-  defp encode_f64_bits(x), do: raise ArgumentError, "encode_f64_bits: unsupported value #{inspect(x)}"
 
   # ---------------------------------------------------------------- dense linalg (v0.1.9)
 
