@@ -1158,6 +1158,51 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Day 1d — Nx.Vulkan.Compiler auto-detects 3-op chain via Nx.Defn.jit" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # exp(a*b + b) — three Nx ops collapse into one fused dispatch
+        # via the auto-detect in Nx.Vulkan.Compiler.
+        f = fn a, b -> Nx.exp(Nx.add(Nx.multiply(a, b), b)) end
+
+        a = Nx.tensor([1.0, 2.0], backend: Nx.Vulkan.Backend)
+        b = Nx.tensor([1.0, 0.5], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(a, b)
+
+        # exp(1*1 + 1) = exp(2); exp(2*0.5 + 0.5) = exp(1.5)
+        Enum.zip(Nx.to_flat_list(out), [:math.exp(2.0), :math.exp(1.5)])
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Day 1d — non-fusable defn falls through to Evaluator" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # Body uses sum/2 — not fusable. Compiler should delegate to
+        # Evaluator, producing the right answer.
+        f = fn a, b -> Nx.sum(Nx.add(a, b)) end
+
+        a = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        b = Nx.tensor([1.0, 1.0, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(a, b)
+        assert_in_delta Nx.to_number(out), 9.0, 1.0e-5
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "mass-matrix-style: cholesky → solve composition" do
       # Realistic NUTS use: M is SPD, solve M x = grad via L L^T factorization.
       m =

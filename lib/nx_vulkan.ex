@@ -415,7 +415,8 @@ defmodule Nx.Vulkan do
   """
   def jit(fun, opts \\ []) do
     ensure_default_backend!()
-    Nx.Defn.jit(fun, [{:compiler, Nx.Defn.Evaluator} | opts])
+    compiler = Keyword.get(opts, :compiler, Nx.Vulkan.Compiler)
+    Nx.Defn.jit(fun, [{:compiler, compiler} | Keyword.delete(opts, :compiler)])
   end
 
   defp ensure_default_backend! do
