@@ -232,10 +232,73 @@ defmodule Nx.Vulkan do
   @doc """
   Matrix multiply: `C[M*N] = A[M*K] · B[K*N]`. All row-major f32.
   Returns `{:ok, c_tensor}`.
+
+  Auto-selects the best shader variant based on `(M, N, K)`:
+
+    * Tiny (M*N*K < 4096): naive `matmul.spv` — dispatch overhead
+      dominates; tiling adds no win.
+    * Medium (4096 ≤ M*N*K < 256³): `matmul_tiled.spv` (16×16 shared-
+      memory tiles) — good cache behavior, modest GPU occupancy.
+    * Large (M*N*K ≥ 256³ ≈ 16M): `matmul_tiled16x2.spv` — each thread
+      computes 2 output rows; mac-248 measured **4.2× win at 1024×1024**
+      vs the naive variant.
+
+  `matmul_tiled32.spv` exists in spirit too but only wins on Ampere+
+  (1024 threads/SM); on Kepler/Maxwell it loses to 16x2 due to shared
+  memory pressure (8 KB tile vs 3 KB). Not auto-selected; reachable
+  via `matmul_variant/6`.
   """
   def matmul(a, b, m, n, k) do
-    Nx.Vulkan.Native.matmul(a, b, m, n, k, shader_path("matmul.spv"))
+    {shader, tile_m, tile_n} = pick_matmul(m, n, k)
+    matmul_variant(a, b, m, n, k, shader, tile_m, tile_n)
   end
+
+  @doc """
+  Matrix multiply with explicit shader variant. Use when you know
+  better than the heuristic, or to benchmark.
+
+      :matmul                 # naive, gx=ceil(N/16), gy=ceil(M/16)
+      :matmul_tiled           # 16×16 shared-mem tiles
+      :matmul_tiled32         # 32×32 tiles (Ampere wins)
+      :matmul_tiled16x2       # 32×16 output (2 rows per thread)
+  """
+  def matmul_variant(a, b, m, n, k, variant)
+      when variant in [:matmul, :matmul_tiled, :matmul_tiled32, :matmul_tiled16x2] do
+    {tile_m, tile_n} = variant_tiles(variant)
+    matmul_variant(a, b, m, n, k, "#{variant}.spv", tile_m, tile_n)
+  end
+
+  @doc false
+  def matmul_variant(a, b, m, n, k, shader_name, tile_m, tile_n) do
+    Nx.Vulkan.Native.matmul_v(a, b, m, n, k, tile_m, tile_n,
+                              shader_path(shader_name))
+  end
+
+  @doc """
+  Picks the best matmul shader for a given `(M, N, K)` shape. Returns
+  `{shader_name, tile_m, tile_n}`. Public so benchmarks can introspect
+  the heuristic.
+  """
+  def pick_matmul(m, n, k) do
+    flops = m * n * k
+
+    cond do
+      # Below 4K total ops: dispatch + descriptor write costs dominate.
+      flops < 4_096 -> {"matmul.spv", 16, 16}
+
+      # 256³ = 16 777 216. mac-248's bench shows the 16x2 variant
+      # taking the lead from this size onward.
+      flops >= 16_777_216 -> {"matmul_tiled16x2.spv", 32, 16}
+
+      # Middle ground: classic 16×16 tile.
+      true -> {"matmul_tiled.spv", 16, 16}
+    end
+  end
+
+  defp variant_tiles(:matmul), do: {16, 16}
+  defp variant_tiles(:matmul_tiled), do: {16, 16}
+  defp variant_tiles(:matmul_tiled32), do: {32, 32}
+  defp variant_tiles(:matmul_tiled16x2), do: {32, 16}
 
   # ------------------------------------------------------------------
   # v0.0.7 — random

@@ -1019,6 +1019,45 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Day 1f — matmul auto-select picks the right shader by size" do
+      :ok = Nx.Vulkan.init()
+
+      # Tiny: dispatch overhead dominates → naive matmul.spv
+      assert {"matmul.spv", 16, 16} = Nx.Vulkan.pick_matmul(4, 4, 4)
+      # Medium → matmul_tiled.spv
+      assert {"matmul_tiled.spv", 16, 16} = Nx.Vulkan.pick_matmul(64, 64, 64)
+      # Large (≥ 256³) → tiled-16x2 (mac-248's 4.2x measured win).
+      assert {"matmul_tiled16x2.spv", 32, 16} = Nx.Vulkan.pick_matmul(256, 256, 256)
+    end
+
+    test "Day 1f — matmul_variant explicit shader path" do
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])  # 2x2
+      {:ok, b} = Nx.Vulkan.upload_f32([5.0, 6.0, 7.0, 8.0])  # 2x2
+
+      # Each variant should produce the same A·B result.
+      expected = [19.0, 22.0, 43.0, 50.0]
+
+      for variant <- [:matmul, :matmul_tiled, :matmul_tiled16x2] do
+        {:ok, c} = Nx.Vulkan.matmul_variant(a, b, 2, 2, 2, variant)
+        {:ok, vals} = Nx.Vulkan.download_f32(c, 4)
+
+        Enum.zip(vals, expected)
+        |> Enum.each(fn {v, e} ->
+          assert_in_delta v, e, 1.0e-4, "variant #{variant} failed"
+        end)
+      end
+    end
+
+    test "Day 1f — Nx.Vulkan.matmul auto-select still produces correct results" do
+      # Cover the boundary cases: tiny (4×4) and just-large (32×32).
+      {:ok, a} = Nx.Vulkan.upload_f32(List.duplicate(1.0, 16))
+      {:ok, b} = Nx.Vulkan.upload_f32(List.duplicate(2.0, 16))
+      {:ok, c} = Nx.Vulkan.matmul(a, b, 4, 4, 4)
+      {:ok, vals} = Nx.Vulkan.download_f32(c, 16)
+      # 4x4 of 1.0 times 4x4 of 2.0: each cell = sum of 4 * 1*2 = 8
+      assert Enum.all?(vals, &(abs(&1 - 8.0) < 1.0e-5))
+    end
+
     test "buffer pool: alloc/free cycle reuses buffers" do
       :ok = Nx.Vulkan.init()
       Nx.Vulkan.pool_clear()

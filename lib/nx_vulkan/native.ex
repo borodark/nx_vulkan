@@ -64,6 +64,10 @@ defmodule Nx.Vulkan.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  def matmul_v(_a, _b, _m, _n, _k, _tile_m, _tile_n, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   def pool_clear(), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false

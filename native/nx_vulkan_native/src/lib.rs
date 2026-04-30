@@ -114,6 +114,18 @@ unsafe extern "C" {
         total_pooled: *mut u64,
     );
 
+    fn nxv_matmul_v(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        m: u32,
+        n: u32,
+        k: u32,
+        tile_m: u32,
+        tile_n: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
     fn nxv_apply_binary_broadcast(
         out: *mut c_void,
         a: *mut c_void,
@@ -673,6 +685,50 @@ fn fused_chain<'a>(
     }
 
     let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Matmul variant — caller picks the .spv path and the workgroup
+/// output tile size. Used by Nx.Vulkan auto-select to dispatch the
+/// right shader for a given (M, N, K) shape.
+#[rustler::nif]
+fn matmul_v<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    m: u32,
+    n: u32,
+    k: u32,
+    tile_m: u32,
+    tile_n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let expected_a = (m * k * 4) as u64;
+    let expected_b = (k * n * 4) as u64;
+    if a.n_bytes != expected_a || b.n_bytes != expected_b {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let out_bytes = (m * n * 4) as u64;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_matmul_v(out_handle, a.handle, b.handle, m, n, k, tile_m, tile_n, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 

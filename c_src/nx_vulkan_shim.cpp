@@ -366,6 +366,75 @@ int nxv_matmul(void* out, void* a, void* b,
     return 0;
 }
 
+int nxv_matmul_v(void* out, void* a, void* b,
+                 unsigned int m, unsigned int n, unsigned int k,
+                 unsigned int tile_m, unsigned int tile_n,
+                 const char* spv_path) {
+    if (!out || !a || !b || !spv_path) return -1;
+
+    /* Cache key on path only — matmul has no spec constant. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 3);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    /* Same dispatch dance as nxv_matmul; only the grid changes. */
+    auto& ctx = g_vk_ctx;
+
+    VkBuffer bufs[3] = { buf_a->buffer, buf_b->buffer, buf_out->buffer };
+
+    VkDescriptorBufferInfo bi[3];
+    VkWriteDescriptorSet w[3];
+    for (int i = 0; i < 3; i++) {
+        bi[i] = {bufs[i], 0, VK_WHOLE_SIZE};
+        w[i] = {};
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = pipe->descriptor_set;
+        w[i].dstBinding = (uint32_t) i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(ctx.device, 3, w, 0, nullptr);
+
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = ctx.command_pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(ctx.device, &ai, &cmd);
+
+    VkCommandBufferBeginInfo bb{};
+    bb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bb);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe->pipeline_layout, 0, 1, &pipe->descriptor_set, 0, nullptr);
+
+    unsigned int push[3] = { m, n, k };
+    vkCmdPushConstants(cmd, pipe->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(push), push);
+
+    unsigned int gx = (n + tile_n - 1) / tile_n;
+    unsigned int gy = (m + tile_m - 1) / tile_m;
+    vkCmdDispatch(cmd, gx, gy, 1);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(ctx.compute_queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx.compute_queue);
+    vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+
+    return 0;
+}
+
 int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
                const char* spv_path) {
     if (!out || !spv_path) return -1;

@@ -96,6 +96,18 @@ int nxv_matmul(void* out, void* a, void* b,
                unsigned int m, unsigned int n, unsigned int k,
                const char* spv_path);
 
+/* Matmul variant — caller specifies the workgroup output tile size.
+ * Dispatches gy=ceil(M/tile_m), gx=ceil(N/tile_n).
+ * Tile sizes per shader:
+ *   matmul.spv          : tile_m=16, tile_n=16 (compatible with nxv_matmul)
+ *   matmul_tiled.spv    : tile_m=16, tile_n=16
+ *   matmul_tiled32.spv  : tile_m=32, tile_n=32
+ *   matmul_tiled16x2.spv: tile_m=32, tile_n=16 (each thread does 2 rows) */
+int nxv_matmul_v(void* out, void* a, void* b,
+                 unsigned int m, unsigned int n, unsigned int k,
+                 unsigned int tile_m, unsigned int tile_n,
+                 const char* spv_path);
+
 /* Random. Fill `out` with `n` f32 values. dist=0 uniform [0,1),
  * dist=1 normal N(0,1) via Box-Muller. */
 int nxv_random(void* out, unsigned int n, unsigned int seed, unsigned int dist,
