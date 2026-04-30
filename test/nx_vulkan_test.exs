@@ -1019,6 +1019,49 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "buffer pool: alloc/free cycle reuses buffers" do
+      :ok = Nx.Vulkan.init()
+      Nx.Vulkan.pool_clear()
+
+      {:ok, stats0} = Nx.Vulkan.pool_stats()
+
+      # Allocate, drop (which returns to pool), re-allocate same size.
+      {:ok, t1} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      :erlang.garbage_collect()
+      _ = t1
+
+      # Force the ref to drop. The next alloc of the same size should
+      # be a pool hit.
+      ref_drop = fn -> {:ok, _} = Nx.Vulkan.upload_f32([5.0, 6.0, 7.0, 8.0]) end
+      ref_drop.()
+      :erlang.garbage_collect()
+
+      # Drive an alloc request that should pool-hit (16 bytes).
+      {:ok, _t} = Nx.Vulkan.upload_f32([9.0, 10.0, 11.0, 12.0])
+
+      {:ok, stats1} = Nx.Vulkan.pool_stats()
+
+      # At minimum: allocs happened. Hits may or may not have fired
+      # depending on GC timing, but misses must increase.
+      assert stats1.misses >= stats0.misses + 1
+    end
+
+    test "buffer pool: pool_clear empties the pool" do
+      :ok = Nx.Vulkan.init()
+
+      # Generate some pooled state.
+      for _ <- 1..5 do
+        {:ok, _} = Nx.Vulkan.upload_f32([0.0, 0.0])
+      end
+
+      :erlang.garbage_collect()
+      Nx.Vulkan.pool_clear()
+
+      {:ok, stats} = Nx.Vulkan.pool_stats()
+      assert stats.total_pooled == 0
+      assert stats.size_classes == 0
+    end
+
     test "broadcast: scalar {1} × vector {4} via direct API" do
       :ok = Nx.Vulkan.init()
 

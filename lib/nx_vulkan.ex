@@ -493,4 +493,29 @@ defmodule Nx.Vulkan do
     n_pad = Kernel.max(0, 4 - length(list))
     Enum.take(list, 4) ++ List.duplicate(0, n_pad)
   end
+
+  # ------------------------------------------------------------------
+  # Buffer pool — Week 1 step 1a (PATH_TO_FULL_PASS.md)
+  # ------------------------------------------------------------------
+
+  @doc """
+  Release every pooled VkBuf back to the device. Call at idle time to
+  reclaim memory; otherwise the pool grows to working-set size and stays
+  there. Idempotent.
+  """
+  defdelegate pool_clear(), to: Nx.Vulkan.Native
+
+  @doc """
+  Buffer pool stats. Returns `{:ok, %{hits, misses, freed,
+  size_classes, total_pooled}}`. `hits/misses` count alloc requests
+  served from / missed by the pool; `freed` counts buffers actually
+  vkFreeMemory'd (pool-overflow or explicit clear); `size_classes` is
+  the number of distinct sizes currently held; `total_pooled` is the
+  total VkBuf count waiting for reuse.
+
+      iex> Nx.Vulkan.init()
+      iex> Nx.Vulkan.pool_stats()
+      {:ok, %{hits: _, misses: _, freed: _, size_classes: _, total_pooled: _}}
+  """
+  defdelegate pool_stats(), to: Nx.Vulkan.Native
 end

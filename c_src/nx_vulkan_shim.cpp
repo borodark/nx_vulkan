@@ -10,10 +10,71 @@
 #include <engine/Backend_par_vulkan.hpp>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace Engine::Backend::vulkan;
+
+/* ---------------------------------------------------------------- *
+ * Buffer pool — persistent device-resident allocations
+ *
+ * Per the EXMC port plan step 1a (PATH_TO_FULL_PASS.md): the largest
+ * per-op overhead in the NIF path is vkAllocateMemory + vkFreeMemory
+ * on every call. A NUTS leapfrog allocates ~30 × N steps × 1000 of
+ * fresh output buffers; pool them by byte-size and cycle counts drop
+ * 100-700×.
+ *
+ * Lifetime model (matches PERSISTENT_BUFFERS_PLAN.md decision #1):
+ * caller-owned. nxv_buf_alloc returns a VkBuf (from pool when match
+ * exists, fresh otherwise); nxv_buf_free returns to the pool instead
+ * of releasing. The Rust ResourceArc Drop hits nxv_buf_free, so
+ * tensor GC silently feeds the pool. nxv_pool_clear actually frees
+ * everything back to the device — call at idle time. nxv_destroy
+ * also flushes the pool.
+ *
+ * Concurrency: pool has its own mutex. Independent of SUBMIT_LOCK
+ * which lives in the Rust NIF and serialises queue submits. Any NIF
+ * call path that reaches the pool must be safe regardless of which
+ * lock the caller holds.
+ *
+ * Eviction: soft cap per size class of POOL_CAP_PER_SIZE entries.
+ * Beyond that, actually vkFreeMemory the buffer instead of pooling.
+ * Prevents runaway in adversarial allocation patterns.
+ * ---------------------------------------------------------------- */
+
+static const size_t POOL_CAP_PER_SIZE = 64;
+static std::mutex g_pool_mutex;
+static std::map<unsigned long, std::vector<VkBuf*>> g_buf_pool;
+static unsigned long g_pool_hits = 0;
+static unsigned long g_pool_misses = 0;
+static unsigned long g_pool_freed = 0;
+
+/* Internal: allocate a fresh VkBuf bypassing the pool. Used by
+ * nxv_buf_alloc when the pool is empty for the requested size. */
+static VkBuf* alloc_fresh(unsigned long n_bytes) {
+    VkBuf* buf = new VkBuf();
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkMemoryPropertyFlags mem = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    int rc = buf_alloc(buf, (VkDeviceSize) n_bytes, usage, mem);
+    if (rc != 0) {
+        delete buf;
+        return nullptr;
+    }
+    return buf;
+}
+
+/* Internal: actually release a VkBuf to the device. Used when the
+ * pool overflows or is being cleared. */
+static void release_to_device(VkBuf* buf) {
+    if (!buf) return;
+    buf_free(buf);
+    delete buf;
+}
 
 /* The selected device name, cached after nxv_init so we can hand out
  * a stable pointer to Rust. */
@@ -89,6 +150,9 @@ void nxv_destroy(void) {
     }
     g_pipe_cache.clear();
 
+    /* Flush the buffer pool so vkDestroyDevice doesn't see leaked allocations. */
+    nxv_pool_clear();
+
     vk_destroy();
     g_device_name.clear();
 }
@@ -107,25 +171,71 @@ int nxv_has_f64(void) {
  * delegates to spirit's buf_free + delete. */
 
 void* nxv_buf_alloc(unsigned long n_bytes) {
-    VkBuf* buf = new VkBuf();
-    VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                               VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    VkMemoryPropertyFlags mem = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-
-    int rc = buf_alloc(buf, (VkDeviceSize) n_bytes, usage, mem);
-    if (rc != 0) {
-        delete buf;
-        return nullptr;
+    /* Pool fast path: if a buffer of exactly this size is free, reuse. */
+    {
+        std::lock_guard<std::mutex> lk(g_pool_mutex);
+        auto it = g_buf_pool.find(n_bytes);
+        if (it != g_buf_pool.end() && !it->second.empty()) {
+            VkBuf* reused = it->second.back();
+            it->second.pop_back();
+            g_pool_hits++;
+            return (void*) reused;
+        }
     }
+
+    /* Slow path: actually call vkAllocateMemory. */
+    g_pool_misses++;
+    VkBuf* buf = alloc_fresh(n_bytes);
     return (void*) buf;
 }
 
 void nxv_buf_free(void* handle) {
     if (!handle) return;
     VkBuf* buf = (VkBuf*) handle;
-    buf_free(buf);
-    delete buf;
+
+    /* Match the n_bytes back from the buffer's recorded size. spirit's
+     * VkBuf carries `VkDeviceSize size` after buf_alloc. */
+    unsigned long n_bytes = (unsigned long) buf->size;
+
+    {
+        std::lock_guard<std::mutex> lk(g_pool_mutex);
+        auto& slot = g_buf_pool[n_bytes];
+        if (slot.size() < POOL_CAP_PER_SIZE) {
+            slot.push_back(buf);
+            return;  /* Pooled — caller no longer owns the handle. */
+        }
+    }
+
+    /* Pool is full for this size class — actually release. */
+    release_to_device(buf);
+    g_pool_freed++;
+}
+
+void nxv_pool_clear(void) {
+    std::lock_guard<std::mutex> lk(g_pool_mutex);
+    for (auto& kv : g_buf_pool) {
+        for (VkBuf* buf : kv.second) {
+            release_to_device(buf);
+            g_pool_freed++;
+        }
+        kv.second.clear();
+    }
+    g_buf_pool.clear();
+}
+
+void nxv_pool_stats(unsigned long* hits, unsigned long* misses,
+                    unsigned long* freed, unsigned long* size_classes,
+                    unsigned long* total_pooled) {
+    std::lock_guard<std::mutex> lk(g_pool_mutex);
+    if (hits) *hits = g_pool_hits;
+    if (misses) *misses = g_pool_misses;
+    if (freed) *freed = g_pool_freed;
+    if (size_classes) *size_classes = g_buf_pool.size();
+    if (total_pooled) {
+        unsigned long total = 0;
+        for (auto& kv : g_buf_pool) total += kv.second.size();
+        *total_pooled = total;
+    }
 }
 
 int nxv_buf_upload(void* handle, const void* data, unsigned long n_bytes) {

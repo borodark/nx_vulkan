@@ -105,6 +105,15 @@ unsafe extern "C" {
         spv_path: *const c_char,
     ) -> i32;
 
+    fn nxv_pool_clear();
+    fn nxv_pool_stats(
+        hits: *mut u64,
+        misses: *mut u64,
+        freed: *mut u64,
+        size_classes: *mut u64,
+        total_pooled: *mut u64,
+    );
+
     fn nxv_apply_binary_broadcast(
         out: *mut c_void,
         a: *mut c_void,
@@ -665,6 +674,42 @@ fn fused_chain<'a>(
 
     let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// Release every pooled VkBuf back to the device. Call at idle time
+/// to reclaim memory.
+#[rustler::nif]
+fn pool_clear<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    unsafe { nxv_pool_clear() };
+    Ok(atoms::ok().encode(env))
+}
+
+/// Pool stats: returns {:ok, %{hits, misses, freed, size_classes, total_pooled}}.
+#[rustler::nif]
+fn pool_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    let mut hits: u64 = 0;
+    let mut misses: u64 = 0;
+    let mut freed: u64 = 0;
+    let mut size_classes: u64 = 0;
+    let mut total_pooled: u64 = 0;
+
+    unsafe {
+        nxv_pool_stats(&mut hits, &mut misses, &mut freed,
+                       &mut size_classes, &mut total_pooled);
+    }
+
+    let map = rustler::Term::map_from_pairs(
+        env,
+        &[
+            (rustler::types::atom::Atom::from_str(env, "hits").unwrap().encode(env), hits.encode(env)),
+            (rustler::types::atom::Atom::from_str(env, "misses").unwrap().encode(env), misses.encode(env)),
+            (rustler::types::atom::Atom::from_str(env, "freed").unwrap().encode(env), freed.encode(env)),
+            (rustler::types::atom::Atom::from_str(env, "size_classes").unwrap().encode(env), size_classes.encode(env)),
+            (rustler::types::atom::Atom::from_str(env, "total_pooled").unwrap().encode(env), total_pooled.encode(env)),
+        ],
+    ).map_err(|_| Error::BadArg)?;
+
+    Ok((atoms::ok(), map).encode(env))
 }
 
 fn on_load(env: Env, _info: Term) -> bool {

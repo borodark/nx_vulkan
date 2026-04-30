@@ -43,8 +43,20 @@ int nxv_has_f64(void);
  * handle (cast from VkBuf*) or NULL on failure. */
 void* nxv_buf_alloc(unsigned long n_bytes);
 
-/* Free a buffer handle. */
+/* Free a buffer handle. (Returns to pool when capacity allows; only
+ * actually calls vkFreeMemory when the per-size-class cap is exceeded
+ * or when nxv_pool_clear/nxv_destroy runs.) */
 void nxv_buf_free(void* handle);
+
+/* Release every pooled buffer back to the device. Call at idle time
+ * to reclaim memory; otherwise pool grows to the working set size and
+ * stays there. Idempotent. */
+void nxv_pool_clear(void);
+
+/* Pool stats. Any out-pointer may be NULL. */
+void nxv_pool_stats(unsigned long* hits, unsigned long* misses,
+                    unsigned long* freed, unsigned long* size_classes,
+                    unsigned long* total_pooled);
 
 /* Upload `n_bytes` of host data to the buffer. Returns 0 on success. */
 int nxv_buf_upload(void* handle, const void* data, unsigned long n_bytes);
