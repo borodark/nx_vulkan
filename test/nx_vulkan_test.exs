@@ -354,6 +354,7 @@ defmodule Nx.VulkanTest do
       for _ <- 1..5_000 do
         {:ok, _t} = Nx.Vulkan.upload_f32([42.0])
       end
+
       :erlang.garbage_collect()
 
       # Verify the device is still alive after 5000 allocs.
@@ -432,21 +433,24 @@ defmodule Nx.VulkanTest do
     end
 
     test "squeeze drops a trivial axis" do
-      t = Nx.tensor([[1.0, 2.0, 3.0]], backend: Nx.Vulkan.Backend)  # shape {1, 3}
+      # shape {1, 3}
+      t = Nx.tensor([[1.0, 2.0, 3.0]], backend: Nx.Vulkan.Backend)
       s = Nx.squeeze(t)
       assert Nx.shape(s) == {3}
       assert Nx.to_flat_list(s) == [1.0, 2.0, 3.0]
     end
 
     test "broadcast: scalar to vector" do
-      t = Nx.tensor(7.0, backend: Nx.Vulkan.Backend)  # shape {}
+      # shape {}
+      t = Nx.tensor(7.0, backend: Nx.Vulkan.Backend)
       b = Nx.broadcast(t, {4})
       assert Nx.shape(b) == {4}
       assert Nx.to_flat_list(b) == [7.0, 7.0, 7.0, 7.0]
     end
 
     test "broadcast: 1D row to 2D matrix (row-replication)" do
-      t = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)  # shape {3}
+      # shape {3}
+      t = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
       b = Nx.broadcast(t, {2, 3})
       # axes=[1] means input axis 0 maps to output axis 1
       assert Nx.shape(b) == {2, 3}
@@ -480,7 +484,8 @@ defmodule Nx.VulkanTest do
 
     test "slice 1D simple range" do
       t = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0], backend: Nx.Vulkan.Backend)
-      s = Nx.slice(t, [1], [3])  # elements 1..3
+      # elements 1..3
+      s = Nx.slice(t, [1], [3])
       assert Nx.to_flat_list(s) == [2.0, 3.0, 4.0]
     end
 
@@ -494,17 +499,25 @@ defmodule Nx.VulkanTest do
     end
 
     test "slice 2D — extract a 2x2 block" do
-      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-                    backend: Nx.Vulkan.Backend)
-      s = Nx.slice(t, [0, 1], [2, 2])  # rows 0..1, cols 1..2
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+          backend: Nx.Vulkan.Backend
+        )
+
+      # rows 0..1, cols 1..2
+      s = Nx.slice(t, [0, 1], [2, 2])
       assert Nx.shape(s) == {2, 2}
       assert Nx.to_flat_list(s) == [2.0, 3.0, 5.0, 6.0]
     end
 
     test "slice_along_axis (Nx-built helper that calls slice/5)" do
-      t = Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
-                    backend: Nx.Vulkan.Backend)
-      s = Nx.slice_along_axis(t, 1, 2, axis: 1)  # cols 1..2
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+          backend: Nx.Vulkan.Backend
+        )
+
+      # cols 1..2
+      s = Nx.slice_along_axis(t, 1, 2, axis: 1)
       assert Nx.shape(s) == {2, 2}
       assert Nx.to_flat_list(s) == [2.0, 3.0, 6.0, 7.0]
     end
@@ -517,8 +530,11 @@ defmodule Nx.VulkanTest do
     end
 
     test "put_slice 2D — overwrite a 2x2 block" do
-      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-                    backend: Nx.Vulkan.Backend)
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+          backend: Nx.Vulkan.Backend
+        )
+
       patch = Nx.tensor([[97.0, 98.0], [99.0, 100.0]], backend: Nx.Vulkan.Backend)
       out = Nx.put_slice(t, [1, 1], patch)
       assert Nx.to_flat_list(out) == [1.0, 2.0, 3.0, 4.0, 97.0, 98.0, 7.0, 99.0, 100.0]
@@ -533,14 +549,16 @@ defmodule Nx.VulkanTest do
 
     test "sum over axis 0 of 2D" do
       t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
-      s = Nx.sum(t, axes: [0])  # column sums
+      # column sums
+      s = Nx.sum(t, axes: [0])
       assert Nx.shape(s) == {3}
       assert Nx.to_flat_list(s) == [5.0, 7.0, 9.0]
     end
 
     test "sum over axis 1 of 2D" do
       t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], backend: Nx.Vulkan.Backend)
-      s = Nx.sum(t, axes: [1])  # row sums
+      # row sums
+      s = Nx.sum(t, axes: [1])
       assert Nx.shape(s) == {2}
       assert Nx.to_flat_list(s) == [6.0, 15.0]
     end
@@ -647,15 +665,21 @@ defmodule Nx.VulkanTest do
     end
 
     test "take_diagonal of 3x3 (composes through gather)" do
-      t = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-                    backend: Nx.Vulkan.Backend)
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+          backend: Nx.Vulkan.Backend
+        )
+
       d = Nx.take_diagonal(t)
       assert Nx.to_flat_list(d) == [1.0, 5.0, 9.0]
     end
 
     test "take_diagonal of non-square 2x4" do
-      t = Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
-                    backend: Nx.Vulkan.Backend)
+      t =
+        Nx.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+          backend: Nx.Vulkan.Backend
+        )
+
       d = Nx.take_diagonal(t)
       assert Nx.to_flat_list(d) == [1.0, 6.0]
     end
@@ -843,8 +867,7 @@ defmodule Nx.VulkanTest do
 
     test "reduce_axis sum direct API (GPU shader)" do
       # 2×3×2 row-major, reduce axis 1 → outer=2, reduce=3, inner=2.
-      vals = [1.0, 2.0,  3.0, 4.0,  5.0, 6.0,
-              7.0, 8.0,  9.0, 10.0, 11.0, 12.0]
+      vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
       {:ok, t} = Nx.Vulkan.upload_f32(vals)
       {:ok, out_ref} = Nx.Vulkan.reduce_axis(t, 2, 3, 2, 0)
       {:ok, out_vals} = Nx.Vulkan.download_f32(out_ref, 4)
@@ -866,8 +889,7 @@ defmodule Nx.VulkanTest do
       # Same shape as reduce_axis test above; verify backend dispatch.
       t =
         Nx.tensor(
-          [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
-           [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]],
+          [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]],
           backend: Nx.Vulkan.Backend
         )
 
@@ -894,7 +916,8 @@ defmodule Nx.VulkanTest do
       #                                = -24 + 40 - 15 = 1
       t =
         Nx.tensor([[1.0, 2.0, 3.0], [0.0, 1.0, 4.0], [5.0, 6.0, 0.0]],
-                  backend: Nx.Vulkan.Backend)
+          backend: Nx.Vulkan.Backend
+        )
 
       d = Nx.LinAlg.determinant(t)
       assert_in_delta Nx.to_number(d), 1.0, 1.0e-5
@@ -915,11 +938,12 @@ defmodule Nx.VulkanTest do
       # [[4,2,2],[2,5,3],[2,3,6]] → L = [[2,0,0],[1,2,0],[1,1,2]]
       a =
         Nx.tensor([[4.0, 2.0, 2.0], [2.0, 5.0, 3.0], [2.0, 3.0, 6.0]],
-                  backend: Nx.Vulkan.Backend)
+          backend: Nx.Vulkan.Backend
+        )
 
       l = Nx.LinAlg.cholesky(a)
 
-      Enum.zip(Nx.to_flat_list(l), [2.0, 0.0, 0.0,  1.0, 2.0, 0.0,  1.0, 1.0, 2.0])
+      Enum.zip(Nx.to_flat_list(l), [2.0, 0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 2.0])
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-5 end)
     end
 
@@ -967,8 +991,16 @@ defmodule Nx.VulkanTest do
       # Chain: ((((a + b) * b) - b) / b) → square → exp → log → sqrt
       # With b=1: a+1 → a+1 → a → a → a^2 → exp(a^2) → log(exp(a^2)) → sqrt(a^2) = |a|
       {:ok, fused} =
-        Nx.Vulkan.fused_chain(a, b,
-          [:add, :multiply, :subtract, :divide, :square, :exp, :log, :sqrt])
+        Nx.Vulkan.fused_chain(a, b, [
+          :add,
+          :multiply,
+          :subtract,
+          :divide,
+          :square,
+          :exp,
+          :log,
+          :sqrt
+        ])
 
       {:ok, vals} = Nx.Vulkan.download_f32(fused, 3)
 
@@ -1031,8 +1063,10 @@ defmodule Nx.VulkanTest do
     end
 
     test "Day 1f — matmul_variant explicit shader path" do
-      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])  # 2x2
-      {:ok, b} = Nx.Vulkan.upload_f32([5.0, 6.0, 7.0, 8.0])  # 2x2
+      # 2x2
+      {:ok, a} = Nx.Vulkan.upload_f32([1.0, 2.0, 3.0, 4.0])
+      # 2x2
+      {:ok, b} = Nx.Vulkan.upload_f32([5.0, 6.0, 7.0, 8.0])
 
       # Each variant should produce the same A·B result.
       expected = [19.0, 22.0, 43.0, 50.0]
@@ -1109,7 +1143,13 @@ defmodule Nx.VulkanTest do
 
       {:ok, c} =
         Nx.Vulkan.apply_binary_broadcast(
-          scalar, vec, :add, 1, [4, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]
+          scalar,
+          vec,
+          :add,
+          1,
+          [4, 0, 0, 0],
+          [0, 0, 0, 0],
+          [1, 0, 0, 0]
         )
 
       {:ok, vals} = Nx.Vulkan.download_f32(c, 4)

@@ -159,7 +159,12 @@ defmodule Nx.Vulkan do
     Returns `{:ok, tensor}` or `{:error, reason}`.
     """
     def unquote(name)(a, b) do
-      Nx.Vulkan.Native.apply_binary(a, b, unquote(op_const), shader_path("elementwise_binary.spv"))
+      Nx.Vulkan.Native.apply_binary(
+        a,
+        b,
+        unquote(op_const),
+        shader_path("elementwise_binary.spv")
+      )
     end
   end
 
@@ -270,8 +275,7 @@ defmodule Nx.Vulkan do
 
   @doc false
   def matmul_variant(a, b, m, n, k, shader_name, tile_m, tile_n) do
-    Nx.Vulkan.Native.matmul_v(a, b, m, n, k, tile_m, tile_n,
-                              shader_path(shader_name))
+    Nx.Vulkan.Native.matmul_v(a, b, m, n, k, tile_m, tile_n, shader_path(shader_name))
   end
 
   @doc """
@@ -285,11 +289,9 @@ defmodule Nx.Vulkan do
     cond do
       # Below 4K total ops: dispatch + descriptor write costs dominate.
       flops < 4_096 -> {"matmul.spv", 16, 16}
-
       # 256³ = 16 777 216. mac-248's bench shows the 16x2 variant
       # taking the lead from this size onward.
       flops >= 16_777_216 -> {"matmul_tiled16x2.spv", 32, 16}
-
       # Middle ground: classic 16×16 tile.
       true -> {"matmul_tiled.spv", 16, 16}
     end
@@ -401,8 +403,7 @@ defmodule Nx.Vulkan do
   `op`: 0=sum, 1=max, 2=min. Output is (outer * inner) f32.
   """
   def reduce_axis(a, outer, reduce_size, inner, op) do
-    Nx.Vulkan.Native.reduce_axis(a, outer, reduce_size, inner, op,
-                                  shader_path("reduce_axis.spv"))
+    Nx.Vulkan.Native.reduce_axis(a, outer, reduce_size, inner, op, shader_path("reduce_axis.spv"))
   end
 
   # ------------------------------------------------------------------
@@ -411,11 +412,29 @@ defmodule Nx.Vulkan do
 
   @op_codes %{
     # Binary ops — second operand is always buffer `b`.
-    add: 0, multiply: 1, subtract: 2, divide: 3, pow: 4, max: 5, min: 6,
+    add: 0,
+    multiply: 1,
+    subtract: 2,
+    divide: 3,
+    pow: 4,
+    max: 5,
+    min: 6,
     # Unary ops — operate on the running register only.
-    exp: 100, log: 101, sqrt: 102, abs: 103, negate: 104,
-    sigmoid: 105, tanh: 106, relu: 107, ceil: 108, floor: 109,
-    sign: 110, reciprocal: 111, square: 112, erf: 113, expm1: 114
+    exp: 100,
+    log: 101,
+    sqrt: 102,
+    abs: 103,
+    negate: 104,
+    sigmoid: 105,
+    tanh: 106,
+    relu: 107,
+    ceil: 108,
+    floor: 109,
+    sign: 110,
+    reciprocal: 111,
+    square: 112,
+    erf: 113,
+    expm1: 114
   }
 
   @doc """
@@ -450,8 +469,7 @@ defmodule Nx.Vulkan do
   """
   def fused_chain(a_ref, b_ref, ops) when is_list(ops) do
     codes = Enum.map(ops, &Map.fetch!(@op_codes, &1))
-    Nx.Vulkan.Native.fused_chain(a_ref, b_ref, codes,
-                                  shader_path("fused_elementwise.spv"))
+    Nx.Vulkan.Native.fused_chain(a_ref, b_ref, codes, shader_path("fused_elementwise.spv"))
   end
 
   # ------------------------------------------------------------------
@@ -484,7 +502,9 @@ defmodule Nx.Vulkan do
 
   defp ensure_default_backend! do
     case Nx.default_backend() do
-      {Nx.Vulkan.Backend, _} -> :ok
+      {Nx.Vulkan.Backend, _} ->
+        :ok
+
       _ ->
         :ok = init()
         Nx.global_default_backend(Nx.Vulkan.Backend)
@@ -507,9 +527,15 @@ defmodule Nx.Vulkan do
   """
   def apply_binary_broadcast(a, b, op, ndim, out_shape, a_strides, b_strides) do
     op_const = Map.fetch!(@ops_binary, op)
+
     Nx.Vulkan.Native.apply_binary_broadcast(
-      a, b, op_const, ndim,
-      pad4(out_shape), pad4(a_strides), pad4(b_strides),
+      a,
+      b,
+      op_const,
+      ndim,
+      pad4(out_shape),
+      pad4(a_strides),
+      pad4(b_strides),
       shader_path("elementwise_binary_broadcast.spv")
     )
   end
@@ -540,8 +566,12 @@ defmodule Nx.Vulkan do
       |> Enum.reverse()
       |> Enum.reduce({[], 1}, fn {sd, od}, {acc, running} ->
         cond do
-          sd == od -> {[running | acc], running * sd}
-          sd == 1 -> {[0 | acc], running}
+          sd == od ->
+            {[running | acc], running * sd}
+
+          sd == 1 ->
+            {[0 | acc], running}
+
           true ->
             raise ArgumentError,
                   "shapes don't broadcast: #{inspect(src_shape)} → #{inspect(out_shape)}"
