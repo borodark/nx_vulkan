@@ -206,6 +206,24 @@ defmodule Nx.Vulkan do
   end
 
   # ------------------------------------------------------------------
+  # f64 elementwise — Day 6 / step 2c
+  # ------------------------------------------------------------------
+
+  @doc "f64 elementwise binary; dispatches elementwise_binary_f64.spv."
+  def apply_binary_f64(a, b, op) do
+    code = Map.fetch!(@ops_binary, op)
+    Nx.Vulkan.Native.apply_binary_f64(a, b, code,
+                                       shader_path("elementwise_binary_f64.spv"))
+  end
+
+  @doc "f64 elementwise unary; dispatches elementwise_unary_f64.spv."
+  def apply_unary_f64(a, op) do
+    code = Map.fetch!(@ops_unary, op)
+    Nx.Vulkan.Native.apply_unary_f64(a, code,
+                                      shader_path("elementwise_unary_f64.spv"))
+  end
+
+  # ------------------------------------------------------------------
   # v0.0.5 — reductions (return host-side scalar)
   # ------------------------------------------------------------------
 

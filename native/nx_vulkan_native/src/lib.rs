@@ -114,6 +114,9 @@ unsafe extern "C" {
         total_pooled: *mut u64,
     );
 
+    // f64 elementwise — same C shim, different .spv path. Caller computes
+    // n_elems and out_bytes per element width.
+
     fn nxv_matmul_v(
         out: *mut c_void,
         a: *mut c_void,
@@ -678,6 +681,79 @@ fn fused_chain<'a>(
     let rc = unsafe {
         nxv_fused_chain(out_handle, a.handle, b.handle, n, n_ops, padded.as_ptr(), cstr.as_ptr())
     };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// f64 elementwise binary. Same op codes 0..6 as the f32 path; the
+/// shader's binding type makes the precision choice.
+#[rustler::nif]
+fn apply_binary_f64<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 6 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+    if a.n_bytes != b.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n_elems = (a.n_bytes / 8) as u32;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(a.n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_apply_binary(out_handle, a.handle, b.handle, n_elems, op, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// f64 elementwise unary.
+#[rustler::nif]
+fn apply_unary_f64<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    op: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if op > 14 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n_elems = (a.n_bytes / 8) as u32;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(a.n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_apply_unary(out_handle, a.handle, n_elems, op, cstr.as_ptr()) };
 
     if rc != 0 {
         unsafe { nxv_buf_free(out_handle) };

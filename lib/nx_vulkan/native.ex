@@ -68,6 +68,12 @@ defmodule Nx.Vulkan.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  def apply_binary_f64(_a, _b, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def apply_unary_f64(_a, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   def pool_clear(), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false

@@ -1330,6 +1330,34 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Day 6 (2c) — f64 elementwise binary hits the GPU shader" do
+      :ok = Nx.Vulkan.init()
+
+      a = Nx.tensor([1.5, 2.5, 3.5], type: :f64, backend: Nx.Vulkan.Backend)
+      b = Nx.tensor([0.5, 0.5, 0.5], type: :f64, backend: Nx.Vulkan.Backend)
+
+      out = Nx.add(a, b)
+      assert Nx.type(out) == {:f, 64}
+      assert Nx.to_flat_list(out) == [2.0, 3.0, 4.0]
+    end
+
+    test "Day 6 (2c) — f64 elementwise unary (sqrt)" do
+      a = Nx.tensor([4.0, 9.0, 16.0], type: :f64, backend: Nx.Vulkan.Backend)
+      out = Nx.sqrt(a)
+      assert Nx.type(out) == {:f, 64}
+      assert Nx.to_flat_list(out) == [2.0, 3.0, 4.0]
+    end
+
+    test "Day 6 (2c) — f64 preserves precision an f32 path cannot" do
+      v = 1.0 + 1.0e-15
+      bin = <<v::float-64-native, v::float-64-native>>
+      a = Nx.from_binary(bin, :f64, backend: Nx.Vulkan.Backend)
+      out = Nx.add(a, a)
+      [first, _] = Nx.to_flat_list(out)
+      assert first > 2.0
+      assert first < 2.0 + 1.0e-14
+    end
+
     test "Audit — :neg_infinity round-trips through host-materialize paths" do
       :ok = Nx.Vulkan.init()
 

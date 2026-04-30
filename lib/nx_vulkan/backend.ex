@@ -181,13 +181,12 @@ defmodule Nx.Vulkan.Backend do
   end
 
   defp do_binary(%T{shape: shape, type: type} = out, %T{} = a, %T{} = b, op) do
-    cond do
-      # Mixed precision: host fallback. Compute shaders are f32-only.
-      type != {:f, 32} or a.type != {:f, 32} or b.type != {:f, 32} ->
-        host_fallback_binary(out, a, b, op)
+    all_f32 = all_f32?([type, a.type, b.type])
+    all_f64 = type == {:f, 64} and a.type == {:f, 64} and b.type == {:f, 64}
 
-      # Same shape: existing shader path.
-      a.shape == b.shape ->
+    cond do
+      # All-f32 same-shape: f32 shader path.
+      all_f32 and a.shape == b.shape ->
         a_data = to_vulkan!(a)
         b_data = to_vulkan!(b)
 
@@ -205,11 +204,19 @@ defmodule Nx.Vulkan.Backend do
         {:ok, ref} = apply_op.(a_data.ref, b_data.ref)
         put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
 
-      # Shape mismatch + ≤4D: broadcast shader path.
-      tuple_size(shape) <= 4 ->
+      # All-f64 same-shape: f64 shader path (Day 6 / step 2c).
+      all_f64 and a.shape == b.shape and op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
+        a_data = to_vulkan!(a)
+        b_data = to_vulkan!(b)
+        {:ok, ref} = Nx.Vulkan.apply_binary_f64(a_data.ref, b_data.ref, op)
+        put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+
+      # All-f32 shape mismatch + ≤4D: broadcast shader path.
+      all_f32 and tuple_size(shape) <= 4 ->
         try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
 
-      # Higher rank: host fallback (broadcast shader supports up to 4D).
+      # Anything else: host fallback (mixed precision, broadcast on f64,
+      # rank > 4, comparison ops on f64, etc.).
       true ->
         host_fallback_binary(out, a, b, op)
     end
@@ -262,14 +269,24 @@ defmodule Nx.Vulkan.Backend do
   for op <- @unary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a) do
-      if type != {:f, 32} or a.type != {:f, 32} do
-        a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
-        upload_host_tensor(out, apply(Nx, unquote(op), [a_host]))
-      else
-        a_data = to_vulkan!(a)
-        apply_op = Function.capture(Nx.Vulkan, unquote(op), 1)
-        {:ok, ref} = apply_op.(a_data.ref)
-        put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+      cond do
+        type == {:f, 32} and a.type == {:f, 32} ->
+          a_data = to_vulkan!(a)
+          apply_op = Function.capture(Nx.Vulkan, unquote(op), 1)
+          {:ok, ref} = apply_op.(a_data.ref)
+          put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+
+        type == {:f, 64} and a.type == {:f, 64} ->
+          # f64 shader path. Some unary ops (exp/log/pow/tanh) cast
+          # through f32 in the shader since GLSL lacks f64 overloads;
+          # arithmetic stays in f64.
+          a_data = to_vulkan!(a)
+          {:ok, ref} = Nx.Vulkan.apply_unary_f64(a_data.ref, unquote(op))
+          put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+
+        true ->
+          a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+          upload_host_tensor(out, apply(Nx, unquote(op), [a_host]))
       end
     end
   end
