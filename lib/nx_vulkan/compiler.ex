@@ -120,7 +120,9 @@ defmodule Nx.Vulkan.Compiler do
       vars
       |> fun.()
     after
-      if previous, do: Process.put(Nx.Shared.backend_pdict_key(), previous), else: Process.delete(Nx.Shared.backend_pdict_key())
+      if previous,
+        do: Process.put(Nx.Shared.backend_pdict_key(), previous),
+        else: Process.delete(Nx.Shared.backend_pdict_key())
     end
   end
 
@@ -266,7 +268,7 @@ defmodule Nx.Vulkan.Compiler do
   end
 
   # Helper for the fall-through path: apply each op in order.
-  defp apply_chain_op(op, acc, b_tensor) when op in @unary_ops do
+  defp apply_chain_op(op, acc, _b_tensor) when op in @unary_ops do
     apply(Nx, op, [acc])
   end
 

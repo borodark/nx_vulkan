@@ -11,8 +11,8 @@ defmodule Nx.Vulkan.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description:
-        "Nx tensor backend on Vulkan compute. Works on FreeBSD where CUDA does not.",
+      dialyzer: [plt_add_apps: [:nx], ignore_warnings: ".dialyzer_ignore.exs"],
+      description: "Nx tensor backend on Vulkan compute. Works on FreeBSD where CUDA does not.",
       package: package(),
       source_url: @source_url
     ]
@@ -31,7 +31,8 @@ defmodule Nx.Vulkan.MixProject do
       # Pin to 0.36; 0.37.3 has a rustler-sys signature mismatch with
       # rustc 1.90 (`&self.as_c_arg()` where `self.as_c_arg()` is wanted).
       {:rustler, "~> 0.36.0"},
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 

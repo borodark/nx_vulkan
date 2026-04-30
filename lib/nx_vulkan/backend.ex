@@ -65,8 +65,14 @@ defmodule Nx.Vulkan.Backend do
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type, shape: shape}, _limit) do
-    n_bytes = byte_size_of(shape) * element_bytes(type)
+  def to_binary(
+        %T{data: %__MODULE__{ref: ref}, type: type, shape: shape, vectorized_axes: v_axes},
+        _limit
+      ) do
+    # Vectorized axes (e.g. collapsed_axes from LinAlg) contribute to
+    # the total element count on the GPU but aren't reflected in shape.
+    v_factor = Enum.reduce(v_axes, 1, fn {_name, sz}, acc -> acc * sz end)
+    n_bytes = byte_size_of(shape) * v_factor * element_bytes(type)
 
     case Nx.Vulkan.Native.download_binary(ref, n_bytes) do
       {:ok, bin} -> bin
@@ -102,11 +108,11 @@ defmodule Nx.Vulkan.Backend do
 
   defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
   defp encode_scalar(s, {:f, 64}), do: <<s / 1.0::float-64-native>>
-  defp encode_scalar(s, {:s, 8}),  do: <<trunc(s)::signed-8>>
+  defp encode_scalar(s, {:s, 8}), do: <<trunc(s)::signed-8>>
   defp encode_scalar(s, {:s, 16}), do: <<trunc(s)::signed-16-native>>
   defp encode_scalar(s, {:s, 32}), do: <<trunc(s)::signed-32-native>>
   defp encode_scalar(s, {:s, 64}), do: <<trunc(s)::signed-64-native>>
-  defp encode_scalar(s, {:u, 8}),  do: <<trunc(s)::unsigned-8>>
+  defp encode_scalar(s, {:u, 8}), do: <<trunc(s)::unsigned-8>>
   defp encode_scalar(s, {:u, 16}), do: <<trunc(s)::unsigned-16-native>>
   defp encode_scalar(s, {:u, 32}), do: <<trunc(s)::unsigned-32-native>>
   defp encode_scalar(s, {:u, 64}), do: <<trunc(s)::unsigned-64-native>>
@@ -221,7 +227,13 @@ defmodule Nx.Vulkan.Backend do
 
       {:ok, ref} =
         Nx.Vulkan.apply_binary_broadcast(
-          a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+          a_data.ref,
+          b_data.ref,
+          op,
+          ndim,
+          out_dims,
+          a_strides,
+          b_strides
         )
 
       put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
@@ -278,9 +290,15 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def reduce_min(out, t, opts), do: do_reduce(out, t, opts, :reduce_min)
 
-  defp do_reduce(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = t, opts, op) do
+  defp do_reduce(%T{shape: _out_shape, type: type} = out, %T{shape: in_shape} = t, opts, op) do
     if not all_f32?([type, t.type]) do
-      nx_op = case op do :sum -> :sum; :reduce_max -> :reduce_max; :reduce_min -> :reduce_min end
+      nx_op =
+        case op do
+          :sum -> :sum
+          :reduce_max -> :reduce_max
+          :reduce_min -> :reduce_min
+        end
+
       host_via_nx(out, nx_op, [t], Keyword.take(opts, [:axes, :keep_axes]))
     else
       do_reduce_f32(out, t, opts, op, in_shape)
@@ -307,7 +325,14 @@ defmodule Nx.Vulkan.Backend do
         inner = in_dims |> Enum.drop(axis + 1) |> Enum.reduce(1, &*/2)
 
         t_data = to_vulkan!(t)
-        op_const = case op do :sum -> 0; :reduce_max -> 1; :reduce_min -> 2 end
+
+        op_const =
+          case op do
+            :sum -> 0
+            :reduce_max -> 1
+            :reduce_min -> 2
+          end
+
         {:ok, ref} = Nx.Vulkan.reduce_axis(t_data.ref, outer, reduce_size, inner, op_const)
         put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
 
@@ -321,8 +346,13 @@ defmodule Nx.Vulkan.Backend do
   defp gpu_full_reduce(:reduce_max, ref), do: Nx.Vulkan.reduce_max(ref)
   defp gpu_full_reduce(:reduce_min, ref), do: Nx.Vulkan.reduce_min(ref)
 
-  defp axis_reduce(%T{shape: out_shape, type: type} = out,
-                   %T{shape: in_shape} = tensor, axes, keep_axes, op) do
+  defp axis_reduce(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: in_shape} = tensor,
+         axes,
+         keep_axes,
+         op
+       ) do
     in_bin = Nx.to_binary(tensor)
     input = for <<x::float-32-native <- in_bin>>, do: x
 
@@ -383,13 +413,20 @@ defmodule Nx.Vulkan.Backend do
   # ---------------------------------------------------------------- matmul
 
   @impl true
-  def dot(%T{shape: out_shape, type: type} = out, %T{shape: a_shape} = a, ca, ba,
-          %T{shape: b_shape} = b, cb, bb) do
+  def dot(
+        %T{shape: out_shape, type: type} = out,
+        %T{shape: a_shape} = a,
+        ca,
+        ba,
+        %T{shape: b_shape} = b,
+        cb,
+        bb
+      ) do
     cond do
       # Mixed types or non-default contracting axes: host fallback with
       # the full 6-arg Nx.dot so shape semantics are preserved.
       not all_f32?([type, a.type, b.type]) or ca != [tuple_size(a_shape) - 1] or
-        cb != [0] or ba != [] or bb != [] ->
+          cb != [0] or ba != [] or bb != [] ->
         a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
         b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
         upload_host_tensor(out, Nx.dot(a_host, ca, ba, b_host, cb, bb))
@@ -477,12 +514,18 @@ defmodule Nx.Vulkan.Backend do
         permuted =
           for flat_idx <- 0..(n_total - 1) do
             out_coords = unflatten(flat_idx, out_dims)
-            in_coords = Enum.map(0..(length(in_dims) - 1)//1,
-                                 fn i -> Enum.at(out_coords, Enum.find_index(axes, &(&1 == i))) end)
+
+            in_coords =
+              Enum.map(
+                0..(length(in_dims) - 1)//1,
+                fn i -> Enum.at(out_coords, Enum.find_index(axes, &(&1 == i))) end
+              )
+
             Enum.at(floats, flatten(in_coords, in_dims))
           end
 
         new_bin = permuted |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
+
         {:ok, ref} = Nx.Vulkan.Native.upload_binary(new_bin)
         put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
     end
@@ -503,7 +546,14 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
-  defp do_broadcast_f32(%T{shape: out_shape, type: type} = out, tensor, in_shape, _out_shape, _type, axes) do
+  defp do_broadcast_f32(
+         %T{shape: out_shape, type: type} = out,
+         tensor,
+         in_shape,
+         _out_shape,
+         _type,
+         axes
+       ) do
     in_bin = Nx.to_binary(tensor)
 
     # Decode input as a flat list — it'll be re-indexed during expansion.
@@ -532,7 +582,10 @@ defmodule Nx.Vulkan.Backend do
   # axis j).
   defp flat_in_index(flat_idx, in_dims, out_dims, axes) do
     out_coords = unflatten(flat_idx, out_dims)
-    in_coords = Enum.map(0..(length(in_dims) - 1)//1, fn i -> Enum.at(out_coords, Enum.at(axes, i)) end)
+
+    in_coords =
+      Enum.map(0..(length(in_dims) - 1)//1, fn i -> Enum.at(out_coords, Enum.at(axes, i)) end)
+
     flatten(in_coords, in_dims)
   end
 
@@ -558,8 +611,13 @@ defmodule Nx.Vulkan.Backend do
   # slice patterns Nx.Defn produces (mostly axis-aligned, contiguous)
   # are bandwidth-bound on the download/upload anyway.
   @impl true
-  def slice(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = tensor,
-            start_indices, lengths, strides) do
+  def slice(
+        %T{shape: out_shape, type: type} = out,
+        %T{shape: in_shape} = tensor,
+        start_indices,
+        lengths,
+        strides
+      ) do
     if not all_f32?([type, tensor.type]) do
       host_via_nx(out, :slice, [tensor, start_indices, lengths], strides: strides)
     else
@@ -567,7 +625,16 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
-  defp do_slice_f32(%T{} = out, tensor, start_indices, lengths, strides, in_shape, out_shape, type) do
+  defp do_slice_f32(
+         %T{} = out,
+         tensor,
+         start_indices,
+         lengths,
+         strides,
+         in_shape,
+         out_shape,
+         type
+       ) do
     in_bin = Nx.to_binary(tensor)
     input = for <<x::float-32-native <- in_bin>>, do: x
 
@@ -579,7 +646,7 @@ defmodule Nx.Vulkan.Backend do
     # the caller passed tensor indices, materialize them to host
     # numbers via to_number/1.
     start_ints = Enum.map(start_indices, &to_int/1)
-    length_ints = Enum.map(lengths, &to_int/1)
+    _length_ints = Enum.map(lengths, &to_int/1)
     stride_ints = Enum.map(strides, &to_int/1)
 
     n_out = byte_size_of(out_shape)
@@ -605,27 +672,49 @@ defmodule Nx.Vulkan.Backend do
   # strategy as slice/5 — read both, walk target coords, write either
   # source.
   @impl true
-  def put_slice(%T{shape: out_shape, type: type} = out, %T{shape: target_shape} = target,
-                start_indices, %T{shape: slice_shape} = slice_t) do
+  def put_slice(
+        %T{shape: out_shape, type: type} = out,
+        %T{shape: target_shape} = target,
+        start_indices,
+        %T{shape: slice_shape} = slice_t
+      ) do
     if not all_f32?([type, target.type, slice_t.type]) do
       host_via_nx(out, :put_slice, [target, start_indices, slice_t])
     else
-      do_put_slice_f32(out, target, start_indices, slice_t, target_shape, slice_shape, out_shape, type)
+      do_put_slice_f32(
+        out,
+        target,
+        start_indices,
+        slice_t,
+        target_shape,
+        slice_shape,
+        out_shape,
+        type
+      )
     end
   end
 
-  defp do_put_slice_f32(%T{} = out, target, start_indices, slice_t, target_shape, slice_shape, out_shape, type) do
+  defp do_put_slice_f32(
+         %T{} = out,
+         target,
+         start_indices,
+         slice_t,
+         target_shape,
+         slice_shape,
+         out_shape,
+         type
+       ) do
     ^out_shape = target_shape
 
     target_bin = Nx.to_binary(target)
     slice_bin = Nx.to_binary(slice_t)
 
     target_floats = for <<x::float-32-native <- target_bin>>, do: x
-    slice_floats  = for <<x::float-32-native <- slice_bin>>, do: x
+    slice_floats = for <<x::float-32-native <- slice_bin>>, do: x
 
     target_dims = Tuple.to_list(target_shape)
-    slice_dims  = Tuple.to_list(slice_shape)
-    start_ints  = Enum.map(start_indices, &to_int/1)
+    slice_dims = Tuple.to_list(slice_shape)
+    start_ints = Enum.map(start_indices, &to_int/1)
 
     n = byte_size_of(target_shape)
 
@@ -730,17 +819,38 @@ defmodule Nx.Vulkan.Backend do
     do_indexed(out, target, indices, updates, opts, :add)
   end
 
-  defp do_indexed(%T{shape: out_shape, type: type} = out, %T{shape: target_shape} = target,
-                  indices, updates, opts, mode) do
+  defp do_indexed(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: target_shape} = target,
+         indices,
+         updates,
+         opts,
+         mode
+       ) do
     if not all_f32?([type, target.type, updates.type]) do
-      nx_op = case mode do :put -> :indexed_put; :add -> :indexed_add end
+      nx_op =
+        case mode do
+          :put -> :indexed_put
+          :add -> :indexed_add
+        end
+
       host_via_nx(out, nx_op, [target, indices, updates], Keyword.take(opts, [:axes]))
     else
       do_indexed_f32(out, target, indices, updates, opts, mode, target_shape, out_shape, type)
     end
   end
 
-  defp do_indexed_f32(%T{} = out, target, indices, updates, opts, mode, target_shape, out_shape, type) do
+  defp do_indexed_f32(
+         %T{} = out,
+         target,
+         indices,
+         updates,
+         opts,
+         mode,
+         target_shape,
+         out_shape,
+         type
+       ) do
     axes = opts[:axes] || Enum.to_list(0..(tuple_size(target_shape) - 1)//1)
     target_dims = Tuple.to_list(target_shape)
 
@@ -792,7 +902,7 @@ defmodule Nx.Vulkan.Backend do
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
 
-  defp decode_f32(bin), do: for <<x::float-32-native <- bin>>, do: x
+  defp decode_f32(bin), do: for(<<x::float-32-native <- bin>>, do: x)
 
   # IEEE 754 bit patterns for f32/f64 special values. Nx.to_flat_list
   # returns atoms (`:nan`, `:infinity`, `:neg_infinity`) for non-finite
@@ -831,14 +941,14 @@ defmodule Nx.Vulkan.Backend do
   # a hand-rolled LU shader; deferred.
 
   @impl true
-  def determinant(%T{type: type} = out, %T{} = a) do
+  def determinant(%T{type: _type} = out, %T{} = a) do
     a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
     res = Nx.LinAlg.determinant(a_host)
     upload_host_tensor(out, res)
   end
 
   @impl true
-  def solve(%T{type: type} = out, %T{} = a, %T{} = b) do
+  def solve(%T{type: _type} = out, %T{} = a, %T{} = b) do
     a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
     b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
     res = Nx.LinAlg.solve(a_host, b_host)
@@ -846,14 +956,14 @@ defmodule Nx.Vulkan.Backend do
   end
 
   @impl true
-  def cholesky(%T{type: type} = out, %T{} = a) do
+  def cholesky(%T{type: _type} = out, %T{} = a) do
     a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
     res = Nx.LinAlg.cholesky(a_host)
     upload_host_tensor(out, res)
   end
 
   @impl true
-  def triangular_solve(%T{type: type} = out, %T{} = a, %T{} = b, opts) do
+  def triangular_solve(%T{type: _type} = out, %T{} = a, %T{} = b, opts) do
     a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
     b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
     res = Nx.LinAlg.triangular_solve(a_host, b_host, opts)
@@ -871,17 +981,17 @@ defmodule Nx.Vulkan.Backend do
   # Comparisons: equal/less/greater have shader paths (ops 7/8/9 in
   # elementwise_binary); less_equal/greater_equal/not_equal compose.
   @impl true
-  def equal(out, a, b),         do: do_compare(out, a, b, :equal)
+  def equal(out, a, b), do: do_compare(out, a, b, :equal)
   @impl true
-  def less(out, a, b),          do: do_compare(out, a, b, :less)
+  def less(out, a, b), do: do_compare(out, a, b, :less)
   @impl true
-  def greater(out, a, b),       do: do_compare(out, a, b, :greater)
+  def greater(out, a, b), do: do_compare(out, a, b, :greater)
   @impl true
-  def less_equal(out, a, b),    do: host_fallback_binary(out, a, b, :less_equal)
+  def less_equal(out, a, b), do: host_fallback_binary(out, a, b, :less_equal)
   @impl true
   def greater_equal(out, a, b), do: host_fallback_binary(out, a, b, :greater_equal)
   @impl true
-  def not_equal(out, a, b),     do: host_fallback_binary(out, a, b, :not_equal)
+  def not_equal(out, a, b), do: host_fallback_binary(out, a, b, :not_equal)
 
   defp do_compare(%T{type: type} = out, %T{} = a, %T{} = b, op)
        when type == {:f, 32} do
@@ -1050,7 +1160,10 @@ defmodule Nx.Vulkan.Backend do
   # The compute shaders are still f32-only; this path lets exmc's mass
   # matrix accumulate in f64 and convert back to f32 before per-step ops.
   @impl true
-  def as_type(%T{type: dst_type, shape: shape} = out, %T{type: src_type, data: %__MODULE__{ref: ref}} = tensor) do
+  def as_type(
+        %T{type: dst_type, shape: shape} = out,
+        %T{type: src_type, data: %__MODULE__{ref: ref}} = _tensor
+      ) do
     n = byte_size_of(shape)
 
     cond do
@@ -1078,47 +1191,189 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
+  # ---------------------------------------------------------------- host-fallback stubs
+  #
+  # Every Nx.Backend callback not yet GPU-accelerated routes through
+  # BinaryBackend on the host. Correct but slow — each of these is a
+  # candidate for a future GPU shader path.
+
+  # Unary element-wise
+  @unary_host_fallbacks ~w(acos acosh asin asinh atan atanh bitwise_not cbrt
+                           conjugate cos cosh count_leading_zeros erf_inv erfc
+                           imag is_nan population_count real round rsqrt
+                           sin sinh tan)a
+
+  for op <- @unary_host_fallbacks do
+    @impl true
+    def unquote(op)(out, tensor) do
+      host_via_nx(out, unquote(op), [tensor])
+    end
+  end
+
+  # Binary element-wise
+  @impl true
+  def atan2(out, a, b), do: host_fallback_binary(out, a, b, :atan2)
+  @impl true
+  def logical_and(out, a, b), do: host_fallback_binary(out, a, b, :logical_and)
+  @impl true
+  def logical_or(out, a, b), do: host_fallback_binary(out, a, b, :logical_or)
+  @impl true
+  def logical_xor(out, a, b), do: host_fallback_binary(out, a, b, :logical_xor)
+
+  # Reductions
+  @impl true
+  def all(out, tensor, opts), do: host_via_nx(out, :all, [tensor], opts)
+  @impl true
+  def any(out, tensor, opts), do: host_via_nx(out, :any, [tensor], opts)
+  @impl true
+  def argmax(out, tensor, opts), do: host_via_nx(out, :argmax, [tensor], opts)
+  @impl true
+  def argmin(out, tensor, opts), do: host_via_nx(out, :argmin, [tensor], opts)
+  @impl true
+  def product(out, tensor, opts), do: host_via_nx(out, :product, [tensor], opts)
+  @impl true
+  def reduce(out, tensor, acc, opts, fun) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    a_host = Nx.backend_transfer(acc, Nx.BinaryBackend)
+    res = Nx.reduce(t_host, a_host, opts, fun)
+    upload_host_tensor(out, res)
+  end
+
+  # Sort / argsort
+  @impl true
+  def sort(out, tensor, opts), do: host_via_nx(out, :sort, [tensor], opts)
+  @impl true
+  def argsort(out, tensor, opts), do: host_via_nx(out, :argsort, [tensor], opts)
+
+  # Shape manipulation
+  @impl true
+  def reverse(out, tensor, axes), do: host_via_nx(out, :reverse, [tensor], [axes: axes])
+  @impl true
+  def bitcast(out, tensor), do: host_via_nx(out, :bitcast, [tensor])
+
+  # Convolution
+  @impl true
+  def conv(out, tensor, kernel, opts) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    k_host = Nx.backend_transfer(kernel, Nx.BinaryBackend)
+    res = Nx.conv(t_host, k_host, opts)
+    upload_host_tensor(out, res)
+  end
+
+  # Windowed reductions
+  @impl true
+  def window_sum(out, tensor, shape, opts), do: host_window(out, tensor, :window_sum, shape, opts)
+  @impl true
+  def window_max(out, tensor, shape, opts), do: host_window(out, tensor, :window_max, shape, opts)
+  @impl true
+  def window_min(out, tensor, shape, opts), do: host_window(out, tensor, :window_min, shape, opts)
+  @impl true
+  def window_product(out, tensor, shape, opts),
+    do: host_window(out, tensor, :window_product, shape, opts)
+  @impl true
+  def window_reduce(out, tensor, acc, shape, opts, fun) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    a_host = Nx.backend_transfer(acc, Nx.BinaryBackend)
+    res = Nx.window_reduce(t_host, a_host, shape, opts, fun)
+    upload_host_tensor(out, res)
+  end
+  @impl true
+  def window_scatter_max(out, tensor, source, init, shape, opts) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    s_host = Nx.backend_transfer(source, Nx.BinaryBackend)
+    i_host = Nx.backend_transfer(init, Nx.BinaryBackend)
+    res = Nx.window_scatter_max(t_host, s_host, i_host, shape, opts)
+    upload_host_tensor(out, res)
+  end
+  @impl true
+  def window_scatter_min(out, tensor, source, init, shape, opts) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    s_host = Nx.backend_transfer(source, Nx.BinaryBackend)
+    i_host = Nx.backend_transfer(init, Nx.BinaryBackend)
+    res = Nx.window_scatter_min(t_host, s_host, i_host, shape, opts)
+    upload_host_tensor(out, res)
+  end
+
+  defp host_window(out, tensor, op, shape, opts) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    res = apply(Nx, op, [t_host, shape, opts])
+    upload_host_tensor(out, res)
+  end
+
+  # FFT
+  @impl true
+  def fft(out, tensor, opts), do: host_via_nx(out, :fft, [tensor], opts)
+  @impl true
+  def ifft(out, tensor, opts), do: host_via_nx(out, :ifft, [tensor], opts)
+
+  # Batching
+  @impl true
+  def to_batched(out, tensor, opts) do
+    t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    Nx.to_batched(t_host, out.shape |> elem(0), opts)
+    |> Enum.map(fn batch -> upload_host_tensor(out, batch) end)
+  end
+
+  # Pointer interop (not supported — raise clearly)
+  @impl true
+  def from_pointer(_out, _pointer, _type, _shape, _backend_options) do
+    raise "Nx.Vulkan.Backend does not support from_pointer/5"
+  end
+  @impl true
+  def to_pointer(_tensor, _opts) do
+    raise "Nx.Vulkan.Backend does not support to_pointer/2"
+  end
+
   defp decode_typed(<<>>, _), do: []
-  defp decode_typed(bin, {:f, 32}), do: for <<x::float-32-native <- bin>>, do: x
-  defp decode_typed(bin, {:f, 64}), do: for <<x::float-64-native <- bin>>, do: x
-  defp decode_typed(bin, {:s, 8}),  do: for <<x::signed-8 <- bin>>, do: x
-  defp decode_typed(bin, {:s, 16}), do: for <<x::signed-16-native <- bin>>, do: x
-  defp decode_typed(bin, {:s, 32}), do: for <<x::signed-32-native <- bin>>, do: x
-  defp decode_typed(bin, {:s, 64}), do: for <<x::signed-64-native <- bin>>, do: x
-  defp decode_typed(bin, {:u, 8}),  do: for <<x::unsigned-8 <- bin>>, do: x
-  defp decode_typed(bin, {:u, 16}), do: for <<x::unsigned-16-native <- bin>>, do: x
-  defp decode_typed(bin, {:u, 32}), do: for <<x::unsigned-32-native <- bin>>, do: x
-  defp decode_typed(bin, {:u, 64}), do: for <<x::unsigned-64-native <- bin>>, do: x
+  defp decode_typed(bin, {:f, 32}), do: for(<<x::float-32-native <- bin>>, do: x)
+  defp decode_typed(bin, {:f, 64}), do: for(<<x::float-64-native <- bin>>, do: x)
+  defp decode_typed(bin, {:s, 8}), do: for(<<x::signed-8 <- bin>>, do: x)
+  defp decode_typed(bin, {:s, 16}), do: for(<<x::signed-16-native <- bin>>, do: x)
+  defp decode_typed(bin, {:s, 32}), do: for(<<x::signed-32-native <- bin>>, do: x)
+  defp decode_typed(bin, {:s, 64}), do: for(<<x::signed-64-native <- bin>>, do: x)
+  defp decode_typed(bin, {:u, 8}), do: for(<<x::unsigned-8 <- bin>>, do: x)
+  defp decode_typed(bin, {:u, 16}), do: for(<<x::unsigned-16-native <- bin>>, do: x)
+  defp decode_typed(bin, {:u, 32}), do: for(<<x::unsigned-32-native <- bin>>, do: x)
+  defp decode_typed(bin, {:u, 64}), do: for(<<x::unsigned-64-native <- bin>>, do: x)
 
   defp encode_typed(values, {:f, 32}),
     do: values |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:f, 64}),
     do: values |> Enum.map(&encode_f64_bits/1) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:s, 8}),
     do: values |> Enum.map(fn v -> <<trunc(v)::signed-8>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:s, 16}),
     do: values |> Enum.map(fn v -> <<trunc(v)::signed-16-native>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:s, 32}),
     do: values |> Enum.map(fn v -> <<trunc(v)::signed-32-native>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:s, 64}),
     do: values |> Enum.map(fn v -> <<trunc(v)::signed-64-native>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:u, 8}),
     do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-8>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:u, 16}),
     do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-16-native>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:u, 32}),
     do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-32-native>> end) |> IO.iodata_to_binary()
+
   defp encode_typed(values, {:u, 64}),
     do: values |> Enum.map(fn v -> <<trunc(v)::unsigned-64-native>> end) |> IO.iodata_to_binary()
 
   # ---------------------------------------------------------------- helpers
 
-  defp ensure_f32!({:f, 32}), do: :ok
-
-  defp ensure_f32!(other) do
-    raise ArgumentError,
-          "Nx.Vulkan.Backend currently supports only {:f, 32}; got #{inspect(other)}"
-  end
+  # Uncomment when needed:
+  # defp ensure_f32!({:f, 32}), do: :ok
+  # defp ensure_f32!(other) do
+  #   raise ArgumentError,
+  #         "Nx.Vulkan.Backend currently supports only {:f, 32}; got #{inspect(other)}"
+  # end
 
   # Returns true if every operand (and the output) is f32. Callbacks
   # use this as a gate before dispatching shaders; non-f32 cases route
@@ -1151,6 +1406,7 @@ defmodule Nx.Vulkan.Backend do
 
   # If the tensor's data isn't already a Vulkan backend, materialise it.
   defp to_vulkan!(%T{data: %__MODULE__{} = data}), do: data
+
   defp to_vulkan!(%T{} = t) do
     bin = Nx.to_binary(t)
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
