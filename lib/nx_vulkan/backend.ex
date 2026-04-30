@@ -1213,22 +1213,8 @@ defmodule Nx.Vulkan.Backend do
   # Binary element-wise
   @impl true
   def atan2(out, a, b), do: host_fallback_binary(out, a, b, :atan2)
-  @impl true
-  def logical_and(out, a, b), do: host_fallback_binary(out, a, b, :logical_and)
-  @impl true
-  def logical_or(out, a, b), do: host_fallback_binary(out, a, b, :logical_or)
-  @impl true
-  def logical_xor(out, a, b), do: host_fallback_binary(out, a, b, :logical_xor)
 
   # Reductions
-  @impl true
-  def all(out, tensor, opts), do: host_via_nx(out, :all, [tensor], opts)
-  @impl true
-  def any(out, tensor, opts), do: host_via_nx(out, :any, [tensor], opts)
-  @impl true
-  def argmax(out, tensor, opts), do: host_via_nx(out, :argmax, [tensor], opts)
-  @impl true
-  def argmin(out, tensor, opts), do: host_via_nx(out, :argmin, [tensor], opts)
   @impl true
   def product(out, tensor, opts), do: host_via_nx(out, :product, [tensor], opts)
   @impl true
