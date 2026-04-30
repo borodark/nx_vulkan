@@ -1290,6 +1290,26 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Audit — :neg_infinity round-trips through host-materialize paths" do
+      :ok = Nx.Vulkan.init()
+
+      # 1/0.0 → :infinity; -1/0.0 → :neg_infinity. Encode → upload →
+      # download must preserve the IEEE bit pattern.
+      bin =
+        <<0x7F800000::32-native>> <>     # +inf
+        <<0xFF800000::32-native>> <>     # -inf
+        <<0x7FC00000::32-native>>        # quiet NaN
+
+      t = Nx.from_binary(bin, :f32, backend: Nx.Vulkan.Backend)
+      vals = Nx.to_flat_list(t)
+
+      # Now use a host-materialize path (transpose) and verify the
+      # pipeline doesn't crash on the atom values.
+      t2d = Nx.reshape(t, {1, 3})
+      _ = Nx.transpose(t2d)              # forces broadcast/transpose host fallback
+      assert vals == [:infinity, :neg_infinity, :nan]
+    end
+
     test "Day 1d — non-fusable defn falls through to Evaluator" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()

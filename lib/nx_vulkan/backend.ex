@@ -365,7 +365,7 @@ defmodule Nx.Vulkan.Backend do
         reduce_values(op, values)
       end
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
@@ -476,7 +476,7 @@ defmodule Nx.Vulkan.Backend do
             Enum.at(floats, flatten(in_coords, in_dims))
           end
 
-        new_bin = permuted |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+        new_bin = permuted |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
         {:ok, ref} = Nx.Vulkan.Native.upload_binary(new_bin)
         put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
     end
@@ -513,7 +513,7 @@ defmodule Nx.Vulkan.Backend do
         Enum.at(input, flat_in)
       end
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
@@ -589,7 +589,7 @@ defmodule Nx.Vulkan.Backend do
         Enum.at(input, flatten(in_coords, in_dims))
       end
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
@@ -640,7 +640,7 @@ defmodule Nx.Vulkan.Backend do
         end
       end
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
@@ -704,7 +704,7 @@ defmodule Nx.Vulkan.Backend do
         Enum.at(in_floats, flatten(in_coords, in_dims))
       end
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
@@ -781,12 +781,33 @@ defmodule Nx.Vulkan.Backend do
         end)
       end)
 
-    bin = output |> Enum.map(fn x -> <<x::float-32-native>> end) |> IO.iodata_to_binary()
+    bin = output |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
     {:ok, ref} = Nx.Vulkan.Native.upload_binary(bin)
     put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
   end
 
   defp decode_f32(bin), do: for <<x::float-32-native <- bin>>, do: x
+
+  # IEEE 754 bit patterns for f32/f64 special values. Nx.to_flat_list
+  # returns atoms (`:nan`, `:infinity`, `:neg_infinity`) for non-finite
+  # values; our host-materialize paths must re-encode them as the
+  # right bit pattern instead of choking on `<<atom::float-...>>`.
+  @nan_f32          <<0x7FC00000::32-native>>
+  @inf_f32          <<0x7F800000::32-native>>
+  @neg_inf_f32      <<0xFF800000::32-native>>
+  @nan_f64          <<0x7FF8000000000000::64-native>>
+  @inf_f64          <<0x7FF0000000000000::64-native>>
+  @neg_inf_f64      <<0xFFF0000000000000::64-native>>
+
+  defp encode_f32_bits(:nan), do: @nan_f32
+  defp encode_f32_bits(:infinity), do: @inf_f32
+  defp encode_f32_bits(:neg_infinity), do: @neg_inf_f32
+  defp encode_f32_bits(x) when is_number(x), do: <<x / 1.0::float-32-native>>
+
+  defp encode_f64_bits(:nan), do: @nan_f64
+  defp encode_f64_bits(:infinity), do: @inf_f64
+  defp encode_f64_bits(:neg_infinity), do: @neg_inf_f64
+  defp encode_f64_bits(x) when is_number(x), do: <<x / 1.0::float-64-native>>
 
   # ---------------------------------------------------------------- dense linalg (v0.1.9)
 
@@ -1020,9 +1041,9 @@ defmodule Nx.Vulkan.Backend do
   defp decode_typed(bin, {:u, 64}), do: for <<x::unsigned-64-native <- bin>>, do: x
 
   defp encode_typed(values, {:f, 32}),
-    do: values |> Enum.map(fn v -> <<v / 1.0::float-32-native>> end) |> IO.iodata_to_binary()
+    do: values |> Enum.map(&encode_f32_bits/1) |> IO.iodata_to_binary()
   defp encode_typed(values, {:f, 64}),
-    do: values |> Enum.map(fn v -> <<v / 1.0::float-64-native>> end) |> IO.iodata_to_binary()
+    do: values |> Enum.map(&encode_f64_bits/1) |> IO.iodata_to_binary()
   defp encode_typed(values, {:s, 8}),
     do: values |> Enum.map(fn v -> <<trunc(v)::signed-8>> end) |> IO.iodata_to_binary()
   defp encode_typed(values, {:s, 16}),
