@@ -383,14 +383,20 @@ defmodule Nx.Vulkan.Backend do
   # ---------------------------------------------------------------- matmul
 
   @impl true
-  def dot(%T{shape: out_shape, type: type} = out, %T{shape: a_shape} = a, _ca, _ba,
-          %T{shape: b_shape} = b, _cb, _bb) do
-    if not all_f32?([type, a.type, b.type]) do
-      a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
-      b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
-      upload_host_tensor(out, Nx.dot(a_host, b_host))
-    else
-      do_dot_f32(out, a, b, a_shape, b_shape, out_shape, type)
+  def dot(%T{shape: out_shape, type: type} = out, %T{shape: a_shape} = a, ca, ba,
+          %T{shape: b_shape} = b, cb, bb) do
+    cond do
+      # Mixed types or non-default contracting axes: host fallback with
+      # the full 6-arg Nx.dot so shape semantics are preserved.
+      not all_f32?([type, a.type, b.type]) or ca != [tuple_size(a_shape) - 1] or
+        cb != [0] or ba != [] or bb != [] ->
+        a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
+        b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
+        upload_host_tensor(out, Nx.dot(a_host, ca, ba, b_host, cb, bb))
+
+      # Default contracting axes + f32: try the shader fast path.
+      true ->
+        do_dot_f32(out, a, b, a_shape, b_shape, out_shape, type)
     end
   end
 
@@ -988,6 +994,44 @@ defmodule Nx.Vulkan.Backend do
 
   @impl true
   def bitwise_xor(out, a, b), do: host_fallback_binary(out, a, b, :bitwise_xor)
+
+  # Logical ops — host fallback (boolean tensors, not on the f32 hot path).
+  @impl true
+  def logical_and(out, a, b), do: host_fallback_binary(out, a, b, :logical_and)
+
+  @impl true
+  def logical_or(out, a, b), do: host_fallback_binary(out, a, b, :logical_or)
+
+  @impl true
+  def logical_xor(out, a, b), do: host_fallback_binary(out, a, b, :logical_xor)
+
+  @impl true
+  def logical_not(out, t) do
+    host_via_nx(out, :logical_not, [t])
+  end
+
+  # argmax / argmin — host fallback. Producing an integer index tensor;
+  # not on any f32 hot path. opts: :axis, :tie_break, :keep_axis.
+  @impl true
+  def argmax(out, t, opts) do
+    host_via_nx(out, :argmax, [t], Keyword.take(opts, [:axis, :tie_break, :keep_axis]))
+  end
+
+  @impl true
+  def argmin(out, t, opts) do
+    host_via_nx(out, :argmin, [t], Keyword.take(opts, [:axis, :tie_break, :keep_axis]))
+  end
+
+  # all/any — host fallback.
+  @impl true
+  def all(out, t, opts) do
+    host_via_nx(out, :all, [t], Keyword.take(opts, [:axes, :keep_axes]))
+  end
+
+  @impl true
+  def any(out, t, opts) do
+    host_via_nx(out, :any, [t], Keyword.take(opts, [:axes, :keep_axes]))
+  end
 
   # Shared host fallback for binary ops we haven't wired natively.
   defp host_fallback_binary(out, a, b, op) do
