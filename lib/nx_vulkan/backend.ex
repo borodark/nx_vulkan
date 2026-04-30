@@ -84,7 +84,7 @@ defmodule Nx.Vulkan.Backend do
 
   @impl true
   def backend_copy(%T{} = tensor, backend, opts) do
-    bin = to_binary(tensor, byte_size_of(tensor.shape) * element_bytes(tensor.type))
+    bin = to_binary(tensor, :all)
     backend.from_binary(tensor, bin, opts)
   end
 
@@ -1179,9 +1179,9 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def as_type(
         %T{type: dst_type, shape: shape} = out,
-        %T{type: src_type, data: %__MODULE__{ref: ref}} = _tensor
+        %T{type: src_type, data: %__MODULE__{ref: ref, shape: data_shape}} = _tensor
       ) do
-    n = byte_size_of(shape)
+    n = byte_size_of(data_shape)
 
     cond do
       src_type == dst_type ->
@@ -1427,7 +1427,7 @@ defmodule Nx.Vulkan.Backend do
 
   @impl true
   def inspect(%T{} = tensor, opts) do
-    bin = to_binary(tensor, byte_size_of(tensor.shape) * element_bytes(tensor.type))
+    bin = to_binary(tensor, :all)
     Nx.Backend.inspect(tensor, bin, opts)
   end
 end

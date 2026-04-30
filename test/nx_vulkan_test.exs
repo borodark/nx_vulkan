@@ -1419,5 +1419,24 @@ defmodule Nx.VulkanTest do
       Enum.zip(Nx.to_flat_list(mx), [6.0, 12.0])
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
     end
+
+    test "reshape then to_binary (size_mismatch regression)" do
+      t = Nx.tensor([[1.0, 2.0], [3.0, 4.0]], backend: Nx.Vulkan.Backend)
+      reshaped = Nx.reshape(t, {4})
+      assert Nx.to_flat_list(reshaped) == [1.0, 2.0, 3.0, 4.0]
+    end
+
+    test "squeeze then to_binary (size_mismatch regression)" do
+      t = Nx.tensor([[[1.0, 2.0]]], backend: Nx.Vulkan.Backend)
+      squeezed = Nx.squeeze(t)
+      assert Nx.to_flat_list(squeezed) == [1.0, 2.0]
+    end
+
+    test "as_type then reshape then to_binary (size_mismatch regression)" do
+      t = Nx.tensor([1.0, 2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+      t64 = Nx.as_type(t, :f64)
+      reshaped = Nx.reshape(t64, {2, 2})
+      assert Nx.to_flat_list(reshaped) == [1.0, 2.0, 3.0, 4.0]
+    end
   end
 end
