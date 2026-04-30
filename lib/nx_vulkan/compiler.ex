@@ -49,6 +49,12 @@ defmodule Nx.Vulkan.Compiler do
     min: 6
   }
 
+  # Commutative binary ops — if first arg is the b var and second is
+  # not, we can swap and still produce the correct result. Subtract,
+  # divide, pow are NOT commutative and so the chain bails on the
+  # reversed pattern.
+  @commutative_ops [:add, :multiply, :max, :min]
+
   @unary_ops [
     :exp,
     :log,
@@ -149,7 +155,36 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
+  # 1-arg defn — pass `a` as both buffers. Only unary chains can fuse
+  # this way (binary ops would degenerate to op(a, a) which is
+  # rarely what the user wrote). The shader still reads b unconditionally
+  # but ignores its value when no binary op fires.
+  defp detect_chain(%T{data: %Expr{}} = root, var_ids) when length(var_ids) == 1 do
+    [{0, a_id, _shape, _type}] = var_ids
+
+    case walk_unary_only(root, a_id, []) do
+      {:ok, ops} when length(ops) >= 1 and length(ops) <= 8 ->
+        {:ok, ops, a_id, a_id}
+
+      _ ->
+        :no_match
+    end
+  end
+
   defp detect_chain(_, _), do: :no_match
+
+  # 1-arg variant: only unary ops; bottom out at the single var.
+  defp walk_unary_only(%T{data: %Expr{id: id, op: :parameter}}, a_id, acc)
+       when id == a_id do
+    {:ok, acc}
+  end
+
+  defp walk_unary_only(%T{data: %Expr{op: op, args: [arg]}}, a_id, acc)
+       when op in @unary_ops do
+    walk_unary_only(arg, a_id, [op | acc])
+  end
+
+  defp walk_unary_only(_, _, _), do: :no_match
 
   # Reached `a` — bottom of chain.
   defp walk_chain(%T{data: %Expr{id: id, op: :parameter}}, a_id, _b_id, acc)
@@ -163,7 +198,8 @@ defmodule Nx.Vulkan.Compiler do
     walk_chain(arg, a_id, b_id, [op | acc])
   end
 
-  # Binary fusable op — second arg must be `b`; recurse into first.
+  # Binary fusable op — second arg must be `b`. If first is `b` and the
+  # op is commutative, swap and continue.
   defp walk_chain(%T{data: %Expr{op: op, args: [first, second]}}, a_id, b_id, acc) do
     cond do
       not Map.has_key?(@binary_ops, op) ->
@@ -171,6 +207,11 @@ defmodule Nx.Vulkan.Compiler do
 
       var_id(second) == b_id ->
         walk_chain(first, a_id, b_id, [op | acc])
+
+      var_id(first) == b_id and op in @commutative_ops ->
+        # Reversed-order commutative pattern (e.g., Nx.add(b, expr)).
+        # Swap and proceed as if it were Nx.add(expr, b).
+        walk_chain(second, a_id, b_id, [op | acc])
 
       true ->
         :no_match
@@ -190,13 +231,17 @@ defmodule Nx.Vulkan.Compiler do
 
     fn [params] ->
       # Per Nx.Defn.Compiler protocol, params is a list of zero-arity
-      # thunks (`[(-> Nx.Tensor.t())]`). Realize them positionally;
-      # the chain detector already established that var 0 is `a` and
-      # var 1 is `b` in the IR.
-      [a_thunk, b_thunk | _] = params
-      a_tensor = a_thunk.()
-      b_tensor = b_thunk.()
-      [run_fused(a_tensor, b_tensor, ops, out_shape, out_type)]
+      # thunks (`[(-> Nx.Tensor.t())]`). For 1-arg defns we pass the
+      # same buffer as both a and b to the shader (which reads b
+      # unconditionally but ignores it for unary-only chains).
+      case params do
+        [a_thunk] ->
+          a_tensor = a_thunk.()
+          [run_fused(a_tensor, a_tensor, ops, out_shape, out_type)]
+
+        [a_thunk, b_thunk | _] ->
+          [run_fused(a_thunk.(), b_thunk.(), ops, out_shape, out_type)]
+      end
     end
   end
 

@@ -1221,6 +1221,75 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Audit — 1-arg unary chain auto-fuses" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # exp(sigmoid(x)) — 1-arg defn, two unaries.
+        f = fn x -> Nx.exp(Nx.sigmoid(x)) end
+        x = Nx.tensor([-1.0, 0.0, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(x)
+
+        expected = [
+          :math.exp(1.0 / (1.0 + :math.exp(1.0))),
+          :math.exp(0.5),
+          :math.exp(1.0 / (1.0 + :math.exp(-1.0)))
+        ]
+
+        Enum.zip(Nx.to_flat_list(out), expected)
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Audit — commutative swap fuses Nx.add(b, expr)" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # b + (a * b) — first arg is the b var; commutative swap kicks in
+        f = fn a, b -> Nx.add(b, Nx.multiply(a, b)) end
+        a = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        b = Nx.tensor([2.0, 2.0, 2.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(a, b)
+
+        # Expected: 2 + 1*2 = 4; 2 + 2*2 = 6; 2 + 3*2 = 8
+        assert Nx.to_flat_list(out) == [4.0, 6.0, 8.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Audit — non-commutative swap (subtract with b first) does NOT fuse" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # b - (a * b) — subtract is non-commutative; cannot swap.
+        # Falls through to Evaluator. Result must still be correct.
+        f = fn a, b -> Nx.subtract(b, Nx.multiply(a, b)) end
+        a = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        b = Nx.tensor([2.0, 2.0, 2.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(a, b)
+
+        # Expected: 2 - 1*2 = 0; 2 - 2*2 = -2; 2 - 3*2 = -4
+        assert Nx.to_flat_list(out) == [0.0, -2.0, -4.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "Day 1d — non-fusable defn falls through to Evaluator" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()
