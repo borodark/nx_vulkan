@@ -1,150 +1,140 @@
-# mac-248 — Re-run exmc Vulkan suite to measure Week 1 gains
+# mac-248 — Day 6 (Week 2 step 2c): f64 elementwise shaders
 
-**Goal**: confirm Week 1's speed work moves the needle. Your previous
-run was **622/29 (95.3%)**; expect timeouts to drop now that the
-chain-shaped paths fuse and the alloc/free overhead is amortized.
+**Goal**: f64 variants of the elementwise binary + unary shaders so the
+mass-matrix accumulator path (and any defn that explicitly requests
+:f64) runs on GPU instead of falling back to BinaryBackend round-trip.
+Closes the precision side of the 8 ArithmeticError failures from
+your 622/29 baseline.
 
-## What changed since your last run
+**Why now**: Day 5 (step size clamp + stable inverse-softplus) is in.
+That kills overflow at the *adaptation* layer. Day 6 lets the
+*compute* layer carry f64 when callers ask for it — currently any f64
+operand forces host fallback (~50µs/op vs ~5µs on GPU).
 
-| # | Step | Win | Where |
-|---|---|---|---|
-| 1a | Persistent buffer pool | 1.5–1.7× per-op (measured) | nx_vulkan |
-| 1b | Pipeline cache | already in place | nx_vulkan |
-| 1c | f32 path for all ops | 124/0 nx_vulkan | nx_vulkan |
-| 1d | **Auto-fusion compiler** | N elementwise dispatches → 1 fused | nx_vulkan + exmc |
-| 1e | Per-axis reduce shader | single-axis on GPU | nx_vulkan |
-| 1f | Tiled matmul auto-select | 4.2× at 1024×1024 (mac-248's bench) | nx_vulkan |
+**Scope for this TODO**: 2 shaders only. Reduce_axis_f64 and
+matmul_f64 land later if the elementwise pair doesn't move the needle
+enough.
 
-Auto-fusion (1d) is the big lever: every defn body in exmc now passes
-through `Nx.Vulkan.Compiler` which walks the IR and replaces fusable
-elementwise chains with one `fused_chain` dispatch instead of N. The
-NUTS leapfrog should benefit most.
+## Layout note
 
-## Step 1 — Sync three repos
+Mac-248 uses the flat layout: `~/spirit/`, `~/nx_vulkan/`. Paths below
+assume that.
+
+## Steps
 
 ```
 cd ~/spirit
-git checkout feature/vulkan-backend
 git pull
-
-cd ~/nx_vulkan
-git pull       # main is at d3a3c7b (Day 1f)
-
-cd ~/phd       # or wherever exmc lives
-git pull       # main is at e569fac6 (uses Nx.Vulkan.Compiler)
+git checkout -b feat/elementwise-f64-shaders
 ```
 
-## Step 2 — Verify nx_vulkan tests first
+### New file: `shaders/elementwise_binary_f64.comp`
 
-```
-cd ~/nx_vulkan
-mix compile --force      # picks up new shaders + Rust NIF additions
-mix test
-```
+Copy your existing `shaders/elementwise_binary.comp` and apply these
+changes:
 
-Expected: **124 tests, 0 failures**. The 3 new from Day 1f cover
-matmul auto-select; the 2 from Day 1d cover the auto-fusion compiler;
-the 2 from Day 1a cover the buffer pool.
+1. Add the f64 extension at the top (right after `#version 450`):
 
-If anything fails here, **stop**. The exmc run will be unreliable.
-
-## Step 3 — Benchmark the buffer pool (optional sanity)
-
-```
-cd ~/nx_vulkan
-mix run bench/pool_bench.exs
+```glsl
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 ```
 
-Should show 1.5–1.7× speedup on chain-shaped workloads vs forced-clear.
-Linux measured 97.5% pool hit rate. If your numbers differ wildly,
-flag it — the GT 750M's allocator may behave differently.
+2. Replace every `float` with `double` in the buffer + `r` declarations.
+3. Replace `1.0` literals in the compare ops with `1.0LF` (double
+   literal) — the lit float→double conversion can produce a warning
+   but is functionally fine; the explicit form is cleaner.
 
-## Step 4 — Run the targeted subset (sanity)
+The body stays identical — same op switch, same op codes 0..9.
+
+### New file: `shaders/elementwise_unary_f64.comp`
+
+Same recipe applied to `elementwise_unary.comp`. The erf and expm1
+helpers (op 13/14) need their float arithmetic doubled too:
+
+```glsl
+double erf_approx(double x) {
+    double a1 =  0.254829592LF;   // ... etc
+    // (same A&S 7.1.26 formula, all literals as double)
+}
+
+double expm1_approx(double x) {
+    if (abs(x) < 0.5LF) {
+        // Taylor — all coefficients as double
+    } else {
+        return exp(x) - 1.0LF;
+    }
+}
+```
+
+GLSL's built-in `exp`, `log`, `sqrt`, `tanh`, `pow`, etc. all have
+double overloads when the f64 extension is enabled, so the body
+otherwise just inherits.
+
+### Compile + push
 
 ```
-cd ~/phd/exmc          # or wherever
-EXMC_COMPILER=vulkan mix test test/exmc_test.exs test/dist_test.exs \
-                              test/diagnostics_test.exs test/compiler_test.exs
+glslangValidator -V shaders/elementwise_binary_f64.comp \
+                 -o shaders/elementwise_binary_f64.spv
+glslangValidator -V shaders/elementwise_unary_f64.comp \
+                 -o shaders/elementwise_unary_f64.spv
+
+git add shaders/elementwise_binary_f64.comp shaders/elementwise_binary_f64.spv \
+        shaders/elementwise_unary_f64.comp shaders/elementwise_unary_f64.spv
+
+git commit -m "shaders: f64 elementwise binary + unary (Day 6 / step 2c)"
+git push origin feat/elementwise-f64-shaders
 ```
 
-Previous Linux number: **63 + 11 doctests, ~6 failures = 91.9%**. With
-auto-fusion, expect this to stay similar (these tests aren't NUTS-heavy)
-or improve slightly.
+### Verify on FreeBSD GT 750M
 
-## Step 5 — Run the FULL suite
+Optional but useful — the GT 750M reports `f64=yes` (per spirit init);
+this confirms the .spv actually loads:
 
 ```
-cd ~/phd/exmc
-EXMC_COMPILER=vulkan mix test 2>&1 | tee ~/exmc_vulkan_w1.log
+cd ~/spirit
+# Quick sanity: any matmul-bench-style call that loads the new .spv
+# and writes/reads two doubles. Or just trust the Linux side to
+# validate via mix test once the wiring lands.
 ```
 
-**Compare to your prior run (622/29):**
+## After your push
 
-| Metric | Last run | Expected after Week 1 |
-|--------|---------|---------------------|
-| Total tests | 622 | 622 |
-| Failures | 29 | **15–22** (some timeouts convert to passes) |
-| Wall time | unknown — please report | substantially less (auto-fusion + pool) |
-| Timeouts in failure breakdown | 13 | **3–8** (chain ops fuse, leapfrog faster) |
-| ArithmeticError | 8 | 8 (Week 2 fixes these — overflow on wide priors) |
+Linux side will:
 
-If timeouts drop to ≤3, Week 1 met its target.
-If timeouts drop to 0, we can skip step 1b/1c discussion in Week 2 and
-   go straight to overflow fixes.
-If timeouts stay at 13: investigate. Either the auto-fusion isn't
-   firing in the hot path, or there's a different bottleneck. Send
-   the log and I'll triage.
+1. Merge `feat/elementwise-f64-shaders` to `feature/vulkan-backend` in
+   spirit.
+2. Generalize the C++ shim's `nxv_apply_binary` / `nxv_apply_unary`
+   into f32/f64 variants (or add `nxv_apply_binary_f64`/_unary_f64 —
+   simplest approach since binding sizes differ: 8 bytes/element).
+3. Rust NIF: dispatch by element type; `Nx.Vulkan.Native.apply_binary`
+   takes a precision atom or the caller passes the right .spv path.
+4. Backend `do_binary`/unary: when type is `{:f, 64}` and operands
+   match shapes, dispatch the f64 shader instead of host fallback.
+   Mixed-type still host-falls-back; this is the all-f64 fast path.
+5. Add tests with f64 arithmetic that previously round-tripped:
+   small-shift addition, tanh saturation, pow with f64 base/exp.
+6. Ping you to `cd ~/nx_vulkan && git pull && mix test` — expect ≥
+   124/0, with f64 round-trip tests no longer slow.
 
-## Step 6 — Report
+## Estimated impact
 
-Send back:
+| Metric | Before Day 6 | After Day 6 |
+|---|---|---|
+| Per-op cost on f64 tensor | ~50 µs (host round-trip) | ~5–10 µs (GPU) |
+| Mass matrix Welford steady-state | Slow — N round-trips per window | One reduce_axis call per window (still f32 — Day 6 stretch goal is f64 reduce, see below) |
+| ArithmeticError remaining after Day 5 | 8 (per the 622/29 breakdown) | **target 0–3** |
 
-1. `~/exmc_vulkan_w1.log` — full test output.
-2. The summary line: `N tests, M failures, K excluded`.
-3. Wall time from `Finished in X seconds`.
-4. Failure classification:
+If 2-4 ArithmeticError still show after Day 6 + Day 5:
 
-   ```
-   grep -E "^     \*\* " ~/exmc_vulkan_w1.log | sed 's/^     //' \
-     | awk -F'(' '{print $1 "(" $2 ")"}' \
-     | sort | uniq -c | sort -rn | head -10
-   ```
+- Profile which test surfaces them — the remaining cases likely need
+  Day 7 (logsumexp shader) or a model-side fix.
+- Day 6 stretch: copy `reduce_axis.comp` → `reduce_axis_f64.comp` and
+  push the same way. Linux wires it the same as the elementwise pair.
 
-5. Pool stats at end of run (curious how the pool behaves under MCMC):
+## Cross-reference
 
-   ```
-   # In iex, after the mix test process exits and you're somewhere
-   # with nx_vulkan loaded:
-   Nx.Vulkan.init()
-   Nx.Vulkan.pool_stats()
-   ```
-
-   Or just skip this — it's optional.
-
-## Notes
-
-- The auto-fusion compiler (1d) replaces `Nx.Defn.Evaluator` for
-  `:vulkan` paths in `Exmc.JIT`. If anything is mysteriously slower
-  than before, set `EXMC_COMPILER_FALLBACK=evaluator` (not yet wired,
-  but easy: edit `test/test_helper.exs` to use `Nx.Defn.Evaluator`
-  instead of `Nx.Vulkan.Compiler` and re-run as a control).
-- If a test starts failing with `KeyError :data` or similar tracing
-  errors, that's the auto-fusion compiler having trouble with a defn
-  shape it doesn't expect — falls through to Evaluator on most paths,
-  but if a tensor has unusual structure it can crash. Report the
-  test name; the fix is mechanical.
-- After your run, Linux side will compare numbers and decide whether
-  to start Week 2 (overflow fixes) or close any unexpected regressions
-  first.
-
-## Cross-host comparison
-
-| Host | OS | GPU | nx_vulkan | exmc full (prior) | exmc full (w1) | Wall time |
-|------|----|-----|-----------|------|------|------|
-| Linux | Linux 6.8 | RTX 3060 Ti | 124/0 | hung @ 60min | TBD | TBD |
-| mac-248 | FreeBSD 15.0 | GT 750M | TBD | **622/29** | TBD | TBD |
-| mac-247 | FreeBSD 15.0 | GT 650M | TBD | (skip) | (skip) | — |
-
-Linux full-suite was hanging on host-fallback heavy paths previously;
-with Week 1 Day 1d (auto-fusion) it should now also complete. I'll
-re-run on Linux in parallel.
+- `PATH_TO_FULL_PASS.md` step 2c
+- `LIMITATIONS.md` §1 (compute precision) — this TODO closes most of it
+- spirit `core/include/engine/Backend_par_vulkan.hpp` —
+  `g_vk_ctx.has_float64` is already detected at init; no spirit
+  backend changes needed.
