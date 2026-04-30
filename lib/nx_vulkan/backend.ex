@@ -65,14 +65,14 @@ defmodule Nx.Vulkan.Backend do
   end
 
   @impl true
-  def to_binary(
-        %T{data: %__MODULE__{ref: ref}, type: type, shape: shape, vectorized_axes: v_axes},
-        _limit
-      ) do
-    # Vectorized axes (e.g. collapsed_axes from LinAlg) contribute to
-    # the total element count on the GPU but aren't reflected in shape.
-    v_factor = Enum.reduce(v_axes, 1, fn {_name, sz}, acc -> acc * sz end)
-    n_bytes = byte_size_of(shape) * v_factor * element_bytes(type)
+  def to_binary(%T{data: %__MODULE__{ref: ref}}, _limit) do
+    # Use the buffer's actual byte size — the source of truth at upload
+    # time. Computing from shape × element_bytes goes wrong when:
+    #   - vectorized_axes contributes invisible dims
+    #   - the tensor was reshaped (zero-copy ref rewrap)
+    #   - any host-fallback uploaded a binary whose length didn't match
+    #     our shape × type math
+    n_bytes = Nx.Vulkan.Native.byte_size(ref)
 
     case Nx.Vulkan.Native.download_binary(ref, n_bytes) do
       {:ok, bin} -> bin
