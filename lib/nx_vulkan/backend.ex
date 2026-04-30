@@ -1373,12 +1373,15 @@ defmodule Nx.Vulkan.Backend do
   # correct (slow) result for f64 / integer types.
   # Optional `opts` is a keyword list passed as the trailing arg to
   # `Nx.<op>`. Pass `nil` when the op takes no opts.
+  # Transfer a single arg to BinaryBackend if it's a tensor, recurse
+  # for lists (e.g., start_indices for slice/put_slice may be a list
+  # of scalar tensors), pass through other primitives.
+  defp transfer_arg(%T{} = t), do: Nx.backend_transfer(t, Nx.BinaryBackend)
+  defp transfer_arg(list) when is_list(list), do: Enum.map(list, &transfer_arg/1)
+  defp transfer_arg(other), do: other
+
   defp host_via_nx(out, op, args, opts \\ nil) do
-    host_args =
-      Enum.map(args, fn
-        %T{} = t -> Nx.backend_transfer(t, Nx.BinaryBackend)
-        other -> other
-      end)
+    host_args = Enum.map(args, &transfer_arg/1)
 
     res =
       if is_nil(opts) do
