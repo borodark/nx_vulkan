@@ -281,7 +281,7 @@ defmodule Nx.Vulkan.Backend do
   defp do_reduce(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = t, opts, op) do
     if not all_f32?([type, t.type]) do
       nx_op = case op do :sum -> :sum; :reduce_max -> :reduce_max; :reduce_min -> :reduce_min end
-      host_via_nx(out, nx_op, [t], [Keyword.take(opts, [:axes, :keep_axes])])
+      host_via_nx(out, nx_op, [t], Keyword.take(opts, [:axes, :keep_axes]))
     else
       do_reduce_f32(out, t, opts, op, in_shape)
     end
@@ -446,7 +446,7 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def transpose(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = a, axes) do
     if not all_f32?([type, a.type]) do
-      host_via_nx(out, :transpose, [a], [axes: axes])
+      host_via_nx(out, :transpose, [a], axes: axes)
     else
       do_transpose_f32(out, a, axes, in_shape, out_shape, type)
     end
@@ -491,7 +491,7 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def broadcast(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = tensor, shape, axes) do
     if not all_f32?([type, tensor.type]) do
-      host_via_nx(out, :broadcast, [tensor, shape], [axes: axes])
+      host_via_nx(out, :broadcast, [tensor, shape], axes: axes)
     else
       do_broadcast_f32(out, tensor, in_shape, out_shape, type, axes)
     end
@@ -555,7 +555,7 @@ defmodule Nx.Vulkan.Backend do
   def slice(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = tensor,
             start_indices, lengths, strides) do
     if not all_f32?([type, tensor.type]) do
-      host_via_nx(out, :slice, [tensor, start_indices, lengths], [strides: strides])
+      host_via_nx(out, :slice, [tensor, start_indices, lengths], strides: strides)
     else
       do_slice_f32(out, tensor, start_indices, lengths, strides, in_shape, out_shape, type)
     end
@@ -658,7 +658,7 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def gather(%T{shape: out_shape, type: type} = out, %T{shape: in_shape} = input, indices, opts) do
     if not all_f32?([type, input.type]) do
-      host_via_nx(out, :gather, [input, indices], [Keyword.take(opts, [:axes])])
+      host_via_nx(out, :gather, [input, indices], Keyword.take(opts, [:axes]))
     else
       do_gather_f32(out, input, indices, opts, in_shape, out_shape, type)
     end
@@ -728,7 +728,7 @@ defmodule Nx.Vulkan.Backend do
                   indices, updates, opts, mode) do
     if not all_f32?([type, target.type, updates.type]) do
       nx_op = case mode do :put -> :indexed_put; :add -> :indexed_add end
-      host_via_nx(out, nx_op, [target, indices, updates], [Keyword.take(opts, [:axes])])
+      host_via_nx(out, nx_op, [target, indices, updates], Keyword.take(opts, [:axes]))
     else
       do_indexed_f32(out, target, indices, updates, opts, mode, target_shape, out_shape, type)
     end
@@ -802,12 +802,18 @@ defmodule Nx.Vulkan.Backend do
   defp encode_f32_bits(:nan), do: @nan_f32
   defp encode_f32_bits(:infinity), do: @inf_f32
   defp encode_f32_bits(:neg_infinity), do: @neg_inf_f32
+  defp encode_f32_bits(true), do: <<1.0::float-32-native>>
+  defp encode_f32_bits(false), do: <<0.0::float-32-native>>
   defp encode_f32_bits(x) when is_number(x), do: <<x / 1.0::float-32-native>>
+  defp encode_f32_bits(x), do: raise ArgumentError, "encode_f32_bits: unsupported value #{inspect(x)}"
 
   defp encode_f64_bits(:nan), do: @nan_f64
   defp encode_f64_bits(:infinity), do: @inf_f64
   defp encode_f64_bits(:neg_infinity), do: @neg_inf_f64
+  defp encode_f64_bits(true), do: <<1.0::float-64-native>>
+  defp encode_f64_bits(false), do: <<0.0::float-64-native>>
   defp encode_f64_bits(x) when is_number(x), do: <<x / 1.0::float-64-native>>
+  defp encode_f64_bits(x), do: raise ArgumentError, "encode_f64_bits: unsupported value #{inspect(x)}"
 
   # ---------------------------------------------------------------- dense linalg (v0.1.9)
 
@@ -1080,7 +1086,9 @@ defmodule Nx.Vulkan.Backend do
   # `Nx.<op>/n` (or `Nx.<op>/n+1` with extra opts), uploads the result.
   # Used by callbacks that are gated on f32 but should still produce a
   # correct (slow) result for f64 / integer types.
-  defp host_via_nx(out, op, args, extra \\ []) do
+  # Optional `opts` is a keyword list passed as the trailing arg to
+  # `Nx.<op>`. Pass `nil` when the op takes no opts.
+  defp host_via_nx(out, op, args, opts \\ nil) do
     host_args =
       Enum.map(args, fn
         %T{} = t -> Nx.backend_transfer(t, Nx.BinaryBackend)
@@ -1088,9 +1096,10 @@ defmodule Nx.Vulkan.Backend do
       end)
 
     res =
-      case extra do
-        [] -> apply(Nx, op, host_args)
-        [opts] -> apply(Nx, op, host_args ++ [opts])
+      if is_nil(opts) do
+        apply(Nx, op, host_args)
+      else
+        apply(Nx, op, host_args ++ [opts])
       end
 
     upload_host_tensor(out, res)
