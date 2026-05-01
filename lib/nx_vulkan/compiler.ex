@@ -95,14 +95,34 @@ defmodule Nx.Vulkan.Compiler do
 
     case detect_chain(expr, var_ids) do
       {:ok, ops, a_var_id, b_var_id} ->
+        if System.get_env("NXV_FUSE_DEBUG") == "1" do
+          IO.puts("[Nx.Vulkan.Compiler] FUSED: #{inspect(ops)}")
+        end
+
         # Build a closure that bypasses Evaluator entirely.
         compile_fused(ops, a_var_id, b_var_id, vars, expr)
 
       :no_match ->
+        if System.get_env("NXV_FUSE_DEBUG") == "1" do
+          IO.puts("[Nx.Vulkan.Compiler] no_match — vars=#{length(var_ids)} root_op=#{inspect_root(expr)}")
+        end
+
         # Fall through: evaluator handles the rest.
         Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
     end
   end
+
+  defp inspect_root(%T{data: %Expr{op: op, args: args}}) do
+    arg_ops =
+      Enum.map(args, fn
+        %T{data: %Expr{op: o}} -> o
+        other -> "#{inspect(other)}"
+      end)
+
+    "#{op} args=#{inspect(arg_ops)}"
+  end
+
+  defp inspect_root(other), do: inspect(other)
 
   @impl true
   def __shard_jit__(_key, _mesh, _vars, _fun, _args_list, _opts) do
