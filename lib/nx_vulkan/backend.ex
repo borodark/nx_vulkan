@@ -65,18 +65,27 @@ defmodule Nx.Vulkan.Backend do
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref}}, _limit) do
-    # Use the buffer's actual byte size — the source of truth at upload
-    # time. Computing from shape × element_bytes goes wrong when:
-    #   - vectorized_axes contributes invisible dims
-    #   - the tensor was reshaped (zero-copy ref rewrap)
-    #   - any host-fallback uploaded a binary whose length didn't match
-    #     our shape × type math
-    n_bytes = Nx.Vulkan.Native.byte_size(ref)
+  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type, shape: shape,
+                    vectorized_axes: v_axes}, _limit) do
+    # Download the full GPU buffer (use its actual size to satisfy Rust
+    # validation), then truncate to what the tensor's declared metadata
+    # expects. The buffer may be larger after reshape/squeeze (zero-copy
+    # ref rewrap doesn't reallocate).
+    gpu_bytes = Nx.Vulkan.Native.byte_size(ref)
 
-    case Nx.Vulkan.Native.download_binary(ref, n_bytes) do
-      {:ok, bin} -> bin
-      {:error, reason} -> raise "Nx.Vulkan: download failed: #{inspect(reason)}"
+    case Nx.Vulkan.Native.download_binary(ref, gpu_bytes) do
+      {:ok, bin} ->
+        v_factor = Enum.reduce(v_axes, 1, fn {_name, sz}, acc -> acc * sz end)
+        expected = byte_size_of(shape) * v_factor * element_bytes(type)
+
+        if expected == gpu_bytes do
+          bin
+        else
+          binary_part(bin, 0, min(expected, gpu_bytes))
+        end
+
+      {:error, reason} ->
+        raise "Nx.Vulkan: download failed: #{inspect(reason)}"
     end
   end
 
