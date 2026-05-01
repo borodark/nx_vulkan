@@ -94,13 +94,13 @@ defmodule Nx.Vulkan.Compiler do
     var_ids = collect_var_ids(vars)
 
     case detect_chain(expr, var_ids) do
-      {:ok, ops, a_var_id, b_var_id} ->
+      {:ok, outer_ops, b_pre_ops, a_var_id, b_var_id} ->
         if System.get_env("NXV_FUSE_DEBUG") == "1" do
-          IO.puts("[Nx.Vulkan.Compiler] FUSED: #{inspect(ops)}")
+          tag = if b_pre_ops == [], do: "FUSED", else: "FUSED+pre"
+          IO.puts("[Nx.Vulkan.Compiler] #{tag}: pre=#{inspect(b_pre_ops)} outer=#{inspect(outer_ops)}")
         end
 
-        # Build a closure that bypasses Evaluator entirely.
-        compile_fused(ops, a_var_id, b_var_id, vars, expr)
+        compile_fused(outer_ops, b_pre_ops, a_var_id, b_var_id, vars, expr)
 
       :no_match ->
         if System.get_env("NXV_FUSE_DEBUG") == "1" do
@@ -169,8 +169,9 @@ defmodule Nx.Vulkan.Compiler do
     [{0, a_id, _shape_a, _type_a}, {1, b_id, _shape_b, _type_b}] = var_ids
 
     case walk_chain(root, a_id, b_id, []) do
-      {:ok, ops} when length(ops) >= 1 and length(ops) <= 8 ->
-        {:ok, ops, a_id, b_id}
+      {:ok, ops, b_pre_ops}
+      when length(ops) >= 1 and length(ops) <= 8 and length(b_pre_ops) <= 8 ->
+        {:ok, ops, b_pre_ops, a_id, b_id}
 
       _ ->
         :no_match
@@ -185,8 +186,8 @@ defmodule Nx.Vulkan.Compiler do
     [{0, a_id, _shape, _type}] = var_ids
 
     case walk_unary_only(root, a_id, []) do
-      {:ok, ops} when length(ops) >= 1 and length(ops) <= 8 ->
-        {:ok, ops, a_id, a_id}
+      {:ok, ops, []} when length(ops) >= 1 and length(ops) <= 8 ->
+        {:ok, ops, [], a_id, a_id}
 
       _ ->
         :no_match
@@ -198,7 +199,7 @@ defmodule Nx.Vulkan.Compiler do
   # 1-arg variant: only unary ops; bottom out at the single var.
   defp walk_unary_only(%T{data: %Expr{id: id, op: :parameter}}, a_id, acc)
        when id == a_id do
-    {:ok, acc}
+    {:ok, acc, []}
   end
 
   defp walk_unary_only(%T{data: %Expr{op: op, args: [arg]}}, a_id, acc)
@@ -208,20 +209,59 @@ defmodule Nx.Vulkan.Compiler do
 
   defp walk_unary_only(_, _, _), do: :no_match
 
-  # Reached `a` — bottom of chain.
-  defp walk_chain(%T{data: %Expr{id: id, op: :parameter}}, a_id, _b_id, acc)
-       when id == a_id do
+  # Walks a sub-expression that bottoms out at b. Recognized shapes:
+  #   - parameter b → empty pre-chain (just use b directly)
+  #   - unary(sub) → recurse, prepend the unary
+  #   - multiply(b, b) → :square peephole
+  defp walk_b_subchain(%T{data: %Expr{op: :parameter, id: id}}, b_id, acc)
+       when id == b_id do
     {:ok, acc}
   end
 
-  # Unary fusable op — record and recurse into single arg.
+  defp walk_b_subchain(%T{data: %Expr{op: op, args: [arg]}}, b_id, acc)
+       when op in @unary_ops do
+    walk_b_subchain(arg, b_id, [op | acc])
+  end
+
+  # mult(b, b) ⇒ square(b) peephole
+  defp walk_b_subchain(
+         %T{
+           data: %Expr{
+             op: :multiply,
+             args: [%T{data: %Expr{op: :parameter, id: id1}}, %T{data: %Expr{op: :parameter, id: id2}}]
+           }
+         },
+         b_id,
+         acc
+       )
+       when id1 == b_id and id2 == b_id do
+    {:ok, [:square | acc]}
+  end
+
+  defp walk_b_subchain(_, _, _), do: :no_match
+
+  # walk_chain returns {:ok, ops, b_pre_ops} or :no_match.
+  # b_pre_ops is the unary chain to apply to b BEFORE the outer chain.
+  # Most paths return [] (b used directly); right-folded patterns return
+  # the pre-eval ops for b's sub-expression.
+
+  # Reached `a` — bottom of chain. No b pre-eval.
+  defp walk_chain(%T{data: %Expr{id: id, op: :parameter}}, a_id, _b_id, acc)
+       when id == a_id do
+    {:ok, acc, []}
+  end
+
+  # Unary fusable op — record and recurse. Propagates b_pre_ops from below.
   defp walk_chain(%T{data: %Expr{op: op, args: [arg]}}, a_id, b_id, acc)
        when op in @unary_ops do
     walk_chain(arg, a_id, b_id, [op | acc])
   end
 
   # Binary fusable op — second arg must be `b`. If first is `b` and the
-  # op is commutative, swap and continue.
+  # op is commutative, swap and continue. If neither but first is the
+  # `a` parameter and second is a chain on b, switch to right-folded
+  # mode (pre-eval the second-arg sub-chain on b once, then dispatch
+  # the outer chain with that temp as b).
   defp walk_chain(%T{data: %Expr{op: op, args: [first, second]}}, a_id, b_id, acc) do
     cond do
       not Map.has_key?(@binary_ops, op) ->
@@ -231,9 +271,21 @@ defmodule Nx.Vulkan.Compiler do
         walk_chain(first, a_id, b_id, [op | acc])
 
       var_id(first) == b_id and op in @commutative_ops ->
-        # Reversed-order commutative pattern (e.g., Nx.add(b, expr)).
-        # Swap and proceed as if it were Nx.add(expr, b).
         walk_chain(second, a_id, b_id, [op | acc])
+
+      var_id(first) == a_id ->
+        # Right-folded: chain ends here on the a side; pre-eval the
+        # sub-chain on b and combine with op.
+        case walk_b_subchain(second, b_id, []) do
+          {:ok, b_pre_ops} -> {:ok, [op | acc], b_pre_ops}
+          :no_match -> :no_match
+        end
+
+      var_id(second) == a_id and op in @commutative_ops ->
+        case walk_b_subchain(first, b_id, []) do
+          {:ok, b_pre_ops} -> {:ok, [op | acc], b_pre_ops}
+          :no_match -> :no_match
+        end
 
       true ->
         :no_match
@@ -247,22 +299,32 @@ defmodule Nx.Vulkan.Compiler do
 
   # --- Compilation -----------------------------------------------------
 
-  defp compile_fused(ops, _a_var_id, _b_var_id, _vars, expr) do
+  defp compile_fused(outer_ops, b_pre_ops, _a_var_id, _b_var_id, _vars, expr) do
     out_shape = expr.shape
     out_type = expr.type
 
     fn [params] ->
-      # Per Nx.Defn.Compiler protocol, params is a list of zero-arity
-      # thunks (`[(-> Nx.Tensor.t())]`). For 1-arg defns we pass the
-      # same buffer as both a and b to the shader (which reads b
-      # unconditionally but ignores it for unary-only chains).
       case params do
         [a_thunk] ->
+          # 1-arg path — no b_pre_ops possible.
           a_tensor = a_thunk.()
-          [run_fused(a_tensor, a_tensor, ops, out_shape, out_type)]
+          [run_fused(a_tensor, a_tensor, outer_ops, out_shape, out_type)]
 
         [a_thunk, b_thunk | _] ->
-          [run_fused(a_thunk.(), b_thunk.(), ops, out_shape, out_type)]
+          a_tensor = a_thunk.()
+          b_tensor = b_thunk.()
+
+          # If b_pre_ops is non-empty, evaluate that unary chain on b
+          # first to produce a temp buffer used as b in the outer
+          # fused chain. One pre-dispatch + one fused dispatch.
+          b_eff =
+            if b_pre_ops == [] do
+              b_tensor
+            else
+              run_fused(b_tensor, b_tensor, b_pre_ops, b_tensor.shape, b_tensor.type)
+            end
+
+          [run_fused(a_tensor, b_eff, outer_ops, out_shape, out_type)]
       end
     end
   end

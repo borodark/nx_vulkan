@@ -1308,6 +1308,68 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "Compiler #1 — right-folded chain (add(q, mul(p,p))) auto-fuses" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn q, p -> Nx.add(q, Nx.multiply(p, p)) end
+        q = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([2.0, 3.0, 4.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(q, p)
+
+        # 1 + 2*2=5; 2 + 3*3=11; 3 + 4*4=19
+        assert Nx.to_flat_list(out) == [5.0, 11.0, 19.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Compiler #1 — right-folded with unary subchain (add(q, exp(p)))" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn q, p -> Nx.add(q, Nx.exp(p)) end
+        q = Nx.tensor([1.0, 0.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([0.0, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(q, p)
+
+        # 1 + exp(0)=2; 0 + exp(1)=2.7183
+        Enum.zip(Nx.to_flat_list(out), [2.0, :math.exp(1.0)])
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Compiler #1 — right-folded longer outer (exp(add(q, mul(p,p))))" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn q, p -> Nx.exp(Nx.add(q, Nx.multiply(p, p))) end
+        q = Nx.tensor([0.0, 1.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(q, p)
+
+        # exp(0 + 1) = e; exp(1 + 1) = e^2
+        Enum.zip(Nx.to_flat_list(out), [:math.exp(1.0), :math.exp(2.0)])
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "Audit — non-commutative swap (subtract with b first) does NOT fuse" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()

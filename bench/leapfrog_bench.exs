@@ -57,6 +57,12 @@ defmodule LeapfrogBench do
     Nx.add(q, q_step)
   end
 
+  # Right-folded with longer outer chain — exercises pre-eval + fused.
+  # exp(add(q, mul(p, p))) — Evaluator: 3 dispatches, fused: 2.
+  def step1_right_long(q, p) do
+    Nx.exp(Nx.add(q, Nx.multiply(p, p)))
+  end
+
   def time_call(label, fun, args, iters) do
     # Warm up
     for _ <- 1..10, do: apply(fun, args)
@@ -114,6 +120,18 @@ fused_real = LeapfrogBench.time_call("vulkan-fused", real_jit, [q, p], iters)
 eval_real = LeapfrogBench.time_call("evaluator", real_eval, [q, p], iters)
 ratio_real = eval_real / fused_real
 IO.puts(">>> fusion saves #{Float.round(ratio_real, 2)}x")
+IO.puts("")
+
+# Right-folded long chain — pre-eval [:square] then outer [:add, :exp].
+# Naive Evaluator: 3 dispatches. Compiler: 2 dispatches.
+right_long_jit = Nx.Defn.jit(&LeapfrogBench.step1_right_long/2, compiler: Nx.Vulkan.Compiler)
+right_long_eval = Nx.Defn.jit(&LeapfrogBench.step1_right_long/2, compiler: Nx.Defn.Evaluator)
+
+IO.puts("--- Right-folded long: exp(q + p*p) — pre-eval + 2-op fused ---")
+fused_long = LeapfrogBench.time_call("vulkan-fused", right_long_jit, [q, p], iters)
+eval_long = LeapfrogBench.time_call("evaluator", right_long_eval, [q, p], iters)
+ratio_long = eval_long / fused_long
+IO.puts(">>> fusion saves #{Float.round(ratio_long, 2)}x (3→2 dispatches, expect ~1.5x)")
 IO.puts("")
 
 # Also a baseline for raw single-op cost — just to see the floor.
