@@ -1,119 +1,178 @@
-# mac-248 — Re-run exmc Vulkan suite with full Week 1 + Day 5 + Day 6 stack
+# mac-248 — Iter 4: fence reuse + Iter 5 stretch: pre-recorded command buffers
 
-**Goal**: cross-host parity check. Linux is shaking out the bug-fixes
-iteratively (v3 → v10, failures roughly 174 → ~25). FreeBSD GT 750M's
-prior baseline was **622/29 (95.3%)** before any of today's Week 1
-work. We want a clean post-everything number on FreeBSD to compare
-against.
+**Goal**: reduce per-dispatch overhead in spirit's `dispatch()` so
+NUTS sampling under `:vulkan` becomes tractable. The 17 timeout
+failures in v11 are all NUTS sampler tests where ~30 ops × ~1000
+steps × N chains × ~280µs/dispatch = 8+ seconds per chain. Auto-fusion
+has reduced dispatch *count* as much as a 2-input shader allows; the
+remaining lever is per-dispatch *cost*.
 
-## What's in scope since your prior 622/29 run
+PERSISTENT_BUFFERS_PLAN.md scopes the work; the parts that matter for
+nx_vulkan are iter 4 (fence reuse) and a follow-up not in the current
+plan: pre-recorded command buffers.
 
-| Step | Where | Win |
+## Background — where the 280µs/dispatch goes
+
+Measured on Linux RTX 3060 Ti (raw single-op `Nx.Vulkan.add`):
+
+| Phase | Approx cost | Notes |
 |---|---|---|
-| **Day 1a** persistent buffer pool | nx_vulkan | 1.5–1.7× per-op |
-| **Day 1b** pipeline cache | already in `g_pipe_cache` | preexisting |
-| **Day 1c** f32 path for all ops | nx_vulkan | 134/0 |
-| **Day 1d** `Nx.Vulkan.Compiler` auto-fusion | nx_vulkan + exmc test_helper | 1 dispatch per chain |
-| **Day 1e** per-axis reduce shader (single-axis) | nx_vulkan | GPU instead of host |
-| **Day 1f** tiled matmul auto-select | nx_vulkan | 4.2× at d=1024 (your bench) |
-| **Day 5/2a** stable inverse-softplus | exmc/lib/exmc/{compiler,log_prob,model_comparison,point_map}.ex | kills f64 overflow on wide priors |
-| **Day 5/2b** clamped step sizes | exmc/lib/exmc/nuts/step_size.ex | epsilon clamped to [1e-6, 1.0] |
-| **Day 6/2c** f64 elementwise GPU dispatch | spirit + nx_vulkan | f64 ops at GPU speed |
-| Bug fixes | nx_vulkan | 6 plumbing classes (shape/type drift, atom-floats, list recursion, dot axes, host_via_nx opts, bitcast arity) |
+| BEAM → NIF crossing | 10 µs | Erlang resource decode |
+| `vkCreateFence` | ~25 µs | per-submit, driver call |
+| Command buffer allocate + begin | 30–50 µs | recording-only |
+| `vkCmdBindPipeline` + descriptor write | 20 µs | bound for each dispatch today |
+| `vkCmdDispatch` | µs | recording the actual workload is tiny |
+| `vkQueueSubmit` + `vkWaitForFences` | 50–100 µs | the real GPU round-trip |
+| `vkDestroyFence` | ~25 µs | matched to create |
+| NIF → BEAM return | 10 µs | resource encode |
 
-## Step 1 — Sync three repos
+**Total ~280 µs of which ~150 µs is fence + recording overhead** —
+both removable.
+
+## Layout note
+
+Mac-248 uses the flat layout: `~/spirit/`, `~/nx_vulkan/`. Paths below
+assume that.
+
+## Iter 4 — Fence reuse (highest ROI)
+
+**Effort**: half a day. Direct ~50µs per dispatch savings. Reasonable
+chance of a 1.2–1.4× speedup on the NUTS hot path.
+
+### Strategy
+
+One reusable fence per worker thread, stashed in `g_vk_ctx`. Created
+at `vk_init`, destroyed at `vk_destroy`. Reset (`vkResetFences`)
+between submits.
+
+### Steps
 
 ```
 cd ~/spirit
-git checkout feature/vulkan-backend
 git pull
-
-cd ~/nx_vulkan
-git pull       # main is at ee9ac75 (your last to_binary tweak)
-
-cd ~/phd       # or wherever exmc lives
-git pull       # main is at 499e6d685 (Day 5 fixes)
+git checkout -b feat/fence-reuse
 ```
 
-## Step 2 — Verify nx_vulkan tests first
+Edit `core/src/engine/Backend_par_vulkan.cpp`:
 
-```
-cd ~/nx_vulkan
-mix compile --force      # picks up all NIF + Elixir changes since the prior run
-mix test
-```
+1. Add a thread-local fence to `g_vk_ctx`:
 
-Expected: **134 tests, 0 failures**. Tests added during today's work
-include f64 GPU dispatch (3 tests), bitcast (host fallback), commutative
-swap in compiler, 1-arg auto-fusion, plus mac-248-side ones for the
-to_binary truncate behavior.
-
-If anything fails here, send the log — don't proceed to exmc.
-
-## Step 3 — Re-run the full exmc suite
-
-```
-cd ~/phd/exmc
-EXMC_COMPILER=vulkan mix test 2>&1 | tee ~/exmc_vulkan_w1_w5_w6.log
-```
-
-**Expected vs your 622/29 baseline:**
-
-| Metric | Baseline (you) | After Week 1+5+6 |
-|--------|---------|---------------------|
-| Total tests | 622 | 622 |
-| Failures | 29 | **target ≤ 15** |
-| Wall time | (you didn't report — please do this time) | likely faster (auto-fusion, f64 GPU, pool) |
-
-Linux's v10 partial breakdown (test killed at 30-min hard timeout):
-- ~18 timeouts (60s/120s/300s) — these are NUTS sampling tests where
-  the leapfrog is still too slow for the test budget. Same class as
-  your 13 timeouts in 622/29. Day 1d (auto-fusion) and Day 6 f64 GPU
-  should reduce these but won't eliminate them.
-- ~5 incompatible-tensor errors — exmc-side defn closure issue.
-- ~5 misc small failures (bitcast was one, fixed).
-
-If your full-suite passes are >607 (i.e., failures < 15), we're at
-the "Week 3 buffer day" stage. If timeouts dominate similar to v10,
-the next investigation is whether to push on persistent-buffers
-iterations (PERSISTENT_BUFFERS_PLAN.md iter 2–4) or accept higher
-test timeouts.
-
-## Step 4 — Send back
-
-1. The summary: `N tests, M failures, K excluded`.
-2. Wall time from `Finished in X seconds`.
-3. Failure classification:
-
-   ```
-   grep -E "^     \*\* " ~/exmc_vulkan_w1_w5_w6.log | sed 's/^     //' \
-     | awk -F'(' '{print $1 "(" $2 ")"}' \
-     | sort | uniq -c | sort -rn | head -10
+   ```cpp
+   // In Backend_par_vulkan.hpp's Context struct:
+   thread_local static VkFence reusable_fence = VK_NULL_HANDLE;
    ```
 
-4. Whichever specific tests are still failing (the
-   `^  [0-9]+\) test ...` lines).
+   Or simpler: a single `g_vk_ctx.reusable_fence` initialized at
+   `vk_init`, since current spirit/nx_vulkan use one queue with a
+   global SUBMIT_LOCK on the Rust side.
 
-## Optional stretches
+2. In `vk_init`, create the fence:
 
-If you want to keep cycling shader work:
+   ```cpp
+   VkFenceCreateInfo fci{};
+   fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+   vkCreateFence(g_vk_ctx.device, &fci, nullptr, &g_vk_ctx.reusable_fence);
+   ```
 
-- **f64 `reduce_axis_f64.comp`** — same recipe as today's f64
-  elementwise (copy `reduce_axis.comp`, add the f64 extension, change
-  `float` → `float64_t`). Helps mass-matrix Welford updates that
-  currently host-fallback on f64 inputs.
-- **f64 broadcast shader** — copy `elementwise_binary_broadcast.comp`,
-  same f64 transformation.
-- **`logsumexp.comp`** — Day 7/2d. Performance-only; Nx.logsumexp
-  already composes from primitives that work. Lower priority.
+3. In `vk_destroy`, destroy it.
 
-None of those are blocking; the Linux side will keep fixing whatever
-falls out of your re-run.
+4. In `dispatch()` (and the inlined dispatch dance in `nxv_matmul`,
+   `nxv_transpose`, `nxv_apply_binary_broadcast`), replace the
+   per-call fence create/destroy with reset + reuse:
 
-## Cross-host comparison
+   ```cpp
+   // Old: VkFence fence; vkCreateFence(...); ...; vkDestroyFence(...)
+   // New:
+   vkResetFences(g_vk_ctx.device, 1, &g_vk_ctx.reusable_fence);
+   vkQueueSubmit(g_vk_ctx.compute_queue, 1, &si, g_vk_ctx.reusable_fence);
+   vkWaitForFences(g_vk_ctx.device, 1, &g_vk_ctx.reusable_fence, VK_TRUE, UINT64_MAX);
+   ```
 
-| Host | OS | GPU | nx_vulkan | exmc full (prior) | exmc full (post) | Wall time |
-|------|----|-----|-----------|------|------|------|
-| Linux | Linux 6.8 | RTX 3060 Ti | 134/0 | hung @ 60min then fixes | partial v10 | TBD |
-| mac-248 | FreeBSD 15.0 | GT 750M | TBD | **622/29** | TBD | TBD |
-| mac-247 | FreeBSD 15.0 | GT 650M | TBD | (skip) | (skip) | — |
+   Spirit's existing dispatch code handles SUBMIT_LOCK at the Rust
+   level — no thread safety concern inside the C++ shim.
+
+### Acceptance
+
+- `bench_gpu_add` (dispatch-only at N=1K) drops by ≥30 µs.
+- Existing 3-test correctness suite passes unchanged.
+- nx_vulkan's `mix test` still 137/0 after merge + recompile.
+
+### Push
+
+```
+git add core/include/engine/Backend_par_vulkan.hpp \
+        core/src/engine/Backend_par_vulkan.cpp
+git commit -m "Backend_par_vulkan: reuse a single VkFence (Iter 4)"
+git push origin feat/fence-reuse
+```
+
+## Iter 5 (stretch) — Pre-recorded command buffers
+
+**Effort**: 1–2 days. Cumulative 1.5–2× on the dispatch hot path
+combined with iter 4. **Only do this if iter 4 numbers leave significant
+overhead on the table.**
+
+### Strategy
+
+`vkCmdBindPipeline` + `vkCmdBindDescriptorSets` + `vkCmdDispatch` is
+the same recording for every call to a given (pipeline, n) pair. Cache
+the recorded command buffer keyed on `(pipe, push_value_hash)` and
+re-submit instead of re-recording.
+
+The catch: push constants are baked into the command buffer when
+recorded. So we'd cache one command buffer per distinct push value
+(typically `n` for elementwise — modest cardinality). Or pull the push
+out of the recorded buffer and inject via `vkCmdPushConstants` at
+submit time using a small primary command buffer that wraps the pre-
+recorded secondary. The simpler approach is to cache by push value
+and accept the cardinality.
+
+### API addition
+
+```cpp
+// Records {bind pipe, bind desc, push, dispatch} into a fresh
+// command buffer keyed on (pipe, push_data). Returns the buffer.
+VkCommandBuffer record_dispatch(VkPipe* p, VkBuffer* bufs, int n_buffers,
+                                uint32_t group_count_x,
+                                uint32_t push_size, const void* push_data);
+
+// Re-submit a previously recorded command buffer.
+int replay_dispatch(VkCommandBuffer cmd);
+```
+
+The cache key is `(spv_path_pipe_id, push_data_bytes)`. For our typical
+shaders (push = `n` in 4 bytes), cache cardinality is bounded by the
+number of distinct shapes the workload sees. For NUTS at d=4..50 and
+N=1..1000 elements, that's a few dozen entries.
+
+### Acceptance
+
+- Single-op cost at N=1K drops further by ≥50 µs after iter 4.
+- nx_vulkan tests still pass.
+
+### Push
+
+Separate branch; this is the harder change.
+
+## After your push
+
+Linux side will:
+
+1. Merge the iter 4 branch.
+2. Rebuild + run the leapfrog bench (`mix run bench/leapfrog_bench.exs`)
+   to confirm per-op cost drops.
+3. Re-run the full exmc Vulkan suite (v12). Expected: timeouts drop
+   from 17 to ~10 with iter 4 alone, possibly further with iter 5.
+4. If timeouts cleared: declare Week 2 done at the structural level.
+5. If still timing out: pick which path is the next bottleneck (most
+   likely will be the 2-input shader limitation that prevents
+   leapfrog bodies like `q + eps * p` from fusing).
+
+## What this DOES NOT do
+
+- **Doesn't help startup** — pipeline cache is already in place.
+- **Doesn't reduce the BEAM↔NIF cost** — that's a Rustler/Erlang
+  fundamental. ~20 µs/call floor.
+- **Doesn't lift the 2-input shader constraint** — leapfrog bodies
+  with 3+ unique input tensors still fall through to per-op dispatch.
+  Lifting that needs a 4-input fused shader (separate work).
