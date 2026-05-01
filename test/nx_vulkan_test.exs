@@ -1308,6 +1308,54 @@ defmodule Nx.VulkanTest do
       end
     end
 
+    test "4-input fused chain: leapfrog body q + eps*p (one dispatch)" do
+      :ok = Nx.Vulkan.init()
+
+      {:ok, eps} = Nx.Vulkan.upload_f32([2.0, 2.0, 2.0])  # a
+      {:ok, p}   = Nx.Vulkan.upload_f32([3.0, 4.0, 5.0])  # b
+      {:ok, q}   = Nx.Vulkan.upload_f32([1.0, 1.0, 1.0])  # c
+      {:ok, dummy} = Nx.Vulkan.upload_f32([0.0, 0.0, 0.0]) # d (unused)
+
+      # eps * p + q → one dispatch
+      {:ok, c} = Nx.Vulkan.fused_chain_4(eps, p, q, dummy, [{:multiply, 1}, {:add, 2}])
+      {:ok, vals} = Nx.Vulkan.download_f32(c, 3)
+
+      # 2*3+1=7; 2*4+1=9; 2*5+1=11
+      assert vals == [7.0, 9.0, 11.0]
+    end
+
+    test "4-input fused chain: half-step p + 0.5 * eps * grad" do
+      {:ok, p}    = Nx.Vulkan.upload_f32([1.0, 1.0])    # a (chain register start)
+      {:ok, half} = Nx.Vulkan.upload_f32([0.5, 0.5])    # b
+      {:ok, eps}  = Nx.Vulkan.upload_f32([2.0, 2.0])    # c
+      {:ok, grad} = Nx.Vulkan.upload_f32([3.0, 4.0])    # d
+
+      # r = p; r += half*eps*grad...
+      # Cleaner expression: r = p; r = p + (chain producing 0.5*eps*grad)
+      # Actually simpler: chain on a=half: r=half; r*=eps; r*=grad; r += p
+      # 0.5 * 2 * 3 + 1 = 4; 0.5 * 2 * 4 + 1 = 5
+      {:ok, c} =
+        Nx.Vulkan.fused_chain_4(half, eps, grad, p,
+          [{:multiply, 1}, {:multiply, 2}, {:add, 3}])
+
+      {:ok, vals} = Nx.Vulkan.download_f32(c, 2)
+      assert vals == [4.0, 5.0]
+    end
+
+    test "4-input fused chain: with unary op mid-chain" do
+      {:ok, x} = Nx.Vulkan.upload_f32([1.0, 0.0])
+      {:ok, y} = Nx.Vulkan.upload_f32([2.0, 2.0])
+      {:ok, z} = Nx.Vulkan.upload_f32([0.0, 0.0])
+      {:ok, w} = Nx.Vulkan.upload_f32([0.0, 0.0])
+
+      # exp(x) + y; idx ignored on unary
+      {:ok, c} = Nx.Vulkan.fused_chain_4(x, y, z, w, [:exp, {:add, 1}])
+      {:ok, vals} = Nx.Vulkan.download_f32(c, 2)
+
+      Enum.zip(vals, [:math.exp(1.0) + 2, :math.exp(0.0) + 2])
+      |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+    end
+
     test "Compiler #1 — right-folded chain (add(q, mul(p,p))) auto-fuses" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()

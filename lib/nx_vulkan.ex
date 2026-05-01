@@ -516,6 +516,27 @@ defmodule Nx.Vulkan do
     Nx.Vulkan.Native.fused_chain(a_ref, b_ref, codes, shader_path("fused_elementwise.spv"))
   end
 
+  @doc """
+  4-input fused chain. `ops_with_buf` items are either `{op_atom, idx}`
+  for binary (idx ∈ {1, 2, 3} for b/c/d) or plain `op_atom` for unary.
+  All 4 buffers must be the same byte size; up to 8 ops.
+  """
+  def fused_chain_4(a_ref, b_ref, c_ref, d_ref, ops_with_buf)
+      when is_list(ops_with_buf) do
+    {codes, buf_idx} =
+      ops_with_buf
+      |> Enum.map(fn
+        {op, idx} -> {Map.fetch!(@op_codes, op), idx}
+        op when is_atom(op) -> {Map.fetch!(@op_codes, op), 1}
+      end)
+      |> Enum.unzip()
+
+    Nx.Vulkan.Native.fused_chain_4(
+      a_ref, b_ref, c_ref, d_ref, codes, buf_idx,
+      shader_path("fused_elementwise_4in.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

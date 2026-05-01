@@ -156,6 +156,19 @@ unsafe extern "C" {
         ops: *const u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_fused_chain_4(
+        out: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        c: *mut c_void,
+        d: *mut c_void,
+        n: u32,
+        n_ops: u32,
+        ops: *const u32,
+        buf_idx: *const u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -938,6 +951,62 @@ fn matmul_v<'a>(
     }
 
     let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// 4-input fused chain. ops + buf_idx are length-≤8 vecs;
+/// padded to 8 with [255, 1] respectively. All 4 input buffers must
+/// be the same byte size (single output of that size).
+#[rustler::nif]
+fn fused_chain_4<'a>(
+    env: Env<'a>,
+    a: ResourceArc<VulkanTensor>,
+    b: ResourceArc<VulkanTensor>,
+    c: ResourceArc<VulkanTensor>,
+    d: ResourceArc<VulkanTensor>,
+    ops: Vec<u32>,
+    buf_idx: Vec<u32>,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if ops.is_empty() || ops.len() > 8 || ops.len() != buf_idx.len() {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+    if a.n_bytes != b.n_bytes || a.n_bytes != c.n_bytes || a.n_bytes != d.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n = (a.n_bytes / 4) as u32;
+    let n_ops = ops.len() as u32;
+
+    let mut padded_ops: [u32; 8] = [255; 8];
+    let mut padded_buf: [u32; 8] = [1; 8];
+    for (i, (&op, &bi)) in ops.iter().zip(buf_idx.iter()).enumerate() {
+        padded_ops[i] = op;
+        padded_buf[i] = bi;
+    }
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(a.n_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_fused_chain_4(
+            out_handle, a.handle, b.handle, c.handle, d.handle,
+            n, n_ops, padded_ops.as_ptr(), padded_buf.as_ptr(),
+            cstr.as_ptr(),
+        )
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: a.n_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 

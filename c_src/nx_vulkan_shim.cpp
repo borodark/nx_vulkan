@@ -114,13 +114,14 @@ static VkPipe* get_or_create_pipe(const std::string& spv_path, unsigned int op,
     VkShaderModule shader = load_shader(spv_path);
     if (!shader) return nullptr;
 
-    /* push_size: declare 56 (max across all shader families). Vulkan
+    /* push_size: declare 72 (max across all shader families). Vulkan
      * ignores any push range bytes the shader doesn't read. binary/
      * unary/random/transpose all use ≤12; reduce_axis uses 16;
      * fused_elementwise uses 40 (n + n_ops + 8 op slots);
      * elementwise_binary_broadcast uses 56 (n + ndim + out_shape[4] +
-     * a_strides[4] + b_strides[4]). */
-    uint32_t push_size = 56;
+     * a_strides[4] + b_strides[4]); fused_elementwise_4in uses 72
+     * (n + n_ops + ops[8] + buf_idx[8]). */
+    uint32_t push_size = 72;
 
     VkPipe* pipe = new VkPipe();
     int rc = create_pipeline(pipe, shader, n_buffers, push_size, (int32_t) op);
@@ -528,6 +529,44 @@ int nxv_apply_binary_broadcast(void* out, void* a, void* b,
     unsigned int groups = (n + 255) / 256;
 
     return dispatch(pipe, bufs, 3, groups, sizeof(push), &push);
+}
+
+int nxv_fused_chain_4(void* out, void* a, void* b, void* c, void* d,
+                      unsigned int n, unsigned int n_ops,
+                      const unsigned int* ops,
+                      const unsigned int* buf_idx,
+                      const char* spv_path) {
+    if (!out || !a || !b || !c || !d || !ops || !buf_idx || !spv_path) return -1;
+    /* 5 buffers: a, b, c, d, out. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 5);
+    if (!pipe) return -2;
+
+    VkBuf* buf_a   = (VkBuf*) a;
+    VkBuf* buf_b   = (VkBuf*) b;
+    VkBuf* buf_c   = (VkBuf*) c;
+    VkBuf* buf_d   = (VkBuf*) d;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    VkBuffer bufs[5] = {
+        buf_a->buffer, buf_b->buffer, buf_c->buffer, buf_d->buffer, buf_out->buffer
+    };
+
+    /* Push: {n, n_ops, ops[8], buf_idx[8]} = 72 bytes. */
+    struct {
+        unsigned int n;
+        unsigned int n_ops;
+        unsigned int ops[8];
+        unsigned int buf_idx[8];
+    } push;
+    push.n = n;
+    push.n_ops = n_ops;
+    for (int i = 0; i < 8; i++) {
+        push.ops[i] = ops[i];
+        push.buf_idx[i] = buf_idx[i];
+    }
+
+    unsigned int groups = (n + 255) / 256;
+    return dispatch(pipe, bufs, 5, groups, sizeof(push), &push);
 }
 
 int nxv_fused_chain(void* out, void* a, void* b,

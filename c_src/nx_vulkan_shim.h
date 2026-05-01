@@ -157,6 +157,15 @@ int nxv_fused_chain(void* out, void* a, void* b,
                     const unsigned int* ops,
                     const char* spv_path);
 
+/* 4-input fused chain. `ops` and `buf_idx` are length-8 arrays
+ * (pad with 255 for ops, 1 for buf_idx). buf_idx values: 1=b, 2=c,
+ * 3=d. Ignored for unary ops. */
+int nxv_fused_chain_4(void* out, void* a, void* b, void* c, void* d,
+                      unsigned int n, unsigned int n_ops,
+                      const unsigned int* ops,
+                      const unsigned int* buf_idx,
+                      const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif
