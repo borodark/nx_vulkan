@@ -334,11 +334,15 @@ defmodule Nx.Vulkan.Compiler do
       {%Nx.Vulkan.Backend{ref: a_ref}, %Nx.Vulkan.Backend{ref: b_ref}} ->
         {:ok, ref} = Nx.Vulkan.fused_chain(a_ref, b_ref, ops)
 
+        # Build the result tensor matching the Nx.Tensor struct shape.
+        # vectorized_axes must be present (defaults to []) so downstream
+        # ops that pattern-match it (to_binary, etc) don't crash.
         %T{
           data: %Nx.Vulkan.Backend{ref: ref, shape: out_shape, type: out_type},
           shape: out_shape,
           type: out_type,
-          names: List.duplicate(nil, tuple_size(out_shape))
+          names: List.duplicate(nil, tuple_size(out_shape)),
+          vectorized_axes: []
         }
 
       _ ->
