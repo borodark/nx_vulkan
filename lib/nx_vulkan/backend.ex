@@ -1263,7 +1263,10 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def reverse(out, tensor, axes), do: host_via_nx(out, :reverse, [tensor], [axes: axes])
   @impl true
-  def bitcast(out, tensor), do: host_via_nx(out, :bitcast, [tensor])
+  def bitcast(%T{type: type} = out, tensor) do
+    a_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    upload_host_tensor(out, Nx.bitcast(a_host, type))
+  end
 
   # Convolution
   @impl true
