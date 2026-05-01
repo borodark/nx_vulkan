@@ -94,6 +94,13 @@ defmodule Nx.Vulkan.Compiler do
     var_ids = collect_var_ids(vars)
 
     case detect_chain(expr, var_ids) do
+      {:ok, {:fused_4in, ops_with_buf, a_id, leaf_to_buf, _vars_list}, [], _, _} ->
+        if System.get_env("NXV_FUSE_DEBUG") == "1" do
+          IO.puts("[Nx.Vulkan.Compiler] FUSED_4IN: ops=#{inspect(ops_with_buf)}")
+        end
+
+        compile_fused_4in(ops_with_buf, a_id, leaf_to_buf, var_ids, expr)
+
       {:ok, outer_ops, b_pre_ops, a_var_id, b_var_id} ->
         if System.get_env("NXV_FUSE_DEBUG") == "1" do
           tag = if b_pre_ops == [], do: "FUSED", else: "FUSED+pre"
@@ -194,7 +201,110 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
+  # 3-arg or 4-arg defn — try the 4-input shader path. The chain
+  # register starts at one of the parameters; the others appear as
+  # second-operand of binary ops with assigned buf_idx (1, 2, 3 → b, c, d).
+  defp detect_chain(%T{data: %Expr{}} = root, var_ids)
+       when length(var_ids) == 3 or length(var_ids) == 4 do
+    detect_chain_n(root, var_ids)
+  end
+
   defp detect_chain(_, _), do: :no_match
+
+  # Try each parameter as the chain start (`a`); first successful walk wins.
+  defp detect_chain_n(root, var_ids) do
+    Enum.find_value(var_ids, :no_match, fn {_pos, a_id, _shape, _type} ->
+      case find_chain_to(a_id, root, %{}) do
+        {:ok, ops_with_buf, leaf_to_buf}
+        when length(ops_with_buf) >= 1 and length(ops_with_buf) <= 8 ->
+          format_4in_match(ops_with_buf, leaf_to_buf, a_id, var_ids)
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  # Pack the result into the 5-tuple shape detect_chain returns.
+  # ops_with_buf: list of `op_atom` (unary) or `{op_atom, buf_idx}` (binary).
+  # leaf_to_buf: %{leaf_id → buf_idx} mapping for non-`a` parameters.
+  defp format_4in_match(ops_with_buf, leaf_to_buf, a_id, var_ids) do
+    # Sentinel signaling 4-input fused dispatch; compile path branches on it.
+    {:ok, {:fused_4in, ops_with_buf, a_id, leaf_to_buf, var_ids}, [], a_id, a_id}
+  end
+
+  # find_chain_to(target, expr, leaf_to_buf) walks the IR from root toward
+  # the target leaf. Returns:
+  #   {:ok, ops_with_buf_in_exec_order, updated_leaf_to_buf} | :no_match
+  # Sibling subtrees of binary ops along the path must be parameter leaves.
+  defp find_chain_to(target, %T{data: %Expr{op: :parameter, id: id}}, map)
+       when id == target do
+    {:ok, [], map}
+  end
+
+  # Unary op — recurse, append op AFTER the inner chain ops.
+  defp find_chain_to(target, %T{data: %Expr{op: op, args: [arg]}}, map)
+       when op in @unary_ops do
+    case find_chain_to(target, arg, map) do
+      {:ok, ops, m} -> {:ok, ops ++ [op], m}
+      :no_match -> :no_match
+    end
+  end
+
+  # Binary op — descend into first; if not on the path, try second
+  # (only if commutative).
+  defp find_chain_to(target, %T{data: %Expr{op: op, args: [first, second]}}, map) do
+    cond do
+      not Map.has_key?(@binary_ops, op) ->
+        :no_match
+
+      true ->
+        case find_chain_to(target, first, map) do
+          {:ok, ops, m} ->
+            case classify_b_leaf(second, m) do
+              {:ok, idx, m2} -> {:ok, ops ++ [{op, idx}], m2}
+              :no_match -> :no_match
+            end
+
+          :no_match when op in @commutative_ops ->
+            case find_chain_to(target, second, map) do
+              {:ok, ops, m} ->
+                case classify_b_leaf(first, m) do
+                  {:ok, idx, m2} -> {:ok, ops ++ [{op, idx}], m2}
+                  :no_match -> :no_match
+                end
+
+              :no_match ->
+                :no_match
+            end
+
+          :no_match ->
+            :no_match
+        end
+    end
+  end
+
+  defp find_chain_to(_, _, _), do: :no_match
+
+  # The "non-chain side" of a binary op must be a parameter leaf in v1.
+  # Assigns or reuses a buf_idx slot (1/2/3 = b/c/d).
+  defp classify_b_leaf(%T{data: %Expr{op: :parameter, id: id}}, map) do
+    case Map.get(map, id) do
+      nil ->
+        next_idx = map_size(map) + 1
+
+        if next_idx > 3 do
+          :no_match
+        else
+          {:ok, next_idx, Map.put(map, id, next_idx)}
+        end
+
+      existing ->
+        {:ok, existing, map}
+    end
+  end
+
+  defp classify_b_leaf(_, _), do: :no_match
 
   # 1-arg variant: only unary ops; bottom out at the single var.
   defp walk_unary_only(%T{data: %Expr{id: id, op: :parameter}}, a_id, acc)
@@ -298,6 +408,93 @@ defmodule Nx.Vulkan.Compiler do
   defp var_id(_), do: nil
 
   # --- Compilation -----------------------------------------------------
+
+  # 4-input variant. Maps each parameter to a thunk index (positional)
+  # and a buffer slot. Builds a closure that grabs the right tensors
+  # and dispatches Nx.Vulkan.fused_chain_4 with one shader invocation.
+  defp compile_fused_4in(ops_with_buf, a_id, leaf_to_buf, var_ids, expr) do
+    out_shape = expr.shape
+    out_type = expr.type
+
+    # Build a position-sorted list of {pos, id} so we can index thunks.
+    pos_to_id =
+      var_ids
+      |> Enum.map(fn {pos, id, _shape, _type} -> {pos, id} end)
+      |> Enum.into(%{})
+
+    # Reverse map: id → position in thunks list.
+    id_to_pos = Map.new(pos_to_id, fn {pos, id} -> {id, pos} end)
+
+    a_pos = Map.fetch!(id_to_pos, a_id)
+
+    # buf_pos: idx → param_position (idx ∈ {1, 2, 3}).
+    # leaf_to_buf maps id → idx; we want idx → pos.
+    buf_pos =
+      Enum.into(leaf_to_buf, %{}, fn {id, idx} ->
+        {idx, Map.fetch!(id_to_pos, id)}
+      end)
+
+    fn [params] ->
+      thunks = params
+
+      a_tensor = Enum.fetch!(thunks, a_pos).()
+
+      b_tensor = lookup_or(buf_pos, 1, thunks, a_tensor)
+      c_tensor = lookup_or(buf_pos, 2, thunks, a_tensor)
+      d_tensor = lookup_or(buf_pos, 3, thunks, a_tensor)
+
+      [run_fused_4in(a_tensor, b_tensor, c_tensor, d_tensor, ops_with_buf, out_shape, out_type)]
+    end
+  end
+
+  # Returns the thunk's tensor at position buf_pos[idx], or fallback when
+  # that buf_idx isn't in use (the shader won't read it; just satisfy
+  # Vulkan's bind requirement).
+  defp lookup_or(buf_pos, idx, thunks, fallback) do
+    case Map.get(buf_pos, idx) do
+      nil -> fallback
+      pos -> Enum.fetch!(thunks, pos).()
+    end
+  end
+
+  defp run_fused_4in(a, b, c, d, ops_with_buf, out_shape, out_type) do
+    case {a.data, b.data, c.data, d.data} do
+      {%Nx.Vulkan.Backend{ref: ar},
+       %Nx.Vulkan.Backend{ref: br},
+       %Nx.Vulkan.Backend{ref: cr},
+       %Nx.Vulkan.Backend{ref: dr}} ->
+        {:ok, ref} = Nx.Vulkan.fused_chain_4(ar, br, cr, dr, ops_with_buf)
+
+        %T{
+          data: %Nx.Vulkan.Backend{ref: ref, shape: out_shape, type: out_type},
+          shape: out_shape,
+          type: out_type,
+          names: List.duplicate(nil, tuple_size(out_shape)),
+          vectorized_axes: []
+        }
+
+      _ ->
+        # Operands aren't all on Vulkan — fall through to per-op execution.
+        run_4in_fallback(a, b, c, d, ops_with_buf)
+    end
+  end
+
+  defp run_4in_fallback(a, b, c, d, ops_with_buf) do
+    Enum.reduce(ops_with_buf, a, fn
+      op, acc when op in @unary_ops ->
+        apply(Nx, op, [acc])
+
+      {op, idx}, acc ->
+        other =
+          case idx do
+            1 -> b
+            2 -> c
+            3 -> d
+          end
+
+        apply(Nx, op, [acc, other])
+    end)
+  end
 
   defp compile_fused(outer_ops, b_pre_ops, _a_var_id, _b_var_id, _vars, expr) do
     out_shape = expr.shape

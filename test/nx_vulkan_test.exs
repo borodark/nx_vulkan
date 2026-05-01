@@ -1356,6 +1356,74 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
     end
 
+    test "Compiler 4-in — 3-arg leapfrog body fn(q, eps, p) -> q + eps*p" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn q, eps, p -> Nx.add(q, Nx.multiply(eps, p)) end
+        q = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        eps = Nx.tensor([2.0, 2.0, 2.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([3.0, 4.0, 5.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(q, eps, p)
+
+        # 1+2*3=7; 2+2*4=10; 3+2*5=13
+        assert Nx.to_flat_list(out) == [7.0, 10.0, 13.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Compiler 4-in — 4-arg half-step fn(p, half, eps, grad) -> p + half*eps*grad" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn p, half, eps, grad ->
+          Nx.add(p, Nx.multiply(half, Nx.multiply(eps, grad)))
+        end
+
+        p = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+        half = Nx.tensor([0.5, 0.5], backend: Nx.Vulkan.Backend)
+        eps = Nx.tensor([2.0, 2.0], backend: Nx.Vulkan.Backend)
+        grad = Nx.tensor([3.0, 4.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(p, half, eps, grad)
+
+        # 1 + 0.5*2*3 = 4; 1 + 0.5*2*4 = 5
+        assert Nx.to_flat_list(out) == [4.0, 5.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Compiler 4-in — 3-arg with unary in middle" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn x, y, z -> Nx.add(Nx.exp(Nx.multiply(x, y)), z) end
+        x = Nx.tensor([0.0, 1.0], backend: Nx.Vulkan.Backend)
+        y = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+        z = Nx.tensor([5.0, 5.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Vulkan.Compiler).(x, y, z)
+
+        # exp(0)+5 = 6; exp(1)+5 = 7.7183
+        Enum.zip(Nx.to_flat_list(out), [6.0, :math.exp(1.0) + 5])
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "Compiler #1 — right-folded chain (add(q, mul(p,p))) auto-fuses" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()
