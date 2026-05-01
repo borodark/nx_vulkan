@@ -1,178 +1,255 @@
-# mac-248 — Iter 4: fence reuse + Iter 5 stretch: pre-recorded command buffers
+# mac-248 — 4-input fused elementwise shader
 
-**Goal**: reduce per-dispatch overhead in spirit's `dispatch()` so
-NUTS sampling under `:vulkan` becomes tractable. The 17 timeout
-failures in v11 are all NUTS sampler tests where ~30 ops × ~1000
-steps × N chains × ~280µs/dispatch = 8+ seconds per chain. Auto-fusion
-has reduced dispatch *count* as much as a 2-input shader allows; the
-remaining lever is per-dispatch *cost*.
+**Goal**: extend fused chains to 4 input buffers so real NUTS leapfrog
+bodies fuse into one dispatch. Closes the structural reason the 17
+timeout failures persist.
 
-PERSISTENT_BUFFERS_PLAN.md scopes the work; the parts that matter for
-nx_vulkan are iter 4 (fence reuse) and a follow-up not in the current
-plan: pre-recorded command buffers.
+**Why 4**: covers leapfrog-body cardinality (3-4 unique input tensors).
+On the diminishing-returns curve this is the sweet spot — bigger jumps
+to 6/8 are straightforward but should be data-driven.
 
-## Background — where the 280µs/dispatch goes
+## Design
 
-Measured on Linux RTX 3060 Ti (raw single-op `Nx.Vulkan.add`):
+Same chain semantics as `fused_elementwise.comp`: register `r` starts
+from `a[i]`, ops apply left-to-right. The change: binary ops pick
+their second operand from one of three buffers (b, c, d) via a
+per-op `buf_idx`.
 
-| Phase | Approx cost | Notes |
-|---|---|---|
-| BEAM → NIF crossing | 10 µs | Erlang resource decode |
-| `vkCreateFence` | ~25 µs | per-submit, driver call |
-| Command buffer allocate + begin | 30–50 µs | recording-only |
-| `vkCmdBindPipeline` + descriptor write | 20 µs | bound for each dispatch today |
-| `vkCmdDispatch` | µs | recording the actual workload is tiny |
-| `vkQueueSubmit` + `vkWaitForFences` | 50–100 µs | the real GPU round-trip |
-| `vkDestroyFence` | ~25 µs | matched to create |
-| NIF → BEAM return | 10 µs | resource encode |
+The compile-time auto-fusion (Linux side) will arrange args so the
+chain folds correctly. E.g., `q + eps * p` compiles to:
 
-**Total ~280 µs of which ~150 µs is fence + recording overhead** —
-both removable.
+```
+inputs:  a=eps, b=p, c=q
+chain:   [multiply(buf=1), add(buf=2)]
+result:  r = eps; r *= p; r += q  →  q + eps*p ✓
+```
+
+That's 1 dispatch instead of 2-3. For `p + 0.5 * eps * grad`:
+
+```
+inputs:  a=eps, b=grad, c=p, d=0.5_const
+chain:   [multiply(buf=1), multiply(buf=3), add(buf=2)]
+result:  r = eps * grad * 0.5 + p
+```
+
+Single dispatch.
 
 ## Layout note
 
-Mac-248 uses the flat layout: `~/spirit/`, `~/nx_vulkan/`. Paths below
-assume that.
+Mac-248 uses the flat layout: `~/spirit/`, `~/nx_vulkan/`.
 
-## Iter 4 — Fence reuse (highest ROI)
-
-**Effort**: half a day. Direct ~50µs per dispatch savings. Reasonable
-chance of a 1.2–1.4× speedup on the NUTS hot path.
-
-### Strategy
-
-One reusable fence per worker thread, stashed in `g_vk_ctx`. Created
-at `vk_init`, destroyed at `vk_destroy`. Reset (`vkResetFences`)
-between submits.
-
-### Steps
+## Steps
 
 ```
 cd ~/spirit
 git pull
-git checkout -b feat/fence-reuse
+git checkout -b feat/fused-4in-shader
 ```
 
-Edit `core/src/engine/Backend_par_vulkan.cpp`:
+### New file: `shaders/fused_elementwise_4in.comp`
 
-1. Add a thread-local fence to `g_vk_ctx`:
+```glsl
+#version 450
 
-   ```cpp
-   // In Backend_par_vulkan.hpp's Context struct:
-   thread_local static VkFence reusable_fence = VK_NULL_HANDLE;
-   ```
+// Fused n-way elementwise chain — up to 8 ops, 4 input buffers.
+//
+// Same chain model as fused_elementwise.comp: register r starts from
+// a[i], ops apply left-to-right. Difference: each binary op picks its
+// second operand from b/c/d via per-op `buf_idx`.
+//
+// Op codes (unchanged):
+//   Binary 0..6:    add/multiply/subtract/divide/pow/max/min
+//   Unary  100..114: exp/log/sqrt/abs/negate/sigmoid/tanh/relu/
+//                    ceil/floor/sign/reciprocal/square/erf/expm1
+//   255: nop (chain terminator)
+//
+// buf_idx values for binary ops: 1=b, 2=c, 3=d. Ignored for unary.
 
-   Or simpler: a single `g_vk_ctx.reusable_fence` initialized at
-   `vk_init`, since current spirit/nx_vulkan use one queue with a
-   global SUBMIT_LOCK on the Rust side.
+layout (local_size_x = 256) in;
 
-2. In `vk_init`, create the fence:
+layout (push_constant) uniform Push {
+    uint n;
+    uint n_ops;
+    uint ops[8];
+    uint buf_idx[8];
+} pc;
 
-   ```cpp
-   VkFenceCreateInfo fci{};
-   fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-   vkCreateFence(g_vk_ctx.device, &fci, nullptr, &g_vk_ctx.reusable_fence);
-   ```
+layout (std430, binding = 0) readonly  buffer InputA { float a[]; };
+layout (std430, binding = 1) readonly  buffer InputB { float b[]; };
+layout (std430, binding = 2) readonly  buffer InputC { float c[]; };
+layout (std430, binding = 3) readonly  buffer InputD { float d[]; };
+layout (std430, binding = 4) writeonly buffer Output { float out_buf[]; };
 
-3. In `vk_destroy`, destroy it.
+// erf and expm1 helpers — copy verbatim from elementwise_unary.comp.
+// (If you keep them in a separate file you can #include with
+// glslangValidator's -I flag; otherwise just paste.)
+float erf_approx(float x) {
+    // Abramowitz & Stegun 7.1.26 — error ≤ 1.5e-7
+    float a1 =  0.254829592;
+    float a2 = -0.284496736;
+    float a3 =  1.421413741;
+    float a4 = -1.453152027;
+    float a5 =  1.061405429;
+    float p  =  0.3275911;
+    float s  = sign(x);
+    float ax = abs(x);
+    float t  = 1.0 / (1.0 + p * ax);
+    float y  = 1.0 - (((((a5*t + a4)*t + a3)*t + a2)*t + a1)*t) * exp(-ax * ax);
+    return s * y;
+}
 
-4. In `dispatch()` (and the inlined dispatch dance in `nxv_matmul`,
-   `nxv_transpose`, `nxv_apply_binary_broadcast`), replace the
-   per-call fence create/destroy with reset + reuse:
+float expm1_approx(float x) {
+    if (abs(x) < 0.5) {
+        float x2 = x * x;
+        return x + x2 * 0.5 + x2 * x * (1.0 / 6.0)
+             + x2 * x2 * (1.0 / 24.0) + x2 * x2 * x * (1.0 / 120.0);
+    } else {
+        return exp(x) - 1.0;
+    }
+}
 
-   ```cpp
-   // Old: VkFence fence; vkCreateFence(...); ...; vkDestroyFence(...)
-   // New:
-   vkResetFences(g_vk_ctx.device, 1, &g_vk_ctx.reusable_fence);
-   vkQueueSubmit(g_vk_ctx.compute_queue, 1, &si, g_vk_ctx.reusable_fence);
-   vkWaitForFences(g_vk_ctx.device, 1, &g_vk_ctx.reusable_fence, VK_TRUE, UINT64_MAX);
-   ```
+float read_y(uint i, uint idx) {
+    if (idx == 2u) return c[i];
+    if (idx == 3u) return d[i];
+    return b[i];
+}
 
-   Spirit's existing dispatch code handles SUBMIT_LOCK at the Rust
-   level — no thread safety concern inside the C++ shim.
+float apply_unary(float r, uint op) {
+    switch (int(op - 100u)) {
+        case 0:  return exp(r);
+        case 1:  return log(r);
+        case 2:  return sqrt(r);
+        case 3:  return abs(r);
+        case 4:  return -r;
+        case 5:  return 1.0 / (1.0 + exp(-r));
+        case 6:  return tanh(r);
+        case 7:  return max(r, 0.0);
+        case 8:  return ceil(r);
+        case 9:  return floor(r);
+        case 10: return sign(r);
+        case 11: return 1.0 / r;
+        case 12: return r * r;
+        case 13: return erf_approx(r);
+        case 14: return expm1_approx(r);
+        default: return r;
+    }
+}
 
-### Acceptance
+float apply_binary(float r, float y, uint op) {
+    switch (int(op)) {
+        case 0: return r + y;
+        case 1: return r * y;
+        case 2: return r - y;
+        case 3: return r / y;
+        case 4: return pow(r, y);
+        case 5: return max(r, y);
+        case 6: return min(r, y);
+        default: return r;
+    }
+}
 
-- `bench_gpu_add` (dispatch-only at N=1K) drops by ≥30 µs.
-- Existing 3-test correctness suite passes unchanged.
-- nx_vulkan's `mix test` still 137/0 after merge + recompile.
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
 
-### Push
+    float r = a[i];
+
+    for (uint s = 0u; s < pc.n_ops; s++) {
+        uint op = pc.ops[s];
+        if (op == 255u) break;
+
+        if (op >= 100u) {
+            r = apply_unary(r, op);
+        } else {
+            float y = read_y(i, pc.buf_idx[s]);
+            r = apply_binary(r, y, op);
+        }
+    }
+
+    out_buf[i] = r;
+}
+```
+
+### Compile + push
 
 ```
-git add core/include/engine/Backend_par_vulkan.hpp \
-        core/src/engine/Backend_par_vulkan.cpp
-git commit -m "Backend_par_vulkan: reuse a single VkFence (Iter 4)"
-git push origin feat/fence-reuse
+glslangValidator -V shaders/fused_elementwise_4in.comp \
+                 -o shaders/fused_elementwise_4in.spv
+git add shaders/fused_elementwise_4in.comp shaders/fused_elementwise_4in.spv
+git commit -m "shaders: fused_elementwise_4in (4 input buffers, 8 ops)"
+git push origin feat/fused-4in-shader
 ```
 
-## Iter 5 (stretch) — Pre-recorded command buffers
+### Sanity check (optional)
 
-**Effort**: 1–2 days. Cumulative 1.5–2× on the dispatch hot path
-combined with iter 4. **Only do this if iter 4 numbers leave significant
-overhead on the table.**
+If you want to verify before pushing — dispatch a chain that
+exercises buf_idx switching:
 
-### Strategy
+```
+inputs:  a = [1.0, 1.0]   (q)
+         b = [2.0, 2.0]   (eps)
+         c = [3.0, 3.0]   (p)
+         d = [0.5, 0.5]   (half_const)
+chain:   [multiply(buf=2), multiply(buf=3), add(buf=0...)]
+                    ↑ p          ↑ 0.5
+expected: eps * p * 0.5 + (start register a) — but our shader starts r=a (=q=1)
+          so result = q * p * 0.5 + ... no wait, the chain starts at a,
+          so r = q; r = r * p (idx=2); r = r * 0.5 (idx=3); ... r += eps?
+          That gives q * p * 0.5 + eps = 1*3*0.5 + 2 = 3.5
 
-`vkCmdBindPipeline` + `vkCmdBindDescriptorSets` + `vkCmdDispatch` is
-the same recording for every call to a given (pipeline, n) pair. Cache
-the recorded command buffer keyed on `(pipe, push_value_hash)` and
-re-submit instead of re-recording.
-
-The catch: push constants are baked into the command buffer when
-recorded. So we'd cache one command buffer per distinct push value
-(typically `n` for elementwise — modest cardinality). Or pull the push
-out of the recorded buffer and inject via `vkCmdPushConstants` at
-submit time using a small primary command buffer that wraps the pre-
-recorded secondary. The simpler approach is to cache by push value
-and accept the cardinality.
-
-### API addition
-
-```cpp
-// Records {bind pipe, bind desc, push, dispatch} into a fresh
-// command buffer keyed on (pipe, push_data). Returns the buffer.
-VkCommandBuffer record_dispatch(VkPipe* p, VkBuffer* bufs, int n_buffers,
-                                uint32_t group_count_x,
-                                uint32_t push_size, const void* push_data);
-
-// Re-submit a previously recorded command buffer.
-int replay_dispatch(VkCommandBuffer cmd);
+Or for the canonical leapfrog body q + eps*p:
+inputs:  a = eps,  b = p,  c = q
+chain:   [multiply(buf=1), add(buf=2)]
+         r = eps; r *= p; r += q  →  3*2 + 1 = 7 (with values eps=3, p=2, q=1)
 ```
 
-The cache key is `(spv_path_pipe_id, push_data_bytes)`. For our typical
-shaders (push = `n` in 4 bytes), cache cardinality is bounded by the
-number of distinct shapes the workload sees. For NUTS at d=4..50 and
-N=1..1000 elements, that's a few dozen entries.
+Skip the sanity check if no quick dispatcher — Linux side will validate
+via `mix test` once the .spv lands.
 
-### Acceptance
+## Push size note
 
-- Single-op cost at N=1K drops further by ≥50 µs after iter 4.
-- nx_vulkan tests still pass.
-
-### Push
-
-Separate branch; this is the harder change.
+Push struct: `{uint n; uint n_ops; uint ops[8]; uint buf_idx[8]}` =
+4 + 4 + 32 + 32 = **72 bytes**. Linux side will need to bump the
+pipeline cache push_size from 56 → 72 in `nx_vulkan_shim.cpp`. Vulkan
+ignores any unused push range bytes for shaders that declare less.
 
 ## After your push
 
 Linux side will:
 
-1. Merge the iter 4 branch.
-2. Rebuild + run the leapfrog bench (`mix run bench/leapfrog_bench.exs`)
-   to confirm per-op cost drops.
-3. Re-run the full exmc Vulkan suite (v12). Expected: timeouts drop
-   from 17 to ~10 with iter 4 alone, possibly further with iter 5.
-4. If timeouts cleared: declare Week 2 done at the structural level.
-5. If still timing out: pick which path is the next bottleneck (most
-   likely will be the 2-input shader limitation that prevents
-   leapfrog bodies like `q + eps * p` from fusing).
+1. Merge `feat/fused-4in-shader` to `feature/vulkan-backend` in spirit.
+2. Bump push_size 56 → 72 in `c_src/nx_vulkan_shim.cpp` for the
+   pipeline cache.
+3. Add `nxv_fused_chain_4` C shim (5 buffers: a, b, c, d, out; 72-byte
+   push).
+4. Add Rust NIF `fused_chain_4(a, b, c, d, ops, buf_idx, spv_path)`.
+5. Add `Nx.Vulkan.fused_chain_4/4` API helper.
+6. Extend `Nx.Vulkan.Compiler` to detect 3-4 arg defns and emit the
+   4-input chain when the IR matches:
+   - 3-arg `fn a, b, c -> ... end`: c stays unused (passes c as d, or skip)
+   - 4-arg `fn a, b, c, d -> ... end`: full coverage
+   - Right-fold + commutative-arrange to produce a valid (op, buf_idx)
+     sequence
+7. Add tests: leapfrog-body shape `(q, p, eps) -> q + eps * p`,
+   half-step `(q, p, eps, grad) -> q + 0.5 * eps * grad`.
+8. Re-run exmc Vulkan suite (v12). Expected: timeouts drop from
+   ~17 to ≤ 5 once leapfrog bodies fuse.
 
 ## What this DOES NOT do
 
-- **Doesn't help startup** — pipeline cache is already in place.
-- **Doesn't reduce the BEAM↔NIF cost** — that's a Rustler/Erlang
-  fundamental. ~20 µs/call floor.
-- **Doesn't lift the 2-input shader constraint** — leapfrog bodies
-  with 3+ unique input tensors still fall through to per-op dispatch.
-  Lifting that needs a 4-input fused shader (separate work).
+- **Doesn't help defns with > 4 unique inputs** — log-prob composites
+  with 5+ inputs still split. If after this lands the timeout count
+  is still meaningful, we'll go to 6 or 8.
+- **Doesn't reduce per-dispatch overhead** — that's Iter 4 fence
+  reuse work. The two changes compose: 4-input shader cuts dispatch
+  count, fence reuse cuts per-dispatch cost.
+- **Doesn't lift the chain-start-at-a constraint**. Patterns where
+  the chain has to start mid-graph (e.g., `(a + b) * (c + d)`) still
+  split.
+
+## Cross-reference
+
+- `PERSISTENT_BUFFERS_PLAN.md` — Iter 4 fence reuse (parallel work)
+- `LIMITATIONS.md` §3 (fused chain) — the 2-input limit this lifts
+- `bench/leapfrog_bench.exs` — re-run after wiring; expect 4-arg case
+  to drop from "falls through" to "fused" with measurable speedup
