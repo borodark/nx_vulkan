@@ -224,8 +224,12 @@ defmodule Nx.Vulkan.Backend do
       all_f32 and tuple_size(shape) <= 4 ->
         try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
 
-      # Anything else: host fallback (mixed precision, broadcast on f64,
-      # rank > 4, comparison ops on f64, etc.).
+      # All-f64 shape mismatch + ≤4D: f64 broadcast shader path
+      # (only for arithmetic ops 0..6; comparisons are f32-only on the f64 broadcast shader).
+      all_f64 and tuple_size(shape) <= 4 and op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
+        try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
+
+      # Anything else: host fallback.
       true ->
         host_fallback_binary(out, a, b, op)
     end
@@ -242,15 +246,15 @@ defmodule Nx.Vulkan.Backend do
       b_data = to_vulkan!(b)
 
       {:ok, ref} =
-        Nx.Vulkan.apply_binary_broadcast(
-          a_data.ref,
-          b_data.ref,
-          op,
-          ndim,
-          out_dims,
-          a_strides,
-          b_strides
-        )
+        if type == {:f, 64} do
+          Nx.Vulkan.apply_binary_broadcast_f64(
+            a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+          )
+        else
+          Nx.Vulkan.apply_binary_broadcast(
+            a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+          )
+        end
 
       put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
     rescue
@@ -359,7 +363,13 @@ defmodule Nx.Vulkan.Backend do
             :reduce_min -> 2
           end
 
-        {:ok, ref} = Nx.Vulkan.reduce_axis(t_data.ref, outer, reduce_size, inner, op_const)
+        {:ok, ref} =
+          if type == {:f, 64} do
+            Nx.Vulkan.reduce_axis_f64(t_data.ref, outer, reduce_size, inner, op_const)
+          else
+            Nx.Vulkan.reduce_axis(t_data.ref, outer, reduce_size, inner, op_const)
+          end
+
         put_in(out.data, %__MODULE__{ref: ref, shape: out_shape, type: type})
 
       true ->

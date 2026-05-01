@@ -74,6 +74,18 @@ defmodule Nx.Vulkan.Native do
   def apply_unary_f64(_a, _op, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  def reduce_axis_f64(_a, _outer, _reduce, _inner, _op, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def apply_binary_broadcast_f64(_a, _b, _op, _ndim, _out_shape, _a_strides, _b_strides, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def logsumexp(_a, _outer, _reduce, _inner, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   def pool_clear(), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false

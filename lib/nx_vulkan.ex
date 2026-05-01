@@ -223,6 +223,32 @@ defmodule Nx.Vulkan do
                                       shader_path("elementwise_unary_f64.spv"))
   end
 
+  @doc "f64 per-axis reduction; dispatches reduce_axis_f64.spv."
+  def reduce_axis_f64(a, outer, reduce_size, inner, op) do
+    Nx.Vulkan.Native.reduce_axis_f64(a, outer, reduce_size, inner, op,
+                                      shader_path("reduce_axis_f64.spv"))
+  end
+
+  @doc "f64 broadcast elementwise binary; dispatches elementwise_binary_broadcast_f64.spv."
+  def apply_binary_broadcast_f64(a, b, op, ndim, out_shape, a_strides, b_strides) do
+    op_const = Map.fetch!(@ops_binary, op)
+    Nx.Vulkan.Native.apply_binary_broadcast_f64(
+      a, b, op_const, ndim,
+      pad4(out_shape), pad4(a_strides), pad4(b_strides),
+      shader_path("elementwise_binary_broadcast_f64.spv")
+    )
+  end
+
+  @doc """
+  Numerically-stable logsumexp over a single virtual reduce axis.
+  `log(sum(exp(x - max(x))))`-shape inside one shader dispatch via the
+  two-pass shader. f32 only.
+  """
+  def logsumexp(a, outer, reduce_size, inner) do
+    Nx.Vulkan.Native.logsumexp(a, outer, reduce_size, inner,
+                                shader_path("logsumexp.spv"))
+  end
+
   # ------------------------------------------------------------------
   # v0.0.5 — reductions (return host-side scalar)
   # ------------------------------------------------------------------
