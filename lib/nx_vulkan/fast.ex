@@ -112,4 +112,53 @@ defmodule Nx.Vulkan.Fast do
   defp inv_mass_apply_fallback(p, inv_mass, _opts) do
     Nx.multiply(p, inv_mass)
   end
+
+  @doc """
+  Kinetic energy: `0.5 * sum(p² * inv_mass)`. Reduces to a scalar.
+  Used in NUTS for the joint log-probability:
+  `joint_logp = log_prob - kinetic_energy(p, inv_mass)`.
+
+  Under Nx.Vulkan dispatches `kinetic_energy.spv` (one shader: square +
+  multiply + per-workgroup reduce + 0.5 multiplier baked in). The
+  shader produces partial sums; the backend callback sums them on the
+  host and returns a scalar.
+  """
+  @spec kinetic_energy(Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  def kinetic_energy(p, inv_mass) do
+    Expr.optional(:fast_kinetic_energy, [p, inv_mass, []],
+                  &kinetic_energy_fallback/3)
+  end
+
+  defp kinetic_energy_fallback(p, inv_mass, _opts) do
+    p
+    |> Nx.pow(2)
+    |> Nx.multiply(inv_mass)
+    |> Nx.sum()
+    |> Nx.multiply(0.5)
+  end
+
+  @doc """
+  Normal log-density: `-0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π)`.
+  Output shape matches `x`. The MCMC distribution-density hot path.
+
+  Under Nx.Vulkan dispatches `normal_logpdf.spv` (one fused shader)
+  instead of the five separate Nx ops the fallback emits.
+  """
+  @spec normal_logpdf(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  def normal_logpdf(x, mu, sigma) do
+    Expr.optional(:fast_normal_logpdf, [x, mu, sigma, []],
+                  &normal_logpdf_fallback/4)
+  end
+
+  @log_sqrt_2pi 0.91893853320467274178
+
+  defp normal_logpdf_fallback(x, mu, sigma, _opts) do
+    z = Nx.divide(Nx.subtract(x, mu), sigma)
+    z2 = Nx.multiply(z, z)
+    log_sigma = Nx.log(sigma)
+    Nx.subtract(
+      Nx.subtract(Nx.multiply(z2, -0.5), log_sigma),
+      @log_sqrt_2pi
+    )
+  end
 end

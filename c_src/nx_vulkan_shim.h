@@ -166,6 +166,18 @@ int nxv_fused_chain_4(void* out, void* a, void* b, void* c, void* d,
                       const unsigned int* buf_idx,
                       const char* spv_path);
 
+/* kinetic_energy.spv — fused 0.5 * sum(p² * inv_mass). Output is
+ * partial sums, one f32 per workgroup. Caller does final reduction. */
+int nxv_kinetic_energy(void* out, void* p, void* inv_mass,
+                        unsigned int n,
+                        const char* spv_path);
+
+/* normal_logpdf.spv — fused -0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π).
+ * Output shape matches x, mu, sigma. */
+int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
+                       unsigned int n,
+                       const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

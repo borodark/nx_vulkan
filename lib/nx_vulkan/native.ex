@@ -64,6 +64,12 @@ defmodule Nx.Vulkan.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  def kinetic_energy(_p, _inv_mass, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def normal_logpdf(_x, _mu, _sigma, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   def apply_binary_broadcast(_a, _b, _op, _ndim, _out_shape, _a_strides, _b_strides, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
