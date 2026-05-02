@@ -3,7 +3,7 @@
 **Status:** plan, April 2026.
 **Predecessor:** Nx.Vulkan v0.0.7 + adversarial round 2 done
 (see [PLAN.md](PLAN.md) and the
-[*What the Mutex Saved*](https://www.dataalienist.com/blog-what-the-mutex-saved.html)
+[*What the Mutex Saved*](http://www.dataalienist.com/blog-what-the-mutex-saved.html)
 blog post). 7 shaders, 42 tests, no DEVICE_LOST under
 load. The wrapper survives.
 **Goal:** run `exmc` (Igor's Bayesian/MCMC trading framework, currently
