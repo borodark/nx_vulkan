@@ -5,12 +5,16 @@ auto-detect priority (Flavor A merged on `pymc/main` at
 `fa4739c97`), close two remaining gaps that the README now
 explicitly advertises:
 
-1. macOS users running through MoltenVK — claimed in the
-   backends table but never actually validated end-to-end.
-2. f64 full-axis reduce — the only Vulkan op missing on the
-   gradient hot path; currently falls back to BinaryBackend
-   for f64 determinant and Welford accumulators on hosts
-   that need double precision.
+1. **FreeBSD bring-up.** mac-248 is the 2013 Mac Pro running
+   FreeBSD 15 with a GT 750M — the same machine class that proved
+   the Spirit Vulkan path on FreeBSD. nx_vulkan has never actually
+   been built and run on FreeBSD; the test suite is green on Linux
+   only. This is the milestone that turns the walkable-path post's
+   strategic claim into a measurement.
+2. **f64 full-axis reduce.** The only Vulkan op missing on the
+   gradient hot path; currently falls back to BinaryBackend for
+   f64 determinant and Welford accumulators on hosts that need
+   double precision.
 
 Branch: `feat/flavor-a-gaps` off current `main` on each repo
 (`spirit` for the shader, `nx_vulkan` for the wiring).
@@ -20,8 +24,9 @@ NIF, backend dispatch, and tests.
 
 ## Layout note
 
-Mac-248 uses the flat layout: `~/spirit/`, `~/nx_vulkan/`. Both
-checked out at current main. Pull before branching:
+Mac-248 (FreeBSD 15, GT 750M) uses the flat layout: `~/spirit/`,
+`~/nx_vulkan/`. Both checked out at current main. Pull before
+branching:
 
 ```
 cd ~/spirit && git pull origin main && git checkout -b feat/flavor-a-gaps
@@ -31,28 +36,36 @@ cd ~/nx_vulkan && git pull origin main && git checkout -b feat/flavor-a-gaps
 ## Two prototypes (independent — pick whichever interests you,
 ## or do them in sequence)
 
-### A. MoltenVK smoke validation on mac-248
+### A. FreeBSD bring-up smoke test on mac-248
 
-Empirical proof that the Flavor A claim — *"Nx.Vulkan, the FreeBSD
-GPU path, also runs on macOS via MoltenVK"* — is true. Mac-248
-has the GT 750M, which Vulkan-via-MoltenVK should drive at the
-same f32 throughput we measured on Linux.
+Empirical proof that the *walkable-path* claim — *"the same
+Elixir code that runs CPU-only on a host without a GPU runs
+GPU-accelerated on a host with one, on FreeBSD via Vulkan"* —
+is actually true. Today the test suite is green on Linux RTX
+3060 Ti only. Mac-248's GT 750M on FreeBSD 15 is the right
+hardware to close that gap.
 
 Steps:
 
 ```
-# 1. Install MoltenVK if not already present
-brew install vulkan-headers vulkan-loader vulkan-tools molten-vk
+# 1. Install Vulkan loader, headers, validation tools
+sudo pkg install vulkan-loader vulkan-headers vulkan-tools \
+                 vulkan-validation-layers glslang shaderc
 
-# 2. Verify the loader sees MoltenVK
-vulkaninfo --summary | head -20
+# 2. Confirm the GT 750M is visible
+vulkaninfo --summary | head -30
+# Should list NVIDIA GeForce GT 750M as a physical device.
 
-# 3. Build nx_vulkan against MoltenVK
+# 3. Build the C++ shim + Rust NIF + Elixir
 cd ~/nx_vulkan
 mix deps.get
 mix compile
+# If the C++ shim doesn't find vulkan headers, set:
+#   CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib mix compile
+# If Rustler can't link libvulkan.so.1, set
+#   RUSTFLAGS="-L /usr/local/lib"
 
-# 4. Run the test suite
+# 4. Run the nx_vulkan test suite
 mix test
 
 # 5. Run the small leapfrog bench (proves end-to-end)
@@ -61,19 +74,31 @@ cd bench && mix run leapfrog_bench.exs
 
 Report back:
 
+- `pkg info | grep -i vulkan` — version of the loader actually installed
 - Output of `Nx.Vulkan.Native.device_name()` — should name the GT 750M
-- Output of `Nx.Vulkan.Native.has_f64()` — likely `false` on Metal/MoltenVK
+- Output of `Nx.Vulkan.Native.has_f64()` — true or false (Kepler-class
+  GPU; should be true, but the FreeBSD nvidia driver path may differ)
 - Any panics, `DEVICE_LOST`, or load-time errors
-- `mix test` summary line (NN tests, NN failures)
-- `leapfrog_bench` µs/body number
+- `mix test` summary line (NN tests, NN failures, NN excluded)
+- `leapfrog_bench` µs/body number — comparable to RTX 3060 Ti's
+  ~388 µs (slower expected; we just want a working number)
 
-If everything is green, that's the proof. If MoltenVK can't load
-the SPIR-V we shipped (some shaders may use features Metal lacks),
-note which shader file and the validation error — Linux side will
-pick a different lowering or guard the unsupported path.
+If everything is green, that's the proof — and the next
+*walkable-path* TODO item flips from "promise" to "measurement."
+If a specific shader fails validation under FreeBSD's nvidia
+driver, note which `.spv` file and the validation error; Linux
+side will pick a different lowering or guard the unsupported
+feature.
 
-What this DOES NOT need from you: any code changes. Just a build
-+ run + report. ~20 minutes if MoltenVK installs cleanly.
+If Rustler can't build (libvulkan version mismatch, missing
+headers, etc.), capture the exact build error — Linux side will
+adjust the build script to be FreeBSD-compatible.
+
+What this DOES NOT need from you: any code changes upfront. Just
+a build + run + report. The FreeBSD-specific Makefile / build
+fixes (if any) come back through Linux side based on whatever the
+build error says. Budget 30-60 minutes including the package
+install and any build-script tweaking.
 
 ### B. `reduce_full_f64.spv` — f64 full-axis reduction shader
 
@@ -151,10 +176,12 @@ git commit -m "shaders: reduce_full_f64 — f64 full-axis sum/max/min"
 git push origin feat/flavor-a-gaps
 ```
 
-Devices without f64 support (MoltenVK on Metal, some integrated
-Intel) will simply not load this shader; backend.ex already
-guards on `has_f64()` before dispatching f64 paths, so absence is
-not a regression — just no gain on those devices.
+Devices without f64 support (some integrated Intel parts, certain
+mobile Vulkan implementations) will simply not load this shader;
+backend.ex already guards on `has_f64()` before dispatching f64
+paths, so absence is not a regression — just no gain on those
+devices. The GT 750M is Kepler-class and reports f64 = true on
+Linux; FreeBSD should be the same.
 
 What this DOES NOT need from you: any C++ shim, Rust NIF, or
 backend wiring. The Linux side has the existing `reduce.spv` path
@@ -168,9 +195,12 @@ Linux side will:
 2. **(B only)** Add `nxv_reduce_full_f64` C++ shim, `reduce_full_f64`
    Rust NIF, and an f64 branch in `gpu_full_reduce/2`. Tests +
    benchmark.
-3. **(A only)** Update the README backends table to cite the
-   measured MoltenVK numbers (if you got any) or document the
-   specific failure mode.
+3. **(A only)** Update the *walkable-path* blog and the nx_vulkan
+   README to flip the FreeBSD bring-up TODO from "promise" to
+   measurement, citing the device name + bench number you reported.
+   If the build needed FreeBSD-specific Makefile changes, those
+   land too — and become permanent FreeBSD support, not a one-shot
+   patch.
 
 ## Cross-reference
 
