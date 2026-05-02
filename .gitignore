@@ -35,4 +35,6 @@ priv/native/
 
 Cargo.lock
 /mix.lock
-priv/shaders/
+# priv/shaders is now vendored from Spirit (see c_src/spirit/VENDOR.md);
+# previous build.rs copy-step made it transient, but the hex-publish
+# vendoring made it canonical content tracked in git.

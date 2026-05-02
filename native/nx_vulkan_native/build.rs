@@ -1,28 +1,39 @@
-// build.rs — compile the C++ shim + spirit's Vulkan backend, link Vulkan.
+// build.rs — compile the C++ shim + vendored Spirit Vulkan backend,
+// link Vulkan.
 //
-// Path-deps spirit at ~/projects/learn_erl/spirit (sibling of
-// nx_vulkan/). Future v1.0 vendors the spirit sources or pulls them
-// from a release artifact. For now: assume the spirit checkout is
-// at SPIRIT_DIR (default = ../../../spirit relative to this crate).
+// As of 2026-05-02 the Spirit Vulkan backend is vendored under
+// nx_vulkan/c_src/spirit/ (see c_src/spirit/VENDOR.md for the
+// pinned upstream commit). This build script no longer requires a
+// sibling Spirit checkout — hex.pm installs work out of the box.
+//
+// SPIRIT_DIR is honored as a development override: when set,
+// shaders from $SPIRIT_DIR/shaders/ are copied into priv/shaders/
+// at build time, letting mac-248's freshly-compiled shaders flow
+// in without an explicit vendor refresh. The C++ backend itself is
+// always taken from the vendored copy; refresh it explicitly via
+// the procedure documented in c_src/spirit/VENDOR.md.
 
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // crate is at nx_vulkan/native/nx_vulkan_native/ ; spirit is at
-    // nx_vulkan/../spirit/ ; the relative path is three "up" levels.
+    // crate is at nx_vulkan/native/nx_vulkan_native/ ; root is two up.
     let nx_vulkan_root = crate_dir.parent().unwrap().parent().unwrap();
-    let default_spirit = nx_vulkan_root.parent().unwrap().join("spirit");
-    let spirit = env::var("SPIRIT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(default_spirit);
 
     let shim_c = nx_vulkan_root.join("c_src");
+    let vendored_spirit = shim_c.join("spirit");
 
     println!("cargo:rerun-if-changed={}", shim_c.join("nx_vulkan_shim.cpp").display());
     println!("cargo:rerun-if-changed={}", shim_c.join("nx_vulkan_shim.h").display());
-    println!("cargo:rerun-if-changed={}", spirit.join("core/src/engine/Backend_par_vulkan.cpp").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendored_spirit.join("src/engine/Backend_par_vulkan.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendored_spirit.join("include/engine/Backend_par_vulkan.hpp").display()
+    );
     println!("cargo:rerun-if-env-changed=SPIRIT_DIR");
 
     let mut build = cc::Build::new();
@@ -33,9 +44,9 @@ fn main() {
         .flag_if_supported("-Wno-unused-parameter")
         .define("SPIRIT_USE_VULKAN", None)
         .include(shim_c.clone())
-        .include(spirit.join("core/include"))
+        .include(vendored_spirit.join("include"))
         .file(shim_c.join("nx_vulkan_shim.cpp"))
-        .file(spirit.join("core/src/engine/Backend_par_vulkan.cpp"));
+        .file(vendored_spirit.join("src/engine/Backend_par_vulkan.cpp"));
 
     // FreeBSD + macOS install Vulkan headers under /usr/local/include
     // (FreeBSD: pkg install vulkan-headers; macOS: brew install vulkan-headers).
@@ -53,24 +64,32 @@ fn main() {
     // the same; on macOS, MoltenVK provides libvulkan.dylib.
     println!("cargo:rustc-link-lib=dylib=vulkan");
 
-    // Copy Spirit's pre-compiled SPIR-V shaders into the priv/shaders
-    // directory so Elixir-side code can resolve them via
-    // :code.priv_dir(:nx_vulkan). On every build (cheap; small files).
+    // Shader handling:
+    //
+    // - Default (hex.pm install, no SPIRIT_DIR): the vendored
+    //   priv/shaders/*.spv are already in place; do nothing.
+    //
+    // - SPIRIT_DIR set (developer with a Spirit checkout, typically
+    //   mac-248 iterating on shaders): refresh priv/shaders/*.spv
+    //   from $SPIRIT_DIR/shaders/ on every build.
     let priv_shaders = nx_vulkan_root.join("priv").join("shaders");
     let _ = std::fs::create_dir_all(&priv_shaders);
-    let spirit_shaders = spirit.join("shaders");
-    if spirit_shaders.exists() {
-        // Watch the directory itself so a new .spv appearing triggers a rerun.
-        // Per-file rerun-if-changed only fires on modifications to existing
-        // files; without the dir watch, fresh shaders need a `cargo clean`.
-        println!("cargo:rerun-if-changed={}", spirit_shaders.display());
-        for entry in std::fs::read_dir(&spirit_shaders).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("spv") {
-                let dst = priv_shaders.join(path.file_name().unwrap());
-                let _ = std::fs::copy(&path, &dst);
-                println!("cargo:rerun-if-changed={}", path.display());
+
+    if let Ok(spirit_dir) = env::var("SPIRIT_DIR") {
+        let spirit_shaders = PathBuf::from(spirit_dir).join("shaders");
+        if spirit_shaders.exists() {
+            // Watch the directory itself so a new .spv appearing triggers a rerun.
+            // Per-file rerun-if-changed only fires on modifications to existing
+            // files; without the dir watch, fresh shaders need a `cargo clean`.
+            println!("cargo:rerun-if-changed={}", spirit_shaders.display());
+            for entry in std::fs::read_dir(&spirit_shaders).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("spv") {
+                    let dst = priv_shaders.join(path.file_name().unwrap());
+                    let _ = std::fs::copy(&path, &dst);
+                    println!("cargo:rerun-if-changed={}", path.display());
+                }
             }
         }
     }
