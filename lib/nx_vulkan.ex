@@ -537,6 +537,27 @@ defmodule Nx.Vulkan do
     )
   end
 
+  @doc """
+  Fused kinetic-energy primitive: `0.5 * sum(p² * inv_mass)` reduced
+  per workgroup. Returns a buffer of `ceil(n/256)` partial f32 sums;
+  caller does the final reduction (typically via `Nx.Vulkan.sum/1` or
+  on the host).
+  """
+  def kinetic_energy(p_ref, inv_mass_ref) do
+    Nx.Vulkan.Native.kinetic_energy(p_ref, inv_mass_ref,
+                                     shader_path("kinetic_energy.spv"))
+  end
+
+  @doc """
+  Fused Normal log-density primitive:
+  `-0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π)`.
+  Output shape matches `x`. f32 only.
+  """
+  def normal_logpdf(x_ref, mu_ref, sigma_ref) do
+    Nx.Vulkan.Native.normal_logpdf(x_ref, mu_ref, sigma_ref,
+                                    shader_path("normal_logpdf.spv"))
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

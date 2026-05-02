@@ -1356,6 +1356,222 @@ defmodule Nx.VulkanTest do
       |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
     end
 
+    test "Fast.kinetic_energy: 0.5 * sum(p² * inv_mass) — single shader on Vulkan" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn p, m -> Nx.Vulkan.Fast.kinetic_energy(p, m) end
+
+        # 0.5 * (1²*1 + 2²*0.5 + 3²*1.0) = 0.5 * (1 + 2 + 9) = 6.0
+        p = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        inv_mass = Nx.tensor([1.0, 0.5, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(p, inv_mass)
+        assert_in_delta Nx.to_number(out), 6.0, 1.0e-4
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.kinetic_energy fallback runs on BinaryBackend" do
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.BinaryBackend)
+
+        f = fn p, m -> Nx.Vulkan.Fast.kinetic_energy(p, m) end
+        p = Nx.tensor([2.0, 4.0])
+        inv_mass = Nx.tensor([1.0, 0.5])
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(p, inv_mass)
+        # 0.5 * (4*1 + 16*0.5) = 0.5 * 12 = 6.0
+        assert_in_delta Nx.to_number(out), 6.0, 1.0e-5
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.normal_logpdf: standard normal at zero" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn x, mu, sigma -> Nx.Vulkan.Fast.normal_logpdf(x, mu, sigma) end
+
+        x = Nx.tensor([0.0, 1.0, -1.0], backend: Nx.Vulkan.Backend)
+        mu = Nx.tensor([0.0, 0.0, 0.0], backend: Nx.Vulkan.Backend)
+        sigma = Nx.tensor([1.0, 1.0, 1.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(x, mu, sigma)
+
+        # logpdf(0; 0, 1) = -0.5 * 0 - log(1) - 0.5*log(2π) = -0.91894
+        # logpdf(1; 0, 1) = -0.5 - 0.91894 = -1.41894
+        # logpdf(-1; 0, 1) same as logpdf(1; 0, 1)
+        log_sqrt_2pi = 0.91893853320467274178
+
+        Enum.zip(Nx.to_flat_list(out),
+          [-log_sqrt_2pi, -0.5 - log_sqrt_2pi, -0.5 - log_sqrt_2pi])
+        |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.normal_logpdf fallback on BinaryBackend matches GPU result" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        # Run once on Vulkan.
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+        f = fn x, mu, sigma -> Nx.Vulkan.Fast.normal_logpdf(x, mu, sigma) end
+
+        x = Nx.tensor([0.5, 1.5, 2.0], backend: Nx.Vulkan.Backend)
+        mu = Nx.tensor([0.0, 1.0, 1.0], backend: Nx.Vulkan.Backend)
+        sigma = Nx.tensor([1.0, 0.5, 2.0], backend: Nx.Vulkan.Backend)
+
+        gpu = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(x, mu, sigma)
+
+        # Run on BinaryBackend — fallback path.
+        Nx.global_default_backend(Nx.BinaryBackend)
+        x_b = Nx.tensor([0.5, 1.5, 2.0])
+        mu_b = Nx.tensor([0.0, 1.0, 1.0])
+        sigma_b = Nx.tensor([1.0, 0.5, 2.0])
+
+        host = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(x_b, mu_b, sigma_b)
+
+        Enum.zip(Nx.to_flat_list(gpu), Nx.to_flat_list(host))
+        |> Enum.each(fn {g, h} -> assert_in_delta g, h, 1.0e-4 end)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.leapfrog_position dispatches via Vulkan callback when on Vulkan backend" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn q, eps, p -> Nx.Vulkan.Fast.leapfrog_position(q, eps, p) end
+
+        q = Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend)
+        eps = Nx.tensor([2.0, 2.0, 2.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([3.0, 4.0, 5.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(q, eps, p)
+
+        # 1+2*3=7; 2+2*4=10; 3+2*5=13
+        assert Nx.to_flat_list(out) == [7.0, 10.0, 13.0]
+        assert match?(%Nx.Vulkan.Backend{}, out.data)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.leapfrog_position fallback runs on BinaryBackend without Vulkan" do
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.BinaryBackend)
+
+        f = fn q, eps, p -> Nx.Vulkan.Fast.leapfrog_position(q, eps, p) end
+
+        q = Nx.tensor([1.0, 2.0])
+        eps = Nx.tensor([0.5, 0.5])
+        p = Nx.tensor([2.0, 4.0])
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(q, eps, p)
+
+        # 1 + 0.5*2 = 2; 2 + 0.5*4 = 4
+        assert Nx.to_flat_list(out) == [2.0, 4.0]
+        # Result lives on BinaryBackend — fallback path
+        assert match?(%Nx.BinaryBackend{}, out.data)
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.leapfrog_momentum_half: p + half_eps * grad fuses on Vulkan" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn p, half_eps, grad ->
+          Nx.Vulkan.Fast.leapfrog_momentum_half(p, half_eps, grad)
+        end
+
+        p = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+        half_eps = Nx.tensor([0.5, 0.5], backend: Nx.Vulkan.Backend)
+        grad = Nx.tensor([3.0, 4.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(p, half_eps, grad)
+
+        # 1 + 0.5*3 = 2.5; 1 + 0.5*4 = 3.0
+        assert Nx.to_flat_list(out) == [2.5, 3.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast.inv_mass_apply: p * inv_mass" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        f = fn p, m -> Nx.Vulkan.Fast.inv_mass_apply(p, m) end
+
+        p = Nx.tensor([2.0, 4.0, 8.0], backend: Nx.Vulkan.Backend)
+        inv_mass = Nx.tensor([0.5, 0.25, 0.125], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(p, inv_mass)
+
+        assert Nx.to_flat_list(out) == [1.0, 1.0, 1.0]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
+    test "Fast kernels compose: leapfrog_position then momentum_step in one defn" do
+      :ok = Nx.Vulkan.init()
+      previous = Nx.default_backend()
+
+      try do
+        Nx.global_default_backend(Nx.Vulkan.Backend)
+
+        # Two fused dispatches in sequence — the body of one leapfrog step.
+        f = fn q, p, eps, grad ->
+          q_new = Nx.Vulkan.Fast.leapfrog_position(q, eps, p)
+          p_new = Nx.Vulkan.Fast.momentum_step(p, eps, grad)
+          Nx.add(q_new, p_new)  # combine to make defn return one value
+        end
+
+        q = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+        p = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
+        eps = Nx.tensor([0.5, 0.5], backend: Nx.Vulkan.Backend)
+        grad = Nx.tensor([2.0, 4.0], backend: Nx.Vulkan.Backend)
+
+        out = Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(q, p, eps, grad)
+
+        # q_new = 1 + 0.5*1 = 1.5
+        # p_new = 1 + 0.5*2 = 2.0; 1 + 0.5*4 = 3.0
+        # sum = 3.5; 4.5
+        assert Nx.to_flat_list(out) == [3.5, 4.5]
+      after
+        Nx.global_default_backend(previous)
+      end
+    end
+
     test "Compiler 4-in — 3-arg leapfrog body fn(q, eps, p) -> q + eps*p" do
       :ok = Nx.Vulkan.init()
       previous = Nx.default_backend()

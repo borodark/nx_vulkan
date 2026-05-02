@@ -169,6 +169,23 @@ unsafe extern "C" {
         buf_idx: *const u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_kinetic_energy(
+        out: *mut c_void,
+        p: *mut c_void,
+        inv_mass: *mut c_void,
+        n: u32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_normal_logpdf(
+        out: *mut c_void,
+        x: *mut c_void,
+        mu: *mut c_void,
+        sigma: *mut c_void,
+        n: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -943,6 +960,83 @@ fn matmul_v<'a>(
     let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
     let rc = unsafe {
         nxv_matmul_v(out_handle, a.handle, b.handle, m, n, k, tile_m, tile_n, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// kinetic_energy: 0.5 * sum(p² * inv_mass) per workgroup.
+/// Output is `ceil(n / 256)` partial sums (4 bytes each) — caller
+/// reduces them on host or via a follow-up reduce_axis dispatch.
+#[rustler::nif]
+fn kinetic_energy<'a>(
+    env: Env<'a>,
+    p: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if p.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n = (p.n_bytes / 4) as u32;
+    let n_groups: u64 = ((n + 255) / 256) as u64;
+    let out_bytes = n_groups * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_kinetic_energy(out_handle, p.handle, inv_mass.handle, n, cstr.as_ptr())
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// normal_logpdf: -0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π).
+/// Output shape matches x.
+#[rustler::nif]
+fn normal_logpdf<'a>(
+    env: Env<'a>,
+    x: ResourceArc<VulkanTensor>,
+    mu: ResourceArc<VulkanTensor>,
+    sigma: ResourceArc<VulkanTensor>,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if x.n_bytes != mu.n_bytes || x.n_bytes != sigma.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n = (x.n_bytes / 4) as u32;
+    let out_bytes = x.n_bytes;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_normal_logpdf(out_handle, x.handle, mu.handle, sigma.handle, n, cstr.as_ptr())
     };
 
     if rc != 0 {

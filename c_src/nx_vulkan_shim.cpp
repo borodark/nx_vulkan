@@ -531,6 +531,43 @@ int nxv_apply_binary_broadcast(void* out, void* a, void* b,
     return dispatch(pipe, bufs, 3, groups, sizeof(push), &push);
 }
 
+int nxv_kinetic_energy(void* out, void* p, void* inv_mass,
+                        unsigned int n, const char* spv_path) {
+    if (!out || !p || !inv_mass || !spv_path) return -1;
+    /* 3 buffers: p, inv_mass, out. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 3);
+    if (!pipe) return -2;
+
+    VkBuf* buf_p   = (VkBuf*) p;
+    VkBuf* buf_m   = (VkBuf*) inv_mass;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    VkBuffer bufs[3] = { buf_p->buffer, buf_m->buffer, buf_out->buffer };
+    unsigned int push_n = n;
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 3, groups, sizeof(unsigned int), &push_n);
+}
+
+int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
+                       unsigned int n, const char* spv_path) {
+    if (!out || !x || !mu || !sigma || !spv_path) return -1;
+    /* The shader has 4 buffers: x, mu, sigma, out. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 4);
+    if (!pipe) return -2;
+
+    VkBuf* buf_x   = (VkBuf*) x;
+    VkBuf* buf_mu  = (VkBuf*) mu;
+    VkBuf* buf_s   = (VkBuf*) sigma;
+    VkBuf* buf_out = (VkBuf*) out;
+
+    VkBuffer bufs[4] = { buf_x->buffer, buf_mu->buffer, buf_s->buffer, buf_out->buffer };
+    unsigned int push_n = n;
+    unsigned int groups = (n + 255) / 256;
+
+    return dispatch(pipe, bufs, 4, groups, sizeof(unsigned int), &push_n);
+}
+
 int nxv_fused_chain_4(void* out, void* a, void* b, void* c, void* d,
                       unsigned int n, unsigned int n_ops,
                       const unsigned int* ops,

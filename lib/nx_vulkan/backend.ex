@@ -1198,6 +1198,159 @@ defmodule Nx.Vulkan.Backend do
     upload_host_tensor(out, res)
   end
 
+  # ---------------------------------------------------------------- Fast kernels (Emily-style)
+  #
+  # Each callback below matches a function name in Nx.Vulkan.Fast that
+  # was emitted via `Nx.Defn.Expr.optional/3`. The Nx evaluator
+  # dispatches here when the op runs under our backend; otherwise the
+  # caller's defn fallback executes. Cross-backend correctness comes
+  # for free; the speedup is per-kernel.
+
+  @impl true
+  def fast_leapfrog_position(%T{shape: shape, type: type} = out,
+                              %T{} = q, %T{} = eps, %T{} = p, _opts) do
+    if all_f32?([type, q.type, eps.type, p.type]) and q.shape == shape and
+         eps.shape == shape and p.shape == shape do
+      eps_data = to_vulkan!(eps)
+      p_data = to_vulkan!(p)
+      q_data = to_vulkan!(q)
+
+      # chain: r = eps; r *= p (buf=1); r += q (buf=2)
+      {:ok, ref} =
+        Nx.Vulkan.fused_chain_4(
+          eps_data.ref, p_data.ref, q_data.ref, eps_data.ref,
+          [{:multiply, 1}, {:add, 2}]
+        )
+
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    else
+      # Mismatched shapes/types — let the fallback compute it.
+      a = Nx.backend_transfer(q, Nx.BinaryBackend)
+      b = Nx.backend_transfer(eps, Nx.BinaryBackend)
+      c = Nx.backend_transfer(p, Nx.BinaryBackend)
+      upload_host_tensor(out, Nx.add(a, Nx.multiply(b, c)))
+    end
+  end
+
+  @impl true
+  def fast_leapfrog_momentum_half(%T{shape: shape, type: type} = out,
+                                   %T{} = p, %T{} = half_eps, %T{} = grad, _opts) do
+    if all_f32?([type, p.type, half_eps.type, grad.type]) and
+         p.shape == shape and half_eps.shape == shape and grad.shape == shape do
+      half_data = to_vulkan!(half_eps)
+      grad_data = to_vulkan!(grad)
+      p_data = to_vulkan!(p)
+
+      # chain: r = half_eps; r *= grad (buf=1); r += p (buf=2)
+      {:ok, ref} =
+        Nx.Vulkan.fused_chain_4(
+          half_data.ref, grad_data.ref, p_data.ref, half_data.ref,
+          [{:multiply, 1}, {:add, 2}]
+        )
+
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    else
+      a = Nx.backend_transfer(p, Nx.BinaryBackend)
+      b = Nx.backend_transfer(half_eps, Nx.BinaryBackend)
+      c = Nx.backend_transfer(grad, Nx.BinaryBackend)
+      upload_host_tensor(out, Nx.add(a, Nx.multiply(b, c)))
+    end
+  end
+
+  @impl true
+  def fast_momentum_step(%T{shape: shape, type: type} = out,
+                          %T{} = p, %T{} = eps, %T{} = grad, _opts) do
+    if all_f32?([type, p.type, eps.type, grad.type]) and
+         p.shape == shape and eps.shape == shape and grad.shape == shape do
+      eps_data = to_vulkan!(eps)
+      grad_data = to_vulkan!(grad)
+      p_data = to_vulkan!(p)
+
+      {:ok, ref} =
+        Nx.Vulkan.fused_chain_4(
+          eps_data.ref, grad_data.ref, p_data.ref, eps_data.ref,
+          [{:multiply, 1}, {:add, 2}]
+        )
+
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    else
+      a = Nx.backend_transfer(p, Nx.BinaryBackend)
+      b = Nx.backend_transfer(eps, Nx.BinaryBackend)
+      c = Nx.backend_transfer(grad, Nx.BinaryBackend)
+      upload_host_tensor(out, Nx.add(a, Nx.multiply(b, c)))
+    end
+  end
+
+  @impl true
+  def fast_inv_mass_apply(%T{shape: shape, type: type} = out,
+                           %T{} = p, %T{} = inv_mass, _opts) do
+    if all_f32?([type, p.type, inv_mass.type]) and p.shape == shape and
+         inv_mass.shape == shape do
+      p_data = to_vulkan!(p)
+      m_data = to_vulkan!(inv_mass)
+      {:ok, ref} = Nx.Vulkan.multiply(p_data.ref, m_data.ref)
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    else
+      a = Nx.backend_transfer(p, Nx.BinaryBackend)
+      b = Nx.backend_transfer(inv_mass, Nx.BinaryBackend)
+      upload_host_tensor(out, Nx.multiply(a, b))
+    end
+  end
+
+  # Kinetic energy: 0.5 * sum(p² * inv_mass) → scalar f32.
+  # The shader emits partial sums (one f32 per workgroup); the
+  # callback sums them on the host and uploads the scalar result.
+  @impl true
+  def fast_kinetic_energy(%T{type: type} = out, %T{} = p, %T{} = inv_mass, _opts) do
+    if all_f32?([type, p.type, inv_mass.type]) and p.shape == inv_mass.shape do
+      p_data = to_vulkan!(p)
+      m_data = to_vulkan!(inv_mass)
+      {:ok, partials_ref} = Nx.Vulkan.kinetic_energy(p_data.ref, m_data.ref)
+
+      # Read the partial-sums buffer back and reduce on host (typically
+      # ≤ 4 partials for d ≤ 1024 NUTS dims).
+      n_groups = div(byte_size_of(p.shape) + 255, 256)
+      {:ok, bin} = Nx.Vulkan.Native.download_binary(partials_ref, n_groups * 4)
+      total = for(<<x::float-32-native <- bin>>, do: x) |> Enum.sum()
+
+      scalar_to_tensor(out, total)
+    else
+      hp = Nx.backend_transfer(p, Nx.BinaryBackend)
+      hm = Nx.backend_transfer(inv_mass, Nx.BinaryBackend)
+      res = hp |> Nx.pow(2) |> Nx.multiply(hm) |> Nx.sum() |> Nx.multiply(0.5)
+      upload_host_tensor(out, res)
+    end
+  end
+
+  # Normal log-density: -0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π).
+  # Output same shape as x.
+  @impl true
+  def fast_normal_logpdf(%T{shape: shape, type: type} = out,
+                          %T{} = x, %T{} = mu, %T{} = sigma, _opts) do
+    if all_f32?([type, x.type, mu.type, sigma.type]) and
+         x.shape == shape and mu.shape == shape and sigma.shape == shape do
+      x_data = to_vulkan!(x)
+      mu_data = to_vulkan!(mu)
+      s_data = to_vulkan!(sigma)
+      {:ok, ref} = Nx.Vulkan.normal_logpdf(x_data.ref, mu_data.ref, s_data.ref)
+      put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    else
+      hx = Nx.backend_transfer(x, Nx.BinaryBackend)
+      hm = Nx.backend_transfer(mu, Nx.BinaryBackend)
+      hs = Nx.backend_transfer(sigma, Nx.BinaryBackend)
+      log_sqrt_2pi = 0.91893853320467274178
+      z = Nx.divide(Nx.subtract(hx, hm), hs)
+      z2 = Nx.multiply(z, z)
+      res =
+        Nx.subtract(
+          Nx.subtract(Nx.multiply(z2, -0.5), Nx.log(hs)),
+          log_sqrt_2pi
+        )
+
+      upload_host_tensor(out, res)
+    end
+  end
+
   # ---------------------------------------------------------------- as_type (v0.1.8)
 
   # Round-trip cast between numeric element types. Same-type is a
