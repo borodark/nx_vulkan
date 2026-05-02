@@ -19,7 +19,7 @@ Nx today has two GPU backends:
 On FreeBSD with NVIDIA hardware, neither works. Vulkan is the third
 backend, and the only one that runs on FreeBSD. The accompanying
 blog post is [*The GPU That Doesn't Need
-CUDA*](https://www.dataalienist.com/blog-vulkan-on-freebsd.html).
+CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html).
 
 ## Architecture
 
