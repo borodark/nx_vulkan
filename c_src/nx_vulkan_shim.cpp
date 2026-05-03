@@ -568,6 +568,52 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
     return dispatch(pipe, bufs, 4, groups, sizeof(unsigned int), &push_n);
 }
 
+int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
+                               void* grad_chain, void* logp_chain,
+                               void* q_init, void* p_init, void* inv_mass,
+                               unsigned int n, unsigned int K,
+                               float eps, float mu, float sigma,
+                               const char* spv_path) {
+    if (!q_chain || !p_chain || !grad_chain || !logp_chain ||
+        !q_init || !p_init || !inv_mass || !spv_path) return -1;
+    /* 7 buffers in shader binding order: q_init, p_init, inv_mass,
+     * q_chain, p_chain, grad_chain, logp_chain. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 7);
+    if (!pipe) return -2;
+
+    VkBuf* buf_qi = (VkBuf*) q_init;
+    VkBuf* buf_pi = (VkBuf*) p_init;
+    VkBuf* buf_m  = (VkBuf*) inv_mass;
+    VkBuf* buf_qc = (VkBuf*) q_chain;
+    VkBuf* buf_pc = (VkBuf*) p_chain;
+    VkBuf* buf_gc = (VkBuf*) grad_chain;
+    VkBuf* buf_lc = (VkBuf*) logp_chain;
+
+    VkBuffer bufs[7] = {
+        buf_qi->buffer, buf_pi->buffer, buf_m->buffer,
+        buf_qc->buffer, buf_pc->buffer, buf_gc->buffer, buf_lc->buffer
+    };
+
+    /* Push: {uint n; uint K; float eps; float mu; float sigma} = 20 bytes. */
+    struct {
+        unsigned int n;
+        unsigned int K;
+        float eps;
+        float mu;
+        float sigma;
+    } push;
+    push.n = n;
+    push.K = K;
+    push.eps = eps;
+    push.mu = mu;
+    push.sigma = sigma;
+
+    /* Single workgroup of 256 threads (assumes n <= 256). The shader
+     * carries each dimension's chain state through K iterations within
+     * one invocation; no need for multi-workgroup dispatch here. */
+    return dispatch(pipe, bufs, 7, 1, sizeof(push), &push);
+}
+
 int nxv_leapfrog_normal(void* q_new, void* p_new,
                          void* q, void* p, void* inv_mass,
                          unsigned int n,

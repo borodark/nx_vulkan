@@ -579,6 +579,38 @@ defmodule Nx.Vulkan do
     )
   end
 
+  @doc """
+  Fused **K-step chain** of NUTS leapfrog steps for a univariate Normal
+  log-density model. Performs `k` consecutive leapfrog steps in one Vulkan
+  dispatch and returns all `k` intermediate states:
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+
+  - `q_chain`, `p_chain`, `grad_chain` — each `k * n` f32 elements,
+    laid out row-major (`step k, dimension i` at offset `k*n + i`).
+  - `logp_chain` — `k` f32 elements; per-step log-density reduced
+    across the `n` dimensions.
+
+  Per-step amortized cost is `(per_dispatch_baseline + k * compute) / k`.
+  At `k=32` on the dev box this is ~16 µs per leapfrog step vs ~537 µs
+  for the single-step `leapfrog_normal` and ~6000 µs for the unfused
+  IR-walker path.
+
+  Constraints (Phase 1.5):
+  - `n ≤ 256` (single workgroup; multi-workgroup version is future work).
+  - f32 only; long chains (`k ≥ 64`) may accumulate measurable drift
+    relative to a f64 reference.
+  - Univariate Normal log-density only — closed-form gradient
+    `−(q − mu) / sigma²` baked into the shader.
+  """
+  def leapfrog_chain_normal(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

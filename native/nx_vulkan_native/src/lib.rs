@@ -199,6 +199,22 @@ unsafe extern "C" {
         sigma: f32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_leapfrog_chain_normal(
+        q_chain: *mut c_void,
+        p_chain: *mut c_void,
+        grad_chain: *mut c_void,
+        logp_chain: *mut c_void,
+        q_init: *mut c_void,
+        p_init: *mut c_void,
+        inv_mass: *mut c_void,
+        n: u32,
+        K: u32,
+        eps: f32,
+        mu: f32,
+        sigma: f32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -1119,6 +1135,102 @@ fn leapfrog_normal<'a>(
     let q_new = VulkanTensor { handle: q_new_handle, n_bytes: out_bytes };
     let p_new = VulkanTensor { handle: p_new_handle, n_bytes: out_bytes };
     Ok((atoms::ok(), (ResourceArc::new(q_new), ResourceArc::new(p_new))).encode(env))
+}
+
+/// leapfrog_chain_normal: K-step fused leapfrog chain for univariate Normal.
+/// Returns {q_chain, p_chain, grad_chain, logp_chain}. All four are
+/// allocated by this NIF; q/p/grad chains are K*n*4 bytes each, logp_chain
+/// is K*4 bytes. K must be a positive u32; n is derived from input byte size.
+#[rustler::nif]
+fn leapfrog_chain_normal<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64,
+    mu: f64,
+    sigma: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);   // K * n * 4
+    let logp_bytes  = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let q_chain_handle = unsafe { nxv_buf_alloc(chain_bytes) };
+    if q_chain_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let p_chain_handle = unsafe { nxv_buf_alloc(chain_bytes) };
+    if p_chain_handle.is_null() {
+        unsafe { nxv_buf_free(q_chain_handle) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let grad_chain_handle = unsafe { nxv_buf_alloc(chain_bytes) };
+    if grad_chain_handle.is_null() {
+        unsafe { nxv_buf_free(q_chain_handle) };
+        unsafe { nxv_buf_free(p_chain_handle) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let logp_chain_handle = unsafe { nxv_buf_alloc(logp_bytes) };
+    if logp_chain_handle.is_null() {
+        unsafe { nxv_buf_free(q_chain_handle) };
+        unsafe { nxv_buf_free(p_chain_handle) };
+        unsafe { nxv_buf_free(grad_chain_handle) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_normal(
+            q_chain_handle,
+            p_chain_handle,
+            grad_chain_handle,
+            logp_chain_handle,
+            q_init.handle,
+            p_init.handle,
+            inv_mass.handle,
+            n,
+            k,
+            eps as f32,
+            mu as f32,
+            sigma as f32,
+            cstr.as_ptr(),
+        )
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(q_chain_handle) };
+        unsafe { nxv_buf_free(p_chain_handle) };
+        unsafe { nxv_buf_free(grad_chain_handle) };
+        unsafe { nxv_buf_free(logp_chain_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let q_chain    = VulkanTensor { handle: q_chain_handle,    n_bytes: chain_bytes };
+    let p_chain    = VulkanTensor { handle: p_chain_handle,    n_bytes: chain_bytes };
+    let grad_chain = VulkanTensor { handle: grad_chain_handle, n_bytes: chain_bytes };
+    let logp_chain = VulkanTensor { handle: logp_chain_handle, n_bytes: logp_bytes  };
+
+    Ok((
+        atoms::ok(),
+        (
+            ResourceArc::new(q_chain),
+            ResourceArc::new(p_chain),
+            ResourceArc::new(grad_chain),
+            ResourceArc::new(logp_chain),
+        ),
+    )
+        .encode(env))
 }
 
 /// 4-input fused chain. ops + buf_idx are length-≤8 vecs;

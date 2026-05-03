@@ -188,6 +188,19 @@ int nxv_leapfrog_normal(void* q_new, void* p_new,
                          float eps, float mu, float sigma,
                          const char* spv_path);
 
+/* leapfrog_chain_normal.spv — fused chain of K NUTS leapfrog steps for a
+ * univariate Normal log-density model. Output buffers q_chain, p_chain,
+ * grad_chain are each K*n floats; logp_chain is K floats (per-step
+ * reduction). Assumes n <= 256 (single workgroup). 7 buffers total
+ * (3 read + 4 write). Push constants {n, K, eps, mu, sigma} = 20 bytes.
+ * Caller pre-allocates the four output buffers. */
+int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
+                               void* grad_chain, void* logp_chain,
+                               void* q_init, void* p_init, void* inv_mass,
+                               unsigned int n, unsigned int K,
+                               float eps, float mu, float sigma,
+                               const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif
