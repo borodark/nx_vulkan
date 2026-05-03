@@ -58,10 +58,9 @@ defmodule Nx.Vulkan.Fast do
       iex> Nx.Vulkan.Fast.leapfrog_position(q, eps, p) |> Nx.to_flat_list()
       [2.0, 4.0]
   """
-  @spec leapfrog_position(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec leapfrog_position(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def leapfrog_position(q, eps, p) do
-    Expr.optional(:fast_leapfrog_position, [q, eps, p, []],
-                  &leapfrog_position_fallback/4)
+    Expr.optional(:fast_leapfrog_position, [q, eps, p, []], &leapfrog_position_fallback/4)
   end
 
   defp leapfrog_position_fallback(q, eps, p, _opts) do
@@ -73,10 +72,13 @@ defmodule Nx.Vulkan.Fast do
   and end of every leapfrog iteration in the standard symplectic
   integrator. `half_eps` is `eps / 2` precomputed by the caller.
   """
-  @spec leapfrog_momentum_half(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec leapfrog_momentum_half(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def leapfrog_momentum_half(p, half_eps, grad) do
-    Expr.optional(:fast_leapfrog_momentum_half, [p, half_eps, grad, []],
-                  &leapfrog_momentum_half_fallback/4)
+    Expr.optional(
+      :fast_leapfrog_momentum_half,
+      [p, half_eps, grad, []],
+      &leapfrog_momentum_half_fallback/4
+    )
   end
 
   defp leapfrog_momentum_half_fallback(p, half_eps, grad, _opts) do
@@ -87,10 +89,9 @@ defmodule Nx.Vulkan.Fast do
   Full-step momentum update: `p + eps * grad`. Same shape as the
   half-step but kept distinct to signal the caller's intent.
   """
-  @spec momentum_step(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec momentum_step(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def momentum_step(p, eps, grad) do
-    Expr.optional(:fast_momentum_step, [p, eps, grad, []],
-                  &momentum_step_fallback/4)
+    Expr.optional(:fast_momentum_step, [p, eps, grad, []], &momentum_step_fallback/4)
   end
 
   defp momentum_step_fallback(p, eps, grad, _opts) do
@@ -103,10 +104,9 @@ defmodule Nx.Vulkan.Fast do
   shader could combine it with adjacent ops in the leapfrog without
   changing call sites.
   """
-  @spec inv_mass_apply(Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec inv_mass_apply(Nx.t(), Nx.t()) :: Nx.t()
   def inv_mass_apply(p, inv_mass) do
-    Expr.optional(:fast_inv_mass_apply, [p, inv_mass, []],
-                  &inv_mass_apply_fallback/3)
+    Expr.optional(:fast_inv_mass_apply, [p, inv_mass, []], &inv_mass_apply_fallback/3)
   end
 
   defp inv_mass_apply_fallback(p, inv_mass, _opts) do
@@ -123,10 +123,9 @@ defmodule Nx.Vulkan.Fast do
   shader produces partial sums; the backend callback sums them on the
   host and returns a scalar.
   """
-  @spec kinetic_energy(Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec kinetic_energy(Nx.t(), Nx.t()) :: Nx.t()
   def kinetic_energy(p, inv_mass) do
-    Expr.optional(:fast_kinetic_energy, [p, inv_mass, []],
-                  &kinetic_energy_fallback/3)
+    Expr.optional(:fast_kinetic_energy, [p, inv_mass, []], &kinetic_energy_fallback/3)
   end
 
   defp kinetic_energy_fallback(p, inv_mass, _opts) do
@@ -144,10 +143,9 @@ defmodule Nx.Vulkan.Fast do
   Under Nx.Vulkan dispatches `normal_logpdf.spv` (one fused shader)
   instead of the five separate Nx ops the fallback emits.
   """
-  @spec normal_logpdf(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t()) :: Nx.Tensor.t()
+  @spec normal_logpdf(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def normal_logpdf(x, mu, sigma) do
-    Expr.optional(:fast_normal_logpdf, [x, mu, sigma, []],
-                  &normal_logpdf_fallback/4)
+    Expr.optional(:fast_normal_logpdf, [x, mu, sigma, []], &normal_logpdf_fallback/4)
   end
 
   @log_sqrt_2pi 0.91893853320467274178
@@ -156,6 +154,7 @@ defmodule Nx.Vulkan.Fast do
     z = Nx.divide(Nx.subtract(x, mu), sigma)
     z2 = Nx.multiply(z, z)
     log_sigma = Nx.log(sigma)
+
     Nx.subtract(
       Nx.subtract(Nx.multiply(z2, -0.5), log_sigma),
       @log_sqrt_2pi

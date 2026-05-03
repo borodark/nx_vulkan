@@ -65,8 +65,10 @@ defmodule Nx.Vulkan.Backend do
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type, shape: shape,
-                    vectorized_axes: v_axes}, _limit) do
+  def to_binary(
+        %T{data: %__MODULE__{ref: ref}, type: type, shape: shape, vectorized_axes: v_axes},
+        _limit
+      ) do
     # Download the full GPU buffer (use its actual size to satisfy Rust
     # validation), then truncate to what the tensor's declared metadata
     # expects. The buffer may be larger after reshape/squeeze (zero-copy
@@ -214,7 +216,8 @@ defmodule Nx.Vulkan.Backend do
         put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
 
       # All-f64 same-shape: f64 shader path (Day 6 / step 2c).
-      all_f64 and a.shape == b.shape and op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
+      all_f64 and a.shape == b.shape and
+          op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
         a_data = to_vulkan!(a)
         b_data = to_vulkan!(b)
         {:ok, ref} = Nx.Vulkan.apply_binary_f64(a_data.ref, b_data.ref, op)
@@ -226,7 +229,8 @@ defmodule Nx.Vulkan.Backend do
 
       # All-f64 shape mismatch + ≤4D: f64 broadcast shader path
       # (only for arithmetic ops 0..6; comparisons are f32-only on the f64 broadcast shader).
-      all_f64 and tuple_size(shape) <= 4 and op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
+      all_f64 and tuple_size(shape) <= 4 and
+          op in [:add, :subtract, :multiply, :divide, :pow, :max, :min] ->
         try_broadcast(out, a, b, op) || host_fallback_binary(out, a, b, op)
 
       # Anything else: host fallback.
@@ -248,11 +252,23 @@ defmodule Nx.Vulkan.Backend do
       {:ok, ref} =
         if type == {:f, 64} do
           Nx.Vulkan.apply_binary_broadcast_f64(
-            a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+            a_data.ref,
+            b_data.ref,
+            op,
+            ndim,
+            out_dims,
+            a_strides,
+            b_strides
           )
         else
           Nx.Vulkan.apply_binary_broadcast(
-            a_data.ref, b_data.ref, op, ndim, out_dims, a_strides, b_strides
+            a_data.ref,
+            b_data.ref,
+            op,
+            ndim,
+            out_dims,
+            a_strides,
+            b_strides
           )
         end
 
@@ -462,7 +478,7 @@ defmodule Nx.Vulkan.Backend do
       # Mixed types or non-default contracting axes: host fallback with
       # the full 6-arg Nx.dot so shape semantics are preserved.
       not all_f32?([type, a.type, b.type]) or ca != [tuple_size(a_shape) - 1] or
-          cb != [0] or ba != [] or bb != [] ->
+        cb != [0] or ba != [] or bb != [] ->
         a_host = Nx.backend_transfer(a, Nx.BinaryBackend)
         b_host = Nx.backend_transfer(b, Nx.BinaryBackend)
         upload_host_tensor(out, Nx.dot(a_host, ca, ba, b_host, cb, bb))
@@ -944,12 +960,12 @@ defmodule Nx.Vulkan.Backend do
   # returns atoms (`:nan`, `:infinity`, `:neg_infinity`) for non-finite
   # values; our host-materialize paths must re-encode them as the
   # right bit pattern instead of choking on `<<atom::float-...>>`.
-  @nan_f32          <<0x7FC00000::32-native>>
-  @inf_f32          <<0x7F800000::32-native>>
-  @neg_inf_f32      <<0xFF800000::32-native>>
-  @nan_f64          <<0x7FF8000000000000::64-native>>
-  @inf_f64          <<0x7FF0000000000000::64-native>>
-  @neg_inf_f64      <<0xFFF0000000000000::64-native>>
+  @nan_f32 <<0x7FC00000::32-native>>
+  @inf_f32 <<0x7F800000::32-native>>
+  @neg_inf_f32 <<0xFF800000::32-native>>
+  @nan_f64 <<0x7FF8000000000000::64-native>>
+  @inf_f64 <<0x7FF0000000000000::64-native>>
+  @neg_inf_f64 <<0xFFF0000000000000::64-native>>
 
   defp encode_f32_bits(:nan), do: @nan_f32
   defp encode_f32_bits(:infinity), do: @inf_f32
@@ -1206,9 +1222,13 @@ defmodule Nx.Vulkan.Backend do
   # caller's defn fallback executes. Cross-backend correctness comes
   # for free; the speedup is per-kernel.
 
-  @impl true
-  def fast_leapfrog_position(%T{shape: shape, type: type} = out,
-                              %T{} = q, %T{} = eps, %T{} = p, _opts) do
+  def fast_leapfrog_position(
+        %T{shape: shape, type: type} = out,
+        %T{} = q,
+        %T{} = eps,
+        %T{} = p,
+        _opts
+      ) do
     if all_f32?([type, q.type, eps.type, p.type]) and q.shape == shape and
          eps.shape == shape and p.shape == shape do
       eps_data = to_vulkan!(eps)
@@ -1218,7 +1238,10 @@ defmodule Nx.Vulkan.Backend do
       # chain: r = eps; r *= p (buf=1); r += q (buf=2)
       {:ok, ref} =
         Nx.Vulkan.fused_chain_4(
-          eps_data.ref, p_data.ref, q_data.ref, eps_data.ref,
+          eps_data.ref,
+          p_data.ref,
+          q_data.ref,
+          eps_data.ref,
           [{:multiply, 1}, {:add, 2}]
         )
 
@@ -1232,9 +1255,13 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
-  @impl true
-  def fast_leapfrog_momentum_half(%T{shape: shape, type: type} = out,
-                                   %T{} = p, %T{} = half_eps, %T{} = grad, _opts) do
+  def fast_leapfrog_momentum_half(
+        %T{shape: shape, type: type} = out,
+        %T{} = p,
+        %T{} = half_eps,
+        %T{} = grad,
+        _opts
+      ) do
     if all_f32?([type, p.type, half_eps.type, grad.type]) and
          p.shape == shape and half_eps.shape == shape and grad.shape == shape do
       half_data = to_vulkan!(half_eps)
@@ -1244,7 +1271,10 @@ defmodule Nx.Vulkan.Backend do
       # chain: r = half_eps; r *= grad (buf=1); r += p (buf=2)
       {:ok, ref} =
         Nx.Vulkan.fused_chain_4(
-          half_data.ref, grad_data.ref, p_data.ref, half_data.ref,
+          half_data.ref,
+          grad_data.ref,
+          p_data.ref,
+          half_data.ref,
           [{:multiply, 1}, {:add, 2}]
         )
 
@@ -1257,9 +1287,13 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
-  @impl true
-  def fast_momentum_step(%T{shape: shape, type: type} = out,
-                          %T{} = p, %T{} = eps, %T{} = grad, _opts) do
+  def fast_momentum_step(
+        %T{shape: shape, type: type} = out,
+        %T{} = p,
+        %T{} = eps,
+        %T{} = grad,
+        _opts
+      ) do
     if all_f32?([type, p.type, eps.type, grad.type]) and
          p.shape == shape and eps.shape == shape and grad.shape == shape do
       eps_data = to_vulkan!(eps)
@@ -1268,7 +1302,10 @@ defmodule Nx.Vulkan.Backend do
 
       {:ok, ref} =
         Nx.Vulkan.fused_chain_4(
-          eps_data.ref, grad_data.ref, p_data.ref, eps_data.ref,
+          eps_data.ref,
+          grad_data.ref,
+          p_data.ref,
+          eps_data.ref,
           [{:multiply, 1}, {:add, 2}]
         )
 
@@ -1281,9 +1318,7 @@ defmodule Nx.Vulkan.Backend do
     end
   end
 
-  @impl true
-  def fast_inv_mass_apply(%T{shape: shape, type: type} = out,
-                           %T{} = p, %T{} = inv_mass, _opts) do
+  def fast_inv_mass_apply(%T{shape: shape, type: type} = out, %T{} = p, %T{} = inv_mass, _opts) do
     if all_f32?([type, p.type, inv_mass.type]) and p.shape == shape and
          inv_mass.shape == shape do
       p_data = to_vulkan!(p)
@@ -1300,7 +1335,6 @@ defmodule Nx.Vulkan.Backend do
   # Kinetic energy: 0.5 * sum(p² * inv_mass) → scalar f32.
   # The shader emits partial sums (one f32 per workgroup); the
   # callback sums them on the host and uploads the scalar result.
-  @impl true
   def fast_kinetic_energy(%T{type: type} = out, %T{} = p, %T{} = inv_mass, _opts) do
     if all_f32?([type, p.type, inv_mass.type]) and p.shape == inv_mass.shape do
       p_data = to_vulkan!(p)
@@ -1324,9 +1358,13 @@ defmodule Nx.Vulkan.Backend do
 
   # Normal log-density: -0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π).
   # Output same shape as x.
-  @impl true
-  def fast_normal_logpdf(%T{shape: shape, type: type} = out,
-                          %T{} = x, %T{} = mu, %T{} = sigma, _opts) do
+  def fast_normal_logpdf(
+        %T{shape: shape, type: type} = out,
+        %T{} = x,
+        %T{} = mu,
+        %T{} = sigma,
+        _opts
+      ) do
     if all_f32?([type, x.type, mu.type, sigma.type]) and
          x.shape == shape and mu.shape == shape and sigma.shape == shape do
       x_data = to_vulkan!(x)
@@ -1341,6 +1379,7 @@ defmodule Nx.Vulkan.Backend do
       log_sqrt_2pi = 0.91893853320467274178
       z = Nx.divide(Nx.subtract(hx, hm), hs)
       z2 = Nx.multiply(z, z)
+
       res =
         Nx.subtract(
           Nx.subtract(Nx.multiply(z2, -0.5), Nx.log(hs)),
@@ -1433,7 +1472,7 @@ defmodule Nx.Vulkan.Backend do
 
   # Shape manipulation
   @impl true
-  def reverse(out, tensor, axes), do: host_via_nx(out, :reverse, [tensor], [axes: axes])
+  def reverse(out, tensor, axes), do: host_via_nx(out, :reverse, [tensor], axes: axes)
   @impl true
   def bitcast(%T{type: type} = out, tensor) do
     a_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
@@ -1459,6 +1498,7 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def window_product(out, tensor, shape, opts),
     do: host_window(out, tensor, :window_product, shape, opts)
+
   @impl true
   def window_reduce(out, tensor, acc, shape, opts, fun) do
     t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
@@ -1466,6 +1506,7 @@ defmodule Nx.Vulkan.Backend do
     res = Nx.window_reduce(t_host, a_host, shape, opts, fun)
     upload_host_tensor(out, res)
   end
+
   @impl true
   def window_scatter_max(out, tensor, source, init, shape, opts) do
     t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
@@ -1474,6 +1515,7 @@ defmodule Nx.Vulkan.Backend do
     res = Nx.window_scatter_max(t_host, s_host, i_host, shape, opts)
     upload_host_tensor(out, res)
   end
+
   @impl true
   def window_scatter_min(out, tensor, source, init, shape, opts) do
     t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
@@ -1499,6 +1541,7 @@ defmodule Nx.Vulkan.Backend do
   @impl true
   def to_batched(out, tensor, opts) do
     t_host = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+
     Nx.to_batched(t_host, out.shape |> elem(0), opts)
     |> Enum.map(fn batch -> upload_host_tensor(out, batch) end)
   end
@@ -1508,6 +1551,7 @@ defmodule Nx.Vulkan.Backend do
   def from_pointer(_out, _pointer, _type, _shape, _backend_options) do
     raise "Nx.Vulkan.Backend does not support from_pointer/5"
   end
+
   @impl true
   def to_pointer(_tensor, _opts) do
     raise "Nx.Vulkan.Backend does not support to_pointer/2"

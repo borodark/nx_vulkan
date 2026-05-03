@@ -24,7 +24,7 @@ defmodule Nx.Vulkan.MixProject do
 
   defp deps do
     [
-      {:nx, "~> 0.7"},
+      {:nx, "~> 0.10"},
       # The NIF — bound to spirit's Vulkan compute backend via a small
       # extern "C" shim. Rustler manages NIF resource lifetimes so
       # tensor handles get freed when their Elixir reference is GC'd.
@@ -40,7 +40,7 @@ defmodule Nx.Vulkan.MixProject do
     [
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib native mix.exs README.md PLAN.md .formatter.exs)
+      files: ~w(lib native c_src priv mix.exs README.md LICENSE .formatter.exs)
     ]
   end
 end
