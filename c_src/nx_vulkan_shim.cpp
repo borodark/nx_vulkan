@@ -568,6 +568,93 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
     return dispatch(pipe, bufs, 4, groups, sizeof(unsigned int), &push_n);
 }
 
+int nxv_leapfrog_chain_normal_lg(void* q_chain, void* p_chain,
+                                  void* grad_chain, void* partial_logp,
+                                  void* q_init, void* p_init, void* inv_mass,
+                                  unsigned int n, unsigned int K,
+                                  unsigned int num_workgroups,
+                                  float eps, float mu, float sigma,
+                                  const char* spv_path) {
+    if (!q_chain || !p_chain || !grad_chain || !partial_logp ||
+        !q_init || !p_init || !inv_mass || !spv_path) return -1;
+    /* Same 7-buffer binding order as the single-workgroup variant. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 7);
+    if (!pipe) return -2;
+
+    VkBuf* buf_qi = (VkBuf*) q_init;
+    VkBuf* buf_pi = (VkBuf*) p_init;
+    VkBuf* buf_m  = (VkBuf*) inv_mass;
+    VkBuf* buf_qc = (VkBuf*) q_chain;
+    VkBuf* buf_pc = (VkBuf*) p_chain;
+    VkBuf* buf_gc = (VkBuf*) grad_chain;
+    VkBuf* buf_pl = (VkBuf*) partial_logp;
+
+    VkBuffer bufs[7] = {
+        buf_qi->buffer, buf_pi->buffer, buf_m->buffer,
+        buf_qc->buffer, buf_pc->buffer, buf_gc->buffer, buf_pl->buffer
+    };
+
+    /* Push: {n, K, num_workgroups, eps, mu, sigma} = 24 bytes. */
+    struct {
+        unsigned int n;
+        unsigned int K;
+        unsigned int num_workgroups;
+        float eps;
+        float mu;
+        float sigma;
+    } push;
+    push.n = n;
+    push.K = K;
+    push.num_workgroups = num_workgroups;
+    push.eps = eps;
+    push.mu = mu;
+    push.sigma = sigma;
+
+    /* Multi-workgroup: dispatch ceil(n/256) workgroups. */
+    return dispatch(pipe, bufs, 7, num_workgroups, sizeof(push), &push);
+}
+
+int nxv_leapfrog_chain_exponential(void* q_chain, void* p_chain,
+                                    void* grad_chain, void* logp_chain,
+                                    void* q_init, void* p_init, void* inv_mass,
+                                    unsigned int n, unsigned int K,
+                                    float eps, float lambda,
+                                    const char* spv_path) {
+    if (!q_chain || !p_chain || !grad_chain || !logp_chain ||
+        !q_init || !p_init || !inv_mass || !spv_path) return -1;
+    /* Same 7-buffer binding order as Normal chain. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 7);
+    if (!pipe) return -2;
+
+    VkBuf* buf_qi = (VkBuf*) q_init;
+    VkBuf* buf_pi = (VkBuf*) p_init;
+    VkBuf* buf_m  = (VkBuf*) inv_mass;
+    VkBuf* buf_qc = (VkBuf*) q_chain;
+    VkBuf* buf_pc = (VkBuf*) p_chain;
+    VkBuf* buf_gc = (VkBuf*) grad_chain;
+    VkBuf* buf_lc = (VkBuf*) logp_chain;
+
+    VkBuffer bufs[7] = {
+        buf_qi->buffer, buf_pi->buffer, buf_m->buffer,
+        buf_qc->buffer, buf_pc->buffer, buf_gc->buffer, buf_lc->buffer
+    };
+
+    /* Push: {n, K, eps, lambda} = 16 bytes. */
+    struct {
+        unsigned int n;
+        unsigned int K;
+        float eps;
+        float lambda;
+    } push;
+    push.n = n;
+    push.K = K;
+    push.eps = eps;
+    push.lambda = lambda;
+
+    /* Single workgroup (n <= 256). */
+    return dispatch(pipe, bufs, 7, 1, sizeof(push), &push);
+}
+
 int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
                                void* grad_chain, void* logp_chain,
                                void* q_init, void* p_init, void* inv_mass,

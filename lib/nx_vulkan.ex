@@ -611,6 +611,42 @@ defmodule Nx.Vulkan do
     )
   end
 
+  @doc """
+  Multi-workgroup variant of `leapfrog_chain_normal/7` for `n > 256`.
+  Returns `{q_chain_ref, p_chain_ref, grad_chain_ref, partial_logp_ref}`
+  where `partial_logp_ref` is a buffer of `K * num_workgroups` f32 floats
+  (per-workgroup partial sums per step). The caller does the per-step sum
+  across the `num_workgroups` axis to recover the final per-step logp.
+  Workgroup 0 includes the constant term so the host sum gives final logp
+  directly.
+  """
+  def leapfrog_chain_normal_lg(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal_lg(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal_lg.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 sibling of `leapfrog_chain_normal/7` for the Exponential(lambda)
+  family on the unconstrained line (log-transform). Same I/O shape: returns
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+
+  Closed-form unconstrained gradient: `grad_q_uc = 1 - lambda * exp(q_uc)`.
+  `n ≤ 256` (single workgroup); see `leapfrog_chain_normal_lg/7` for the
+  multi-workgroup pattern when an `_lg` exponential variant is needed.
+  """
+  def leapfrog_chain_exponential(q_ref, p_ref, inv_mass_ref, k, eps, lambda)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_exponential(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, lambda,
+      shader_path("leapfrog_chain_exponential.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

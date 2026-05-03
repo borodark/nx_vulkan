@@ -201,6 +201,31 @@ int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
                                float eps, float mu, float sigma,
                                const char* spv_path);
 
+/* leapfrog_chain_normal_lg.spv — multi-workgroup variant. Lifts the
+ * n <= 256 constraint. partial_logp output is K * num_workgroups floats
+ * (per-workgroup partials per step); caller sums num_workgroups partials
+ * to get the per-step logp. num_workgroups = ceil(n / 256). Workgroup 0
+ * includes the constant -n*(log(sigma) + 0.5*log(2pi)) so the host sum
+ * gives final logp directly. Push constants 24 bytes. */
+int nxv_leapfrog_chain_normal_lg(void* q_chain, void* p_chain,
+                                  void* grad_chain, void* partial_logp,
+                                  void* q_init, void* p_init, void* inv_mass,
+                                  unsigned int n, unsigned int K,
+                                  unsigned int num_workgroups,
+                                  float eps, float mu, float sigma,
+                                  const char* spv_path);
+
+/* leapfrog_chain_exponential.spv — Phase 2 sibling of leapfrog_chain_normal.
+ * Same I/O shape (4 output buffers, K * n + K). Single-workgroup (n<=256).
+ * Closed-form unconstrained gradient: grad_q_uc = 1 - lambda * exp(q_uc).
+ * Push constants {n, K, eps, lambda} = 16 bytes. */
+int nxv_leapfrog_chain_exponential(void* q_chain, void* p_chain,
+                                    void* grad_chain, void* logp_chain,
+                                    void* q_init, void* p_init, void* inv_mass,
+                                    unsigned int n, unsigned int K,
+                                    float eps, float lambda,
+                                    const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

@@ -215,6 +215,38 @@ unsafe extern "C" {
         sigma: f32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_leapfrog_chain_normal_lg(
+        q_chain: *mut c_void,
+        p_chain: *mut c_void,
+        grad_chain: *mut c_void,
+        partial_logp: *mut c_void,
+        q_init: *mut c_void,
+        p_init: *mut c_void,
+        inv_mass: *mut c_void,
+        n: u32,
+        K: u32,
+        num_workgroups: u32,
+        eps: f32,
+        mu: f32,
+        sigma: f32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_leapfrog_chain_exponential(
+        q_chain: *mut c_void,
+        p_chain: *mut c_void,
+        grad_chain: *mut c_void,
+        logp_chain: *mut c_void,
+        q_init: *mut c_void,
+        p_init: *mut c_void,
+        inv_mass: *mut c_void,
+        n: u32,
+        K: u32,
+        eps: f32,
+        lambda: f32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -1228,6 +1260,164 @@ fn leapfrog_chain_normal<'a>(
             ResourceArc::new(p_chain),
             ResourceArc::new(grad_chain),
             ResourceArc::new(logp_chain),
+        ),
+    )
+        .encode(env))
+}
+
+/// leapfrog_chain_normal_lg: multi-workgroup K-step chain.
+/// Returns {q_chain, p_chain, grad_chain, partial_logp}. partial_logp is
+/// K * num_workgroups f32 (host sums num_workgroups partials per step).
+#[rustler::nif]
+fn leapfrog_chain_normal_lg<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64,
+    mu: f64,
+    sigma: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let num_workgroups = (n + 255) / 256;
+    let chain_bytes   = q_init.n_bytes * (k as u64);
+    let partial_bytes = (k as u64) * (num_workgroups as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let q_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if q_h.is_null() { return Ok((atoms::error(), atoms::alloc_failed()).encode(env)); }
+    let p_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if p_h.is_null() {
+        unsafe { nxv_buf_free(q_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let g_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if g_h.is_null() {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let pl_h = unsafe { nxv_buf_alloc(partial_bytes) };
+    if pl_h.is_null() {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h); nxv_buf_free(g_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_normal_lg(
+            q_h, p_h, g_h, pl_h,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k, num_workgroups,
+            eps as f32, mu as f32, sigma as f32,
+            cstr.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h);
+                 nxv_buf_free(g_h); nxv_buf_free(pl_h) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let q_c  = VulkanTensor { handle: q_h,  n_bytes: chain_bytes };
+    let p_c  = VulkanTensor { handle: p_h,  n_bytes: chain_bytes };
+    let g_c  = VulkanTensor { handle: g_h,  n_bytes: chain_bytes };
+    let pl_c = VulkanTensor { handle: pl_h, n_bytes: partial_bytes };
+
+    Ok((
+        atoms::ok(),
+        (
+            ResourceArc::new(q_c),
+            ResourceArc::new(p_c),
+            ResourceArc::new(g_c),
+            ResourceArc::new(pl_c),
+        ),
+    )
+        .encode(env))
+}
+
+/// leapfrog_chain_exponential: K-step chain for Exp(lambda) on the
+/// unconstrained line (log-transform). Same I/O shape as the Normal
+/// chain (returns {q, p, grad, logp} 4-tuple).
+#[rustler::nif]
+fn leapfrog_chain_exponential<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64,
+    lambda: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 {
+        return Ok((atoms::error(), atoms::bad_op()).encode(env));
+    }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes  = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let q_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if q_h.is_null() { return Ok((atoms::error(), atoms::alloc_failed()).encode(env)); }
+    let p_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if p_h.is_null() {
+        unsafe { nxv_buf_free(q_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let g_h = unsafe { nxv_buf_alloc(chain_bytes) };
+    if g_h.is_null() {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let lc_h = unsafe { nxv_buf_alloc(logp_bytes) };
+    if lc_h.is_null() {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h); nxv_buf_free(g_h) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_exponential(
+            q_h, p_h, g_h, lc_h,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps as f32, lambda as f32,
+            cstr.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        unsafe { nxv_buf_free(q_h); nxv_buf_free(p_h);
+                 nxv_buf_free(g_h); nxv_buf_free(lc_h) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let q_c  = VulkanTensor { handle: q_h,  n_bytes: chain_bytes };
+    let p_c  = VulkanTensor { handle: p_h,  n_bytes: chain_bytes };
+    let g_c  = VulkanTensor { handle: g_h,  n_bytes: chain_bytes };
+    let lc_c = VulkanTensor { handle: lc_h, n_bytes: logp_bytes };
+
+    Ok((
+        atoms::ok(),
+        (
+            ResourceArc::new(q_c),
+            ResourceArc::new(p_c),
+            ResourceArc::new(g_c),
+            ResourceArc::new(lc_c),
         ),
     )
         .encode(env))
