@@ -9,9 +9,30 @@
   per-Vulkan-dispatch baseline is ~500 µs regardless of shader
   complexity. Single-step fusion hit a floor.
 - 2026-05-03: Pivoted to **Phase 1.5 — `leapfrog_chain_normal`
-  shader** below. Single-step infrastructure preserved on
-  branch `feat/fused-leapfrog-normal` (commit `e794c5b`) as a
-  baseline.
+  shader**. Single-step infrastructure preserved on branch
+  `feat/fused-leapfrog-normal` (commit `e794c5b`) as a baseline.
+- 2026-05-03: Phase 1.5 chain shader shipped. Per-step bench at
+  K=32: **49.7 µs/step** = matches EXLA target. eXMC speculative
+  path wired (2 lines in tree.ex `ensure_available/3`). End-to-end
+  smoke test produced biased posterior (var=0.51 vs ref 1.01).
+- 2026-05-03: **Stage 1.5.4 diagnosis complete**. H1 ruled out
+  f32 precision (unfused Vulkan reproduces EXLA bit-exactly at
+  this seed). H2 found the bug: my spec used `p − ½·eps·∇logp`,
+  canonical leapfrog uses `p + ½·eps·∇logp` — sign error in five
+  shipped shaders. Mac-248 fixed all five. **Variance recovered
+  to var=1.03** on `x ~ N(0,1)` (within bound [0.7, 1.3]).
+  Stage 1.5.4 PASSED.
+- 2026-05-03: Phase 2 chain shaders shipped and wired:
+  Student-t, Cauchy, HalfNormal, Exponential, plus f64 Normal
+  sibling and multi-workgroup f64. random_philox.spv replaced
+  with canonical Random123 Philox 2x32-10 after audit found
+  the original was a non-canonical variant.
+
+**Project state**: ALL primary milestones met. Remaining work is
+eXMC-side dispatch detection for the Phase 2 distributions
+(currently only Normal triggers the fused chain via the
+`fused_leapfrog_normal_meta` env var) and a Weibull-specific
+chain shader for the last `:vulkan_known_failure` test.
 
 ## Why this plan exists
 
