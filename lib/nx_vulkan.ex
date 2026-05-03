@@ -647,6 +647,67 @@ defmodule Nx.Vulkan do
     )
   end
 
+  @doc """
+  Phase 2 chain shader for Student-t(ν, μ, σ). Returns 4-tuple
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+  `logp_const` should be precomputed by the caller as
+  `log Γ((ν+1)/2) − log Γ(ν/2) − ½ log(πν) − log σ`.
+  """
+  def leapfrog_chain_studentt(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma, nu, logp_const)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_studentt(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma, nu, logp_const,
+      shader_path("leapfrog_chain_studentt.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 chain shader for Cauchy(loc, scale). Returns 4-tuple of refs.
+  `log_pi_scale` is precomputed as `−log(π · scale)`.
+  """
+  def leapfrog_chain_cauchy(q_ref, p_ref, inv_mass_ref, k, eps, loc, scale, log_pi_scale)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_cauchy(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, loc, scale, log_pi_scale,
+      shader_path("leapfrog_chain_cauchy.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 chain shader for HalfNormal(σ) on the unconstrained line
+  via log-transform `q_uc = log(q)`. Returns 4-tuple of refs.
+  `log_const` is precomputed as `−log(σ) − ½ log(π)`.
+
+  **Numerical caveat**: the gradient `1 − exp(2·q_uc)/σ²` overflows
+  in f32 when `q_uc > ~44`; for σ ≈ 1 the unconstrained range is
+  comfortably small.
+  """
+  def leapfrog_chain_halfnormal(q_ref, p_ref, inv_mass_ref, k, eps, sigma, log_const)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_halfnormal(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, sigma, log_const,
+      shader_path("leapfrog_chain_halfnormal.spv")
+    )
+  end
+
+  @doc """
+  f64 sibling of `leapfrog_chain_normal/7`. Same I/O contract but all
+  buffers use 8 bytes per element (input refs must be f64-typed Vulkan
+  tensors). Useful when chain integration needs higher precision than
+  f32 (e.g., long chains, sensitive log-densities).
+  """
+  def leapfrog_chain_normal_f64(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal_f64(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal_f64.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

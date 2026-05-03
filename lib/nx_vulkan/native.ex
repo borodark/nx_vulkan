@@ -116,4 +116,20 @@ defmodule Nx.Vulkan.Native do
   @doc false
   def leapfrog_chain_exponential(_q, _p, _inv_mass, _k, _eps, _lambda, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_chain_studentt(_q, _p, _inv_mass, _k, _eps, _mu, _sigma, _nu, _logp_const, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_chain_cauchy(_q, _p, _inv_mass, _k, _eps, _loc, _scale, _log_pi_scale, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_chain_halfnormal(_q, _p, _inv_mass, _k, _eps, _sigma, _log_const, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_chain_normal_f64(_q, _p, _inv_mass, _k, _eps, _mu, _sigma, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

@@ -247,6 +247,42 @@ unsafe extern "C" {
         lambda: f32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_leapfrog_chain_studentt(
+        q_chain: *mut c_void, p_chain: *mut c_void,
+        grad_chain: *mut c_void, logp_chain: *mut c_void,
+        q_init: *mut c_void, p_init: *mut c_void, inv_mass: *mut c_void,
+        n: u32, K: u32,
+        eps: f32, mu: f32, sigma: f32, nu: f32, logp_const: f32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_leapfrog_chain_cauchy(
+        q_chain: *mut c_void, p_chain: *mut c_void,
+        grad_chain: *mut c_void, logp_chain: *mut c_void,
+        q_init: *mut c_void, p_init: *mut c_void, inv_mass: *mut c_void,
+        n: u32, K: u32,
+        eps: f32, loc: f32, scale: f32, log_pi_scale: f32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_leapfrog_chain_halfnormal(
+        q_chain: *mut c_void, p_chain: *mut c_void,
+        grad_chain: *mut c_void, logp_chain: *mut c_void,
+        q_init: *mut c_void, p_init: *mut c_void, inv_mass: *mut c_void,
+        n: u32, K: u32,
+        eps: f32, sigma: f32, log_const: f32,
+        spv_path: *const c_char,
+    ) -> i32;
+
+    fn nxv_leapfrog_chain_normal_f64(
+        q_chain: *mut c_void, p_chain: *mut c_void,
+        grad_chain: *mut c_void, logp_chain: *mut c_void,
+        q_init: *mut c_void, p_init: *mut c_void, inv_mass: *mut c_void,
+        n: u32, K: u32,
+        eps: f64, mu: f64, sigma: f64,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -1421,6 +1457,200 @@ fn leapfrog_chain_exponential<'a>(
         ),
     )
         .encode(env))
+}
+
+// --- Phase 2 chain NIFs (Student-t, Cauchy, HalfNormal) + f64 chain ---
+//
+// All four follow the same allocate-4-output-buffers / dispatch /
+// return-4-tuple pattern as leapfrog_chain_exponential. The differences
+// are the push-constant scalars and the underlying nxv_* dispatch.
+// f64 chain uses 8 bytes per element instead of 4.
+
+#[rustler::nif]
+fn leapfrog_chain_studentt<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64, mu: f64, sigma: f64, nu: f64, logp_const: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 { return Ok((atoms::error(), atoms::bad_op()).encode(env)); }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+    let (qh, ph, gh, lh) = match alloc_4(chain_bytes, chain_bytes, chain_bytes, logp_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok((atoms::error(), atoms::alloc_failed()).encode(env)),
+    };
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_studentt(
+            qh, ph, gh, lh,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps as f32, mu as f32, sigma as f32, nu as f32, logp_const as f32,
+            cstr.as_ptr(),
+        )
+    };
+    encode_chain_result(env, rc, qh, ph, gh, lh, chain_bytes, logp_bytes)
+}
+
+#[rustler::nif]
+fn leapfrog_chain_cauchy<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64, loc: f64, scale: f64, log_pi_scale: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 { return Ok((atoms::error(), atoms::bad_op()).encode(env)); }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+    let (qh, ph, gh, lh) = match alloc_4(chain_bytes, chain_bytes, chain_bytes, logp_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok((atoms::error(), atoms::alloc_failed()).encode(env)),
+    };
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_cauchy(
+            qh, ph, gh, lh,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps as f32, loc as f32, scale as f32, log_pi_scale as f32,
+            cstr.as_ptr(),
+        )
+    };
+    encode_chain_result(env, rc, qh, ph, gh, lh, chain_bytes, logp_bytes)
+}
+
+#[rustler::nif]
+fn leapfrog_chain_halfnormal<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64, sigma: f64, log_const: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 { return Ok((atoms::error(), atoms::bad_op()).encode(env)); }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+    let (qh, ph, gh, lh) = match alloc_4(chain_bytes, chain_bytes, chain_bytes, logp_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok((atoms::error(), atoms::alloc_failed()).encode(env)),
+    };
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_halfnormal(
+            qh, ph, gh, lh,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps as f32, sigma as f32, log_const as f32,
+            cstr.as_ptr(),
+        )
+    };
+    encode_chain_result(env, rc, qh, ph, gh, lh, chain_bytes, logp_bytes)
+}
+
+#[rustler::nif]
+fn leapfrog_chain_normal_f64<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64, mu: f64, sigma: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    // f64: 8 bytes per element. n derived from input byte size.
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 { return Ok((atoms::error(), atoms::bad_op()).encode(env)); }
+
+    let n = (q_init.n_bytes / 8) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes = (k as u64) * 8;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+    let (qh, ph, gh, lh) = match alloc_4(chain_bytes, chain_bytes, chain_bytes, logp_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok((atoms::error(), atoms::alloc_failed()).encode(env)),
+    };
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_normal_f64(
+            qh, ph, gh, lh,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps, mu, sigma,
+            cstr.as_ptr(),
+        )
+    };
+    encode_chain_result(env, rc, qh, ph, gh, lh, chain_bytes, logp_bytes)
+}
+
+// Helper: allocate four output buffers, free everything if any alloc fails.
+fn alloc_4(b1: u64, b2: u64, b3: u64, b4: u64)
+    -> Result<(*mut c_void, *mut c_void, *mut c_void, *mut c_void), ()>
+{
+    let h1 = unsafe { nxv_buf_alloc(b1) };
+    if h1.is_null() { return Err(()); }
+    let h2 = unsafe { nxv_buf_alloc(b2) };
+    if h2.is_null() { unsafe { nxv_buf_free(h1) }; return Err(()); }
+    let h3 = unsafe { nxv_buf_alloc(b3) };
+    if h3.is_null() { unsafe { nxv_buf_free(h1); nxv_buf_free(h2) }; return Err(()); }
+    let h4 = unsafe { nxv_buf_alloc(b4) };
+    if h4.is_null() { unsafe { nxv_buf_free(h1); nxv_buf_free(h2); nxv_buf_free(h3) }; return Err(()); }
+    Ok((h1, h2, h3, h4))
+}
+
+// Helper: dispatch result → tuple-encode or free-and-error.
+fn encode_chain_result<'a>(
+    env: Env<'a>,
+    rc: i32,
+    qh: *mut c_void, ph: *mut c_void, gh: *mut c_void, lh: *mut c_void,
+    chain_bytes: u64, logp_bytes: u64,
+) -> NifResult<Term<'a>> {
+    if rc != 0 {
+        unsafe { nxv_buf_free(qh); nxv_buf_free(ph);
+                 nxv_buf_free(gh); nxv_buf_free(lh); };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+    let q_c = VulkanTensor { handle: qh, n_bytes: chain_bytes };
+    let p_c = VulkanTensor { handle: ph, n_bytes: chain_bytes };
+    let g_c = VulkanTensor { handle: gh, n_bytes: chain_bytes };
+    let l_c = VulkanTensor { handle: lh, n_bytes: logp_bytes };
+    Ok((
+        atoms::ok(),
+        (ResourceArc::new(q_c), ResourceArc::new(p_c),
+         ResourceArc::new(g_c), ResourceArc::new(l_c)),
+    ).encode(env))
 }
 
 /// 4-input fused chain. ops + buf_idx are length-≤8 vecs;
