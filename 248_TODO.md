@@ -8,7 +8,118 @@ non-canonical).
 
 ---
 
-## Z1 — Philox 2x32-10 cross-check vs Random123 reference
+## Z2 — Replace `random_philox.spv` with canonical Random123 Philox 2x32-10
+
+**Z1 outcome (both sides)**: Linux Python and mac-248 C++/Random123
+both confirmed the shader's PRNG is non-canonical. 0/10 match
+across 10 reference inputs. Same shader uint32 outputs from
+both check-sides (e.g., ctr=0 shader=0x6da9e4a2; canonical
+ref=0xc534ae0b). The shader is deterministic and reproducible
+but is NOT Random123 Philox 2x32-10.
+
+User decision: replace with canonical implementation.
+
+### What to change
+
+In `shaders/random_philox.comp`, swap the body of
+`philox2x32(uint counter, uint key)` for the canonical round.
+**Do NOT change** anything else: `mulhilo`, `uint_to_uniform`,
+the Box-Muller wrapper in `main()`, the push constants, the
+buffer layout, the specialization constant for DIST. Public
+behaviour (uniform [0,1) for DIST=0, normal via Box-Muller for
+DIST=1) stays identical.
+
+### The canonical round (from Random123 `philox.h`)
+
+State: `ctr[0]`, `ctr[1]`, `key` — three uint32. The shader's
+input is a single 32-bit `counter`, so `ctr[0] = counter` and
+`ctr[1] = 0` at start (this is a standard convention for
+single-counter Philox; gives 2^32 unique outputs per key).
+
+Per round:
+```
+hi, lo = mulhilo(M, ctr[0])              // unsigned 32x32→64
+ctr[0]' = hi ^ key ^ ctr[1]              // mix in BOTH key and ctr[1]
+ctr[1]' = lo                             // new ctr[1] is the low half
+key'    = key + 0x9E3779B9               // bump SEPARATE key
+```
+
+10 rounds. Output is `uvec2(ctr[0], ctr[1])` after the last round.
+
+GLSL spec (replace the existing `philox2x32` body):
+
+```glsl
+uvec2 philox2x32(uint counter, uint key_in) {
+    uint c0  = counter;
+    uint c1  = 0u;          // canonical single-counter convention
+    uint key = key_in;      // SEPARATE from ctr state
+
+    for (int i = 0; i < 10; i++) {
+        uvec2 prod = mulhilo(c0, 0xD2511F53u);  // {lo, hi}
+        uint c0_new = prod.y ^ key ^ c1;
+        uint c1_new = prod.x;
+        c0 = c0_new;
+        c1 = c1_new;
+        key += 0x9E3779B9u;
+    }
+
+    return uvec2(c0, c1);
+}
+```
+
+Three semantic changes from the current shader:
+1. Track `key` as a SEPARATE state variable (not folded into `hi`)
+2. Initialize `c1 = 0` (not `c1 = key`)
+3. Round mix is `c0' = mulhi ^ key ^ c1` (not `c0' = key ^ mulhi`)
+
+### Acceptance check
+
+Re-run your Z1 cross-check after the swap. With `(counter=0, key=42)`,
+the shader should now produce **exactly** Random123's reference:
+```
+ctr=0: shader=0xc534ae0b ref=0xc534ae0b  MATCH
+ctr=1: shader=0xe0569325 ref=0xe0569325  MATCH
+...
+ctr=9: shader=0xb53b1830 ref=0xb53b1830  MATCH
+```
+
+Should be 10/10 match. If even ctr=0 differs, there's an off-by-one
+in the round structure; recheck against `~/spirit/thirdparty/Random123/include/Random123/philox.h`.
+
+### Compile + push
+
+```sh
+cd ~/spirit
+glslangValidator -V shaders/random_philox.comp -o shaders/random_philox.spv
+git add shaders/random_philox.{comp,spv}
+git commit -m "shaders: random_philox — canonical Random123 Philox 2x32-10"
+git push origin feat/fused-leapfrog-chain-normal
+```
+
+Effort: **~30-60 min** including the Z1 re-run for verification.
+
+### Why this matters
+
+While the current shader's PRNG output LOOKS uniform-ish on quick
+inspection, "looks uniform" is not "passes statistical tests."
+NUTS samplers and other downstream consumers depend on the PRNG
+being statistically sound. Random123 Philox 2x32-10 is a
+well-known, well-tested cipher; the shader's variant is custom
+and untested. Replacing avoids the future "we trusted the
+random_philox shader and got biased posteriors" failure mode.
+
+NB: nothing currently depends on this shader on the eXMC NUTS
+critical path — Erlang `:rand` is used for momenta. But other
+Vulkan-side users (any future GPU random sampling) deserve the
+canonical implementation.
+
+---
+
+## Z1 — Philox 2x32-10 cross-check vs Random123 reference (DONE)
+
+Cross-check completed by both Linux (Python) and mac-248 (C++).
+Both reached the same verdict: 0/10 match against canonical
+Random123. Findings drove Z2 above.
 
 **Background**: a recent audit of `random_philox.spv` flagged
 that the shader's round structure differs from Random123's
