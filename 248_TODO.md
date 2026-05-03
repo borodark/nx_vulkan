@@ -1,257 +1,246 @@
-# mac-248 — Fused leapfrog **chain** shader (Phase 1.5)
+# mac-248 — Three concurrent tasks (pick any order)
 
-**Goal**: write `leapfrog_chain_normal.{comp,spv}` — a single
-Vulkan shader that performs **K consecutive** NUTS leapfrog
-steps for a univariate Normal model in one dispatch, emitting
-all K intermediate `(q, p, grad, logp)` states.
+The chain shader (`leapfrog_chain_normal.spv` at spirit
+`53438dff`) is shipped and working on Linux. Per-step bench at
+K=32 hits 49.7 µs (matches EXLA target). The Linux side is
+working through correctness diagnosis (Stage 1.5.4 — variance
+bias under f32 chain integration).
 
-**Why this replaces the previous 248_TODO**: the single-step
-`leapfrog_normal.spv` shipped on `feat/fused-leapfrog-normal`
-(commit `e794c5b` on nx_vulkan main, your `4eac8c68` on spirit)
-works correctly but only delivers ~11× per-step speedup. The
-Vulkan dispatch baseline is ~500 µs *regardless of shader
-complexity* — measured 537 µs/step at d=8. To go below that
-floor, multiple steps must share one dispatch.
-
-The chain shader's amortized per-step cost is `(500 µs +
-K × shader_compute) / K`. At K=32 → ~16 µs/step (3× faster
-than EXLA), at K=64 → ~8 µs/step (6× faster). The acceptance
-test bar (Exponential-Poisson NUTS in ≤ 30s under
-`EXMC_COMPILER=vulkan`) becomes hittable.
-
-Branch: **`feat/fused-leapfrog-chain-normal`** off the previous
-`feat/fused-leapfrog-normal` (preserves the single-step
-infrastructure as a baseline).
+While that diagnosis proceeds, mac-248 has three independent
+useful tasks. **Pick any order; they don't depend on each
+other and don't depend on the Linux-side correctness work
+finishing.**
 
 ## Layout note
 
-Mac-248 (FreeBSD 15, GT 750M) flat layout. Pull and branch:
+Mac-248 (FreeBSD 15, GT 750M) flat layout:
+`~/spirit/`, `~/nx_vulkan/`. Both have `feat/fused-leapfrog-chain-normal`
+checked out. Pull before each task:
 
 ```
-cd ~/spirit && git fetch origin && git checkout feat/fused-leapfrog-normal
-git pull && git checkout -b feat/fused-leapfrog-chain-normal
-cd ~/nx_vulkan && git fetch origin && git checkout feat/fused-leapfrog-normal
-git pull
+cd ~/spirit && git pull origin feat/fused-leapfrog-chain-normal
+cd ~/nx_vulkan && git pull origin feat/fused-leapfrog-chain-normal
 ```
 
-## The shader
+---
 
-The shader runs K leapfrog steps in a loop, writing all K
-intermediate states. The eXMC NUTS speculative path consumes
-exactly this format: `(all_q[K,n], all_p[K,n], all_grad[K,n],
-all_logp[K])` — the audit confirmed the binding contract.
+## Task A — FreeBSD bring-up of the chain pipeline
 
-Per-step `logp` requires a workgroup reduction (sum across `n`
-dimensions). Use shared memory + barrier; standard pattern.
+**Goal**: prove the entire fused-chain path works on FreeBSD's
+nvidia driver, not just on the Linux dev box. This is the
+strategic milestone the *walkable-path* blog post listed as
+not-yet-done; a passing run here flips the post's central claim
+from promise to measurement.
+
+**Steps**:
+
+```sh
+# 1. Vulkan loader + headers + glslang (skip if already installed)
+sudo pkg install vulkan-loader vulkan-headers vulkan-tools \
+                 vulkan-validation-layers glslang shaderc
+
+# 2. Confirm the GT 750M is visible
+vulkaninfo --summary | head -30
+
+# 3. Build nx_vulkan against the FreeBSD Vulkan stack
+cd ~/nx_vulkan
+mix deps.get
+mix compile
+# If headers/libs aren't on the default path:
+#   CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib mix compile
+#   RUSTFLAGS="-L /usr/local/lib"
+
+# 4. Run the nx_vulkan test suite — all 152 tests should pass
+mix test
+
+# 5. Run the new chain bench
+mix run -e '
+Nx.Vulkan.init()
+n = 8
+{:ok, q} = Nx.Vulkan.upload_f32(for i <- 1..n, do: i / 10.0)
+{:ok, p} = Nx.Vulkan.upload_f32(for _ <- 1..n, do: 0.3)
+{:ok, m} = Nx.Vulkan.upload_f32(for _ <- 1..n, do: 1.0)
+for _ <- 1..50, do: Nx.Vulkan.leapfrog_chain_normal(q, p, m, 32, 0.05, 0.0, 1.0)
+{us, _} = :timer.tc(fn ->
+  for _ <- 1..200, do: Nx.Vulkan.leapfrog_chain_normal(q, p, m, 32, 0.05, 0.0, 1.0)
+end)
+IO.puts("K=32 on GT 750M FreeBSD: #{Float.round(us / 200, 1)} µs/dispatch = #{Float.round(us / 200 / 32, 2)} µs/step")
+'
+
+# 6. (Optional but valuable) run the K=1, 2, 8, 16, 32, 64, 128 sweep
+#    so we have full per-step numbers on FreeBSD GT 750M to compare
+#    against the Linux RTX 3060 Ti measurements.
+```
+
+**Report back**:
+
+- `vulkaninfo --summary` first 20 lines
+- `Nx.Vulkan.Native.device_name()` and `has_f64()` outputs
+- Any package-install issues, build errors, or test failures
+- The K=32 µs/step number (and the K-sweep if you ran it)
+- `mix test` summary line
+
+If something fails to build, capture the exact error and stop;
+Linux side will adjust the build script. If the build is fine
+but a specific shader fails to load, note which `.spv` and the
+validation error.
+
+**Expected outcome**: 152/0 on the test suite, K=32 on GT 750M
+likely ~150-300 µs/step (Kepler is older than the RTX 3060 Ti
+but Vulkan compute should be in the same order of magnitude).
+A successful run validates that the *walkable-path* claim is
+real.
+
+**~30-60 minutes** including the package install.
+
+---
+
+## Task B — Multi-workgroup chain shader (`leapfrog_chain_normal_lg.comp`)
+
+**Goal**: lift the `n ≤ 256` constraint of the current chain
+shader. The single-workgroup version uses a workgroup-shared
+reduction for the per-step `logp`. For `n > 256`, multiple
+workgroups need to cooperate via either a second-pass reduction
+or a different algorithm.
+
+**Approach**: simplest correct version first — write the per-step
+reduction as a *two-pass* shader pair:
+
+1. `leapfrog_chain_normal_lg.comp` — per-workgroup partials. Each
+   workgroup processes 256 dimensions and emits its own per-step
+   partial sum. Output: `q_chain[K,n]`, `p_chain[K,n]`,
+   `grad_chain[K,n]`, `partial_logp[K, num_workgroups]`.
+2. The Linux side does a tiny second-pass sum over the
+   `num_workgroups` partials to get final `logp_chain[K]`. (This
+   is host-side cheap, ~µs.)
 
 ```glsl
 #version 450
+layout (local_size_x = 256) in;
 
-// Fused chain of K NUTS leapfrog steps for a univariate Normal
-// log-density model. Emits all K intermediate (q, p, grad, logp)
-// states so the caller (Elixir tree builder) can do U-turn checks
-// and divergence detection on the host without re-dispatching.
-//
-// Push constants: {n, K, eps, mu, sigma} = 20 bytes.
-// Output buffers are K × n (q, p, grad) and K (logp) — at K=32,
-// n=50 that's ~25 KB total, comfortably within buffer pool limits.
+layout (push_constant) uniform Push {
+    uint n;
+    uint K;
+    uint num_workgroups;   // ceil(n / 256)
+    float eps;
+    float mu;
+    float sigma;
+} pc;
 
+layout (std430, binding = 0) readonly  buffer In_q       { float q_init[]; };
+layout (std430, binding = 1) readonly  buffer In_p       { float p_init[]; };
+layout (std430, binding = 2) readonly  buffer In_mass    { float inv_mass[]; };
+layout (std430, binding = 3) writeonly buffer Out_q      { float q_chain[]; };       // K × n
+layout (std430, binding = 4) writeonly buffer Out_p      { float p_chain[]; };       // K × n
+layout (std430, binding = 5) writeonly buffer Out_grad   { float grad_chain[]; };    // K × n
+layout (std430, binding = 6) writeonly buffer Out_partial{ float partial_logp[]; };  // K × num_workgroups
+
+shared float partial[256];
+
+void main() {
+    // Same per-thread carrying as the single-workgroup version:
+    // each thread handles dimension i = gl_GlobalInvocationID.x
+    // (across all workgroups). The K-loop is identical. The only
+    // difference is the per-step logp reduction:
+    //   - thread 0 of each workgroup writes its partial sum to
+    //     partial_logp[k * num_workgroups + workgroup_id]
+    //   - host sums those partials per K to get final logp_chain[k]
+    //
+    // ... (see leapfrog_chain_normal.comp for the per-step body) ...
+}
+```
+
+The dispatch is `(num_workgroups, 1, 1)` instead of `(1, 1, 1)`.
+
+**Expected outcome**: chain shader works for any `n`, with no
+regression on the `n ≤ 256` fast path (you can keep the
+single-workgroup shader as a separate file and the Linux side
+picks based on `n`).
+
+**~1-2 hours** of GLSL work + one-shot validation against the
+existing single-workgroup shader at `n = 256` (must produce
+identical output).
+
+---
+
+## Task C — `leapfrog_chain_exponential.spv` (Phase 2 stretch)
+
+**Goal**: clone the chain pattern for one more distribution
+family — Exponential (rate λ). Closed-form unconstrained
+gradient: for `q ~ Exp(λ)` on the unconstrained line via
+log-transform `q_uc = log(q)`, the unconstrained log-density is
+`log p(q_uc) = q_uc - λ * exp(q_uc)` (includes Jacobian) and
+`grad_q_uc = 1 - λ * exp(q_uc)`.
+
+This is Phase 2 of the original PLAN_FUSED_LEAPFROG.md scope:
+expand from "univariate Normal only" to common single-RV
+distributions. Exponential is the easiest non-Normal because:
+
+1. Closed-form gradient (no autodiff in the shader)
+2. Single scalar parameter (`λ`) → push constants stay tiny
+3. The transform makes it unconstrained → no constraint
+   handling
+
+```glsl
+#version 450
 layout (local_size_x = 256) in;
 
 layout (push_constant) uniform Push {
     uint  n;
     uint  K;
     float eps;
-    float mu;
-    float sigma;
+    float lambda;   // rate parameter
 } pc;
 
-layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
-layout (std430, binding = 1) readonly  buffer In_p     { float p_init[]; };
-layout (std430, binding = 2) readonly  buffer In_mass  { float inv_mass[]; };
-layout (std430, binding = 3) writeonly buffer Out_q    { float q_chain[]; };    // K × n
-layout (std430, binding = 4) writeonly buffer Out_p    { float p_chain[]; };    // K × n
-layout (std430, binding = 5) writeonly buffer Out_grad { float grad_chain[]; }; // K × n
-layout (std430, binding = 6) writeonly buffer Out_logp { float logp_chain[]; }; // K
+// Same buffer layout as leapfrog_chain_normal: q, p, inv_mass
+// in; q_chain, p_chain, grad_chain, logp_chain out.
 
-shared float partial[256];
-
-const float LOG_2PI_HALF = 0.91893853320467274;  // 0.5 * log(2π)
-
-void main() {
-    uint i   = gl_GlobalInvocationID.x;
-    uint tid = gl_LocalInvocationIndex;
-
-    bool in_bounds = (i < pc.n);
-    float inv_var  = 1.0 / (pc.sigma * pc.sigma);
-    float log_sigma = log(pc.sigma);
-    float n_f = float(pc.n);
-
-    // Each thread carries its own dimension's running state.
-    float qi = in_bounds ? q_init[i] : 0.0;
-    float pi = in_bounds ? p_init[i] : 0.0;
-    float mi = in_bounds ? inv_mass[i] : 0.0;
-
-    for (uint k = 0; k < pc.K; k++) {
-        // Half-step momentum at q
-        float grad_q = in_bounds ? -(qi - pc.mu) * inv_var : 0.0;
-        float p_half = pi - 0.5 * pc.eps * grad_q;
-
-        // Full-step position
-        qi = qi + pc.eps * mi * p_half;
-
-        // Half-step momentum at q_new
-        float grad_qn = in_bounds ? -(qi - pc.mu) * inv_var : 0.0;
-        pi = p_half - 0.5 * pc.eps * grad_qn;
-
-        // Write per-dimension chains
-        if (in_bounds) {
-            q_chain[k * pc.n + i]    = qi;
-            p_chain[k * pc.n + i]    = pi;
-            grad_chain[k * pc.n + i] = grad_qn;
-        }
-
-        // Per-step logp = -0.5 * sum_i z_i² - n*(log(σ) + 0.5*log(2π))
-        // where z_i = (q_i - μ) / σ. Reduce across workgroup.
-        float zi = in_bounds ? (qi - pc.mu) / pc.sigma : 0.0;
-        partial[tid] = zi * zi;
-        barrier();
-
-        for (uint s = 128u; s > 0u; s /= 2u) {
-            if (tid < s) partial[tid] += partial[tid + s];
-            barrier();
-        }
-
-        if (tid == 0u) {
-            logp_chain[k] = -0.5 * partial[0] - n_f * (log_sigma + LOG_2PI_HALF);
-        }
-
-        // Ensure all threads have finished reading partial[] before
-        // the next iteration overwrites it.
-        barrier();
-    }
-}
+// Per-step:
+//   grad_q = 1.0 - pc.lambda * exp(qi);    // unconstrained gradient
+//   p_half = pi - 0.5 * pc.eps * grad_q;
+//   qi     = qi + pc.eps * inv_mass[i] * p_half;
+//   grad_qn = 1.0 - pc.lambda * exp(qi);
+//   pn     = p_half - 0.5 * pc.eps * grad_qn;
+//   logp[k] (per-step reduction over n):
+//     -log(λ) terms cancel in the workgroup sum; the per-element
+//     contribution is qi - lambda * exp(qi). Sum then add
+//     n * log(λ) per step on the host (or here).
 ```
 
-~75 lines including the reduction. Single workgroup of 256
-threads is sufficient for `n ≤ 256` (covers eXMC's typical
-`d ≤ 50` sweet spot). For larger `n`, the per-step reduction
-needs multiple workgroups → second-pass reduction → caller
-handles. **Phase 1.5 assumes `n ≤ 256`** (single workgroup).
-Document this clearly in the C++ shim.
+**The `exp()` call inside the per-step loop** is the only
+substantive difference from the Normal shader. SPIR-V's `exp` is
+fast on NVIDIA hardware. Numerical caution: `exp(qi)` overflows
+for `qi > ~88` (f32). For typical Bayesian models that's not
+reachable, but worth noting.
 
-**Push constants budget**: 20 bytes (well under 128).
+**Optional but recommended**: hand-verify K=2 against a Python
+or Stan reference for one (q_init, p_init, eps, λ) tuple before
+pushing.
 
-**Workgroup-size note**: `local_size_x = 256` is intentional —
-matches the `n_groups = (n + 255) / 256` dispatch math used by
-the Linux side for all our reduction-style shaders. Don't
-change without coordinating with the dispatch code.
+**~3-4 hours** including the math derivation and sanity check.
 
-## Compile + push
+**Why this is stretch**: only useful AFTER the Linux side
+finishes Stage 1.5.4 (variance correctness). If the Normal
+chain has a real semantic bug, the same bug would propagate to
+this shader. Best to wait until Normal is verified, then port
+the pattern.
 
-```
-cd ~/spirit
-glslangValidator -V shaders/leapfrog_chain_normal.comp \
-                 -o shaders/leapfrog_chain_normal.spv
-git add shaders/leapfrog_chain_normal.{comp,spv}
-git commit -m "shaders: leapfrog_chain_normal — K-step fused chain for univariate Normal"
-git push origin feat/fused-leapfrog-chain-normal
-```
+---
 
-If glslang flags anything (likely candidates: shared-memory
-size constraints, barrier placement warnings, or the
-write-only buffer + partial workgroup edge case at `n < 256`),
-fix in place and re-push.
+## Optional ongoing — `reduce_full_f64.spv`
 
-## Sanity check before pushing
-
-Validate that the shader outputs are correct for K=2 by
-hand-stepping. Push constants `{n=4, K=2, eps=0.1, mu=0.0,
-sigma=1.0}`, inputs `q=[1,2,3,4]`, `p=[0.5,0.5,0.5,0.5]`,
-`inv_mass=[1,1,1,1]`:
-
-```
-Step 0:
-  grad_q[i] = -q[i]   (since mu=0, sigma=1)
-  p_half[i] = 0.5 - 0.5*0.1*(-q[i]) = 0.5 + 0.05*q[i]
-  qn[i]     = q[i] + 0.1*p_half[i]
-  grad_qn[i]= -qn[i]
-  pn[i]     = p_half[i] - 0.5*0.1*(-qn[i])
-
-For q[0]=1: p_half=0.55, qn=1.055, grad_qn=-1.055, pn=0.60275
-For q[1]=2: p_half=0.60, qn=2.060, grad_qn=-2.060, pn=0.703
-For q[2]=3: p_half=0.65, qn=3.065, grad_qn=-3.065, pn=0.80325
-For q[3]=4: p_half=0.70, qn=4.070, grad_qn=-4.070, pn=0.9035
-
-logp[0] = -0.5 * (1.055² + 2.060² + 3.065² + 4.070²) - 4 * 0.91893853
-        = -0.5 * (1.113 + 4.244 + 9.394 + 16.564) - 3.6757541
-        = -0.5 * 31.315 - 3.6758
-        = -15.6575 - 3.6758
-        = -19.3333
-
-Step 1: feed q_chain[0,*] back as q, p_chain[0,*] as p, repeat.
-For q[0]=1.055: grad=-1.055, p_half=0.60275-0.5*0.1*(-1.055)=0.65553,
-                 qn=1.055+0.1*0.65553=1.12055, ...
-```
-
-These numbers exactly match the per-step sanity check
-performed on the Phase 1 single-step shader (commit
-`e794c5b`); the chain shader at K=2 must reproduce them across
-two iterations. If not, the loop-body or shared-memory
-reduction has a bug.
-
-## After your push
-
-Linux side will:
-
-1. Vendor the new shader into `nx_vulkan/priv/shaders/leapfrog_chain_normal.spv`.
-2. Add `nxv_leapfrog_chain_normal` to the C++ shim (7-buffer
-   dispatch, 20-byte push constants).
-3. Add `leapfrog_chain_normal` Rust NIF that allocates the four
-   output buffers and returns a 4-tuple of `ResourceArc`s.
-4. Add `Nx.Vulkan.leapfrog_chain_normal/N` and the named-kernel
-   form `Nx.Vulkan.Fast.leapfrog_chain_normal/N`.
-5. Wire the eXMC speculative path: 2-line conditional in
-   `lib/exmc/nuts/tree.ex` `ensure_available/3` (lines 524 + 572).
-6. Correctness test: same posterior recovery vs unfused path
-   on the Normal-Normal model.
-7. Run the acceptance test: Exponential-Poisson under
-   `EXMC_COMPILER=vulkan EXMC_FUSED_LEAPFROG=true`, target
-   ≤ 30 seconds.
-
-The eXMC audit (preserved in PLAN_FUSED_LEAPFROG.md) confirmed
-the speculative path is leapfrog-agnostic at the dispatch
-boundary — no tree builder, NIF, or merge changes required.
-Total Linux-side effort: 1-2 person-days.
-
-## What this DOES NOT need from you
-
-- No C++, Rust, or Elixir wiring.
-- No tests of the eXMC integration.
-- No K-selection logic (eXMC already chooses K = max(32,
-  2 × tree-depth) per iteration).
-
-## Optional parallel work
-
-Same as the previous TODO: `reduce_full_f64.spv` is unblocked
-and useful, picked from `git show 09280e3:248_TODO.md`. Pick
-that up between leapfrog iterations if the chain shader needs
-debug cycles.
+Still unblocked, still useful. Spec at `git show
+09280e3:248_TODO.md`. Closes the only Vulkan f64 full-axis
+reduce gap. Independent of everything above. Pick it up if any
+of A/B/C is in a debug cycle.
 
 ## Cross-reference
 
-- `~/projects/learn_erl/nx_vulkan/PLAN_FUSED_LEAPFROG.md` —
-  full plan, including the Phase 1 lessons-learned and the
-  Phase 1.5 design rationale.
-- `~/projects/learn_erl/nx_vulkan/RESEARCH_FAST_KERNELS.md` —
-  break-even rule that explains why we measured what we
-  measured.
-- `~/projects/learn_erl/pymc/exmc/lib/exmc/nuts/tree.ex` —
-  speculative path (lines 524, 572 are the swap sites).
-- `~/projects/learn_erl/pymc/exmc/lib/exmc/nuts/batched_leapfrog.ex` —
-  the existing XLA batched-leapfrog whose contract the chain
-  shader must match.
-- Phase 1 baseline commit on nx_vulkan: `e794c5b` on
-  `feat/fused-leapfrog-normal`.
-- Spirit Phase 1 shader: commit `4eac8c68` on
-  `feat/fused-leapfrog-normal`.
+- `~/projects/learn_erl/nx_vulkan/PLAN_FUSED_LEAPFROG.md` — full
+  plan, including Phase 1 / Phase 1.5 history and Phase 2 scope.
+- `~/projects/learn_erl/nx_vulkan/CHECKLIST_FUSED_LEAPFROG.md` —
+  Linux-side stage tracker. Stage 1.5.3 (eXMC wiring) is
+  shipped on `pymc/main` at `f78b42733`. Stage 1.5.4 in flight.
+- `~/projects/learn_erl/pymc/www.dataalienist.com/blog-walkable-path.html`
+  — strategic context. Task A is the milestone that makes the
+  central claim measured.
