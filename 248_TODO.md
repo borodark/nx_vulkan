@@ -1,246 +1,205 @@
-# mac-248 — Three concurrent tasks (pick any order)
+# mac-248 — Two parallel tasks (X1 + X2) while Linux side debugs Stage 1.5.4
 
-The chain shader (`leapfrog_chain_normal.spv` at spirit
-`53438dff`) is shipped and working on Linux. Per-step bench at
-K=32 hits 49.7 µs (matches EXLA target). The Linux side is
-working through correctness diagnosis (Stage 1.5.4 — variance
-bias under f32 chain integration).
+The chain shaders (Normal single-WG, Normal multi-WG, Exponential)
+are all wired and smoke-passing. Linux side is in the middle of
+Stage 1.5.4 (variance-bias diagnosis): EXLA reference gives
+var ≈ 1.0 on `x ~ N(0,1)`, the fused chain gives var ≈ 0.5–0.7.
+Either f32 precision drift or a chain integration bug. The H1
+unfused-Vulkan run is in flight to triangulate.
 
-While that diagnosis proceeds, mac-248 has three independent
-useful tasks. **Pick any order; they don't depend on each
-other and don't depend on the Linux-side correctness work
-finishing.**
+Two independent tasks for mac-248 to start NOW. Both are useful
+**regardless** of how H1 lands.
 
-## Layout note
-
-Mac-248 (FreeBSD 15, GT 750M) flat layout:
-`~/spirit/`, `~/nx_vulkan/`. Both have `feat/fused-leapfrog-chain-normal`
-checked out. Pull before each task:
+## Layout
 
 ```
 cd ~/spirit && git pull origin feat/fused-leapfrog-chain-normal
 cd ~/nx_vulkan && git pull origin feat/fused-leapfrog-chain-normal
 ```
 
----
-
-## Task A — FreeBSD bring-up of the chain pipeline
-
-**Goal**: prove the entire fused-chain path works on FreeBSD's
-nvidia driver, not just on the Linux dev box. This is the
-strategic milestone the *walkable-path* blog post listed as
-not-yet-done; a passing run here flips the post's central claim
-from promise to measurement.
-
-**Steps**:
-
-```sh
-# 1. Vulkan loader + headers + glslang (skip if already installed)
-sudo pkg install vulkan-loader vulkan-headers vulkan-tools \
-                 vulkan-validation-layers glslang shaderc
-
-# 2. Confirm the GT 750M is visible
-vulkaninfo --summary | head -30
-
-# 3. Build nx_vulkan against the FreeBSD Vulkan stack
-cd ~/nx_vulkan
-mix deps.get
-mix compile
-# If headers/libs aren't on the default path:
-#   CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib mix compile
-#   RUSTFLAGS="-L /usr/local/lib"
-
-# 4. Run the nx_vulkan test suite — all 152 tests should pass
-mix test
-
-# 5. Run the new chain bench
-mix run -e '
-Nx.Vulkan.init()
-n = 8
-{:ok, q} = Nx.Vulkan.upload_f32(for i <- 1..n, do: i / 10.0)
-{:ok, p} = Nx.Vulkan.upload_f32(for _ <- 1..n, do: 0.3)
-{:ok, m} = Nx.Vulkan.upload_f32(for _ <- 1..n, do: 1.0)
-for _ <- 1..50, do: Nx.Vulkan.leapfrog_chain_normal(q, p, m, 32, 0.05, 0.0, 1.0)
-{us, _} = :timer.tc(fn ->
-  for _ <- 1..200, do: Nx.Vulkan.leapfrog_chain_normal(q, p, m, 32, 0.05, 0.0, 1.0)
-end)
-IO.puts("K=32 on GT 750M FreeBSD: #{Float.round(us / 200, 1)} µs/dispatch = #{Float.round(us / 200 / 32, 2)} µs/step")
-'
-
-# 6. (Optional but valuable) run the K=1, 2, 8, 16, 32, 64, 128 sweep
-#    so we have full per-step numbers on FreeBSD GT 750M to compare
-#    against the Linux RTX 3060 Ti measurements.
-```
-
-**Report back**:
-
-- `vulkaninfo --summary` first 20 lines
-- `Nx.Vulkan.Native.device_name()` and `has_f64()` outputs
-- Any package-install issues, build errors, or test failures
-- The K=32 µs/step number (and the K-sweep if you ran it)
-- `mix test` summary line
-
-If something fails to build, capture the exact error and stop;
-Linux side will adjust the build script. If the build is fine
-but a specific shader fails to load, note which `.spv` and the
-validation error.
-
-**Expected outcome**: 152/0 on the test suite, K=32 on GT 750M
-likely ~150-300 µs/step (Kepler is older than the RTX 3060 Ti
-but Vulkan compute should be in the same order of magnitude).
-A successful run validates that the *walkable-path* claim is
-real.
-
-**~30-60 minutes** including the package install.
+Branch off `feat/fused-leapfrog-chain-normal`. Push to the same
+branch (or a sub-branch — your call).
 
 ---
 
-## Task B — Multi-workgroup chain shader (`leapfrog_chain_normal_lg.comp`)
+## X1 — `leapfrog_chain_normal_f64.spv` (highest strategic value)
 
-**Goal**: lift the `n ≤ 256` constraint of the current chain
-shader. The single-workgroup version uses a workgroup-shared
-reduction for the per-step `logp`. For `n > 256`, multiple
-workgroups need to cooperate via either a second-pass reduction
-or a different algorithm.
+f64 version of the existing single-workgroup chain shader. Same
+logic everywhere, types widened to `double`.
 
-**Approach**: simplest correct version first — write the per-step
-reduction as a *two-pass* shader pair:
+**Why this is the right pick now**:
+- If Stage 1.5.4 concludes "f32 precision is the cause" — this
+  is the immediate fix. Variance bias goes away.
+- If Stage 1.5.4 concludes "chain has a real bug" — still
+  useful: high-precision option for sensitive models, complements
+  the bug fix.
+- Same precedent as `reduce_axis_f64.spv` (already shipped):
+  add the f64 sibling alongside the f32 version, Linux side
+  picks based on tensor type at dispatch time.
 
-1. `leapfrog_chain_normal_lg.comp` — per-workgroup partials. Each
-   workgroup processes 256 dimensions and emits its own per-step
-   partial sum. Output: `q_chain[K,n]`, `p_chain[K,n]`,
-   `grad_chain[K,n]`, `partial_logp[K, num_workgroups]`.
-2. The Linux side does a tiny second-pass sum over the
-   `num_workgroups` partials to get final `logp_chain[K]`. (This
-   is host-side cheap, ~µs.)
+**Shader spec**:
 
 ```glsl
 #version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// f64 sibling of leapfrog_chain_normal.comp. All buffers and
+// arithmetic in f64. Output sizes double (8 bytes per element).
+// Push constants {n, K, eps, mu, sigma} = 4 + 4 + 8 + 8 + 8 = 32 bytes.
+// Single workgroup; n <= 256.
+
 layout (local_size_x = 256) in;
 
 layout (push_constant) uniform Push {
-    uint n;
-    uint K;
-    uint num_workgroups;   // ceil(n / 256)
-    float eps;
-    float mu;
-    float sigma;
+    uint   n;
+    uint   K;
+    double eps;
+    double mu;
+    double sigma;
 } pc;
 
-layout (std430, binding = 0) readonly  buffer In_q       { float q_init[]; };
-layout (std430, binding = 1) readonly  buffer In_p       { float p_init[]; };
-layout (std430, binding = 2) readonly  buffer In_mass    { float inv_mass[]; };
-layout (std430, binding = 3) writeonly buffer Out_q      { float q_chain[]; };       // K × n
-layout (std430, binding = 4) writeonly buffer Out_p      { float p_chain[]; };       // K × n
-layout (std430, binding = 5) writeonly buffer Out_grad   { float grad_chain[]; };    // K × n
-layout (std430, binding = 6) writeonly buffer Out_partial{ float partial_logp[]; };  // K × num_workgroups
+layout (std430, binding = 0) readonly  buffer In_q     { double q_init[]; };
+layout (std430, binding = 1) readonly  buffer In_p     { double p_init[]; };
+layout (std430, binding = 2) readonly  buffer In_mass  { double inv_mass[]; };
+layout (std430, binding = 3) writeonly buffer Out_q    { double q_chain[]; };    // K × n
+layout (std430, binding = 4) writeonly buffer Out_p    { double p_chain[]; };    // K × n
+layout (std430, binding = 5) writeonly buffer Out_grad { double grad_chain[]; }; // K × n
+layout (std430, binding = 6) writeonly buffer Out_logp { double logp_chain[]; }; // K
 
-shared float partial[256];
+shared double partial[256];
+
+const double LOG_2PI_HALF_F64 = 0.91893853320467274LF;
 
 void main() {
-    // Same per-thread carrying as the single-workgroup version:
-    // each thread handles dimension i = gl_GlobalInvocationID.x
-    // (across all workgroups). The K-loop is identical. The only
-    // difference is the per-step logp reduction:
-    //   - thread 0 of each workgroup writes its partial sum to
-    //     partial_logp[k * num_workgroups + workgroup_id]
-    //   - host sums those partials per K to get final logp_chain[k]
-    //
-    // ... (see leapfrog_chain_normal.comp for the per-step body) ...
+    uint i   = gl_GlobalInvocationID.x;
+    uint tid = gl_LocalInvocationIndex;
+
+    bool in_bounds = (i < pc.n);
+    double inv_var  = 1.0LF / (pc.sigma * pc.sigma);
+    double log_sigma = log(pc.sigma);
+    double n_d = double(pc.n);
+
+    double qi = in_bounds ? q_init[i] : 0.0LF;
+    double pi = in_bounds ? p_init[i] : 0.0LF;
+    double mi = in_bounds ? inv_mass[i] : 0.0LF;
+
+    for (uint k = 0; k < pc.K; k++) {
+        double grad_q = in_bounds ? -(qi - pc.mu) * inv_var : 0.0LF;
+        double p_half = pi - 0.5LF * pc.eps * grad_q;
+        qi = qi + pc.eps * mi * p_half;
+        double grad_qn = in_bounds ? -(qi - pc.mu) * inv_var : 0.0LF;
+        pi = p_half - 0.5LF * pc.eps * grad_qn;
+
+        if (in_bounds) {
+            q_chain[k * pc.n + i]    = qi;
+            p_chain[k * pc.n + i]    = pi;
+            grad_chain[k * pc.n + i] = grad_qn;
+        }
+
+        double zi = in_bounds ? (qi - pc.mu) / pc.sigma : 0.0LF;
+        partial[tid] = zi * zi;
+        barrier();
+
+        for (uint s = 128u; s > 0u; s /= 2u) {
+            if (tid < s) partial[tid] += partial[tid + s];
+            barrier();
+        }
+
+        if (tid == 0u) {
+            logp_chain[k] = -0.5LF * partial[0] - n_d * (log_sigma + LOG_2PI_HALF_F64);
+        }
+
+        barrier();
+    }
 }
 ```
 
-The dispatch is `(num_workgroups, 1, 1)` instead of `(1, 1, 1)`.
-
-**Expected outcome**: chain shader works for any `n`, with no
-regression on the `n ≤ 256` fast path (you can keep the
-single-workgroup shader as a separate file and the Linux side
-picks based on `n`).
-
-**~1-2 hours** of GLSL work + one-shot validation against the
-existing single-workgroup shader at `n = 256` (must produce
-identical output).
-
----
-
-## Task C — `leapfrog_chain_exponential.spv` (Phase 2 stretch)
-
-**Goal**: clone the chain pattern for one more distribution
-family — Exponential (rate λ). Closed-form unconstrained
-gradient: for `q ~ Exp(λ)` on the unconstrained line via
-log-transform `q_uc = log(q)`, the unconstrained log-density is
-`log p(q_uc) = q_uc - λ * exp(q_uc)` (includes Jacobian) and
-`grad_q_uc = 1 - λ * exp(q_uc)`.
-
-This is Phase 2 of the original PLAN_FUSED_LEAPFROG.md scope:
-expand from "univariate Normal only" to common single-RV
-distributions. Exponential is the easiest non-Normal because:
-
-1. Closed-form gradient (no autodiff in the shader)
-2. Single scalar parameter (`λ`) → push constants stay tiny
-3. The transform makes it unconstrained → no constraint
-   handling
-
-```glsl
-#version 450
-layout (local_size_x = 256) in;
-
-layout (push_constant) uniform Push {
-    uint  n;
-    uint  K;
-    float eps;
-    float lambda;   // rate parameter
-} pc;
-
-// Same buffer layout as leapfrog_chain_normal: q, p, inv_mass
-// in; q_chain, p_chain, grad_chain, logp_chain out.
-
-// Per-step:
-//   grad_q = 1.0 - pc.lambda * exp(qi);    // unconstrained gradient
-//   p_half = pi - 0.5 * pc.eps * grad_q;
-//   qi     = qi + pc.eps * inv_mass[i] * p_half;
-//   grad_qn = 1.0 - pc.lambda * exp(qi);
-//   pn     = p_half - 0.5 * pc.eps * grad_qn;
-//   logp[k] (per-step reduction over n):
-//     -log(λ) terms cancel in the workgroup sum; the per-element
-//     contribution is qi - lambda * exp(qi). Sum then add
-//     n * log(λ) per step on the host (or here).
+**Compile + push**:
+```sh
+cd ~/spirit
+glslangValidator -V shaders/leapfrog_chain_normal_f64.comp \
+                 -o shaders/leapfrog_chain_normal_f64.spv
+git add shaders/leapfrog_chain_normal_f64.{comp,spv}
+git commit -m "shaders: leapfrog_chain_normal_f64 — f64 sibling of the chain"
+git push origin feat/fused-leapfrog-chain-normal
 ```
 
-**The `exp()` call inside the per-step loop** is the only
-substantive difference from the Normal shader. SPIR-V's `exp` is
-fast on NVIDIA hardware. Numerical caution: `exp(qi)` overflows
-for `qi > ~88` (f32). For typical Bayesian models that's not
-reachable, but worth noting.
+**Sanity check**: at K=2, n=4, q=[1,2,3,4], p=[0.5...], mu=0,
+sigma=1, eps=0.1, the f64 shader should give the same numbers as
+the f32 shader to ~15 decimal places (well past f32's 7-digit
+precision). Specifically `q_chain[0,0]` should be `1.054999999...`
+(vs f32's `1.054999955...`).
 
-**Optional but recommended**: hand-verify K=2 against a Python
-or Stan reference for one (q_init, p_init, eps, λ) tuple before
-pushing.
+**`#extension GL_ARB_gpu_shader_fp64 : enable`**: required for f64
+in compute shaders. The GT 750M (Kepler) supports it; FreeBSD's
+nvidia driver enables it. If glslang flags an issue, the
+fallback is to compile with `--target-env vulkan1.1 --target-spv
+spv1.3` to ensure the right SPIR-V capability bits are emitted.
 
-**~3-4 hours** including the math derivation and sanity check.
+**Push constants 32 bytes**: still well under Vulkan's 128-byte
+spec floor.
 
-**Why this is stretch**: only useful AFTER the Linux side
-finishes Stage 1.5.4 (variance correctness). If the Normal
-chain has a real semantic bug, the same bug would propagate to
-this shader. Best to wait until Normal is verified, then port
-the pattern.
+Effort: **~1 hour** including the sanity check.
 
 ---
 
-## Optional ongoing — `reduce_full_f64.spv`
+## X2 — `reduce_full_f64.spv` (the perennial leftover)
 
-Still unblocked, still useful. Spec at `git show
-09280e3:248_TODO.md`. Closes the only Vulkan f64 full-axis
-reduce gap. Independent of everything above. Pick it up if any
-of A/B/C is in a debug cycle.
+The f64 full-axis reduction shader. Has been deferred 4 times now
+across previous TODO rounds. Closes the only remaining f64 GPU
+gap on the gradient hot path (currently host-falls-back for f64
+determinant + f64 mass-matrix Welford).
+
+**Spec preserved verbatim** at `git show 09280e3:248_TODO.md`
+(prior 248_TODO that introduced this task). Workgroup tree
+reduction in f64; output one f64 per workgroup; op selector
+matches the f32 shader (0=sum, 1=max, 2=min); single-pass
+single-workgroup-per-dispatch.
+
+**Compile + push**:
+```sh
+cd ~/spirit
+glslangValidator -V shaders/reduce_full_f64.comp \
+                 -o shaders/reduce_full_f64.spv
+git add shaders/reduce_full_f64.{comp,spv}
+git commit -m "shaders: reduce_full_f64 — f64 full-axis sum/max/min"
+git push origin feat/fused-leapfrog-chain-normal
+```
+
+Effort: **~30-60 minutes**.
+
+---
+
+## What this DOES NOT need from you
+
+- No Linux-side wiring (C++ shim, Rust NIF, Elixir wrapper, eXMC
+  integration). All Linux side once .spv lands.
+- No correctness against running NUTS — the smoke check at K=2
+  against the f32 shader's numbers is sufficient.
+
+## Order
+
+X1 first. It's the strategic bet that resolves the variance
+question if H1 turns out to be f32. X2 is the comfort task —
+independent, well-spec'd, finite — and a good fallback if X1
+hits a glslang surprise around f64 in compute shaders.
+
+## What NOT to do (yet)
+
+- More distribution families (HalfNormal, StudentT, etc.) — Phase 2
+  is gated on Stage 1.5.4 success.
+- Multi-workgroup f64 chain — single-WG f64 is enough for the
+  variance-question, multi-WG can wait.
+- Shader microbenchmarks — interesting but not actionable yet.
 
 ## Cross-reference
 
 - `~/projects/learn_erl/nx_vulkan/PLAN_FUSED_LEAPFROG.md` — full
-  plan, including Phase 1 / Phase 1.5 history and Phase 2 scope.
+  plan, including the Phase 1 / 1.5 history
 - `~/projects/learn_erl/nx_vulkan/CHECKLIST_FUSED_LEAPFROG.md` —
-  Linux-side stage tracker. Stage 1.5.3 (eXMC wiring) is
-  shipped on `pymc/main` at `f78b42733`. Stage 1.5.4 in flight.
-- `~/projects/learn_erl/pymc/www.dataalienist.com/blog-walkable-path.html`
-  — strategic context. Task A is the milestone that makes the
-  central claim measured.
+  Linux-side stage tracker
+- `~/projects/learn_erl/pymc/exmc/test/nuts/fused_chain_diag_test.exs` —
+  the diagnostic test that pins the variance question. Once X1
+  ships and is wired, this test should flip from
+  `var ≈ 0.5-0.7` to `var ≈ 1.0` under EXMC_COMPILER=vulkan if
+  f32 precision was the cause.
