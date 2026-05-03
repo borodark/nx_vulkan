@@ -1,4 +1,111 @@
-# mac-248 — URGENT X3 (sign fix) + Y queue (Phase 2 distributions)
+# mac-248 — URGENT X3 (sign fix) + Y queue + Z1 (Philox cross-check)
+
+X3 is the priority. Y queue (Y1, Y2, Y3 — Phase 2 distribution
+chains) is unblocked once X3 lands. Z1 below is a small parallel
+audit task: cross-check `random_philox.spv` output against a
+Random123 reference (since the shader's round structure looks
+non-canonical).
+
+---
+
+## Z1 — Philox 2x32-10 cross-check vs Random123 reference
+
+**Background**: a recent audit of `random_philox.spv` flagged
+that the shader's round structure differs from Random123's
+canonical Philox 2x32-10. The shader's per-round mix:
+
+```glsl
+prod = mulhilo(lo, 0xD2511F53u);
+lo = hi ^ prod.y;
+hi = prod.x;
+hi += 0x9E3779B9u;
+```
+
+Random123 canonical (from `Random123/philox.h`):
+```c
+ctr[0] = mulhi(M, ctr[0]_old) ^ key ^ ctr[1]_old;
+ctr[1] = mullo(M, ctr[0]_old);
+key += W;
+```
+
+The shader's variant omits the XOR with `ctr[1]` and applies the
+Weyl bump to `mullo(M, ctr[0])` instead of the key. May still be
+statistically sound, but we should know definitively before
+shipping NUTS samplers that depend on it.
+
+**Task**: run the shader's `random_philox.spv` for `(counter, key)
+= (0..9, 42)` and compare the raw uint32 outputs to Random123's
+`philox2x32_R(10, ...)` reference for the same inputs.
+
+Spirit already vendors Random123 at `~/spirit/thirdparty/Random123/`
+(check via `find ~/spirit/thirdparty -name 'philox.h'` — should
+exist). If yes, write a small C++ test program:
+
+```cpp
+#include <cstdio>
+#include <cstdint>
+#include "Random123/philox.h"
+
+int main() {
+    using philox2x32 = r123::Philox2x32;
+    philox2x32 rng;
+    for (uint32_t i = 0; i < 10; i++) {
+        philox2x32::ctr_type ctr  = {{i, 0}};   // {ctr_lo, ctr_hi}
+        philox2x32::key_type key  = {{42}};
+        philox2x32::ctr_type out  = rng(ctr, key);
+        printf("ctr=%u: out = (0x%08x, 0x%08x)\n", i, out.v[0], out.v[1]);
+    }
+    return 0;
+}
+```
+
+Compile + run:
+```sh
+cd ~/spirit
+g++ -std=c++14 -I thirdparty -O2 -o /tmp/philox_ref \
+    /tmp/philox_ref.cpp
+/tmp/philox_ref
+```
+
+Then dispatch the shader via your existing test harness (or a
+new minimal one) for the same inputs. The shader's output goes
+through `uint_to_uniform` to produce floats in `[0,1)` — to
+compare raw uint32, you'll need to either bypass that step (run
+a debug version that writes the raw uint to the output buffer)
+OR back out the uint from the float (`out_uint = round(f * 2^23)
+<< 9`).
+
+Easiest: temporarily modify `random_philox.comp` to write
+`r.x` directly (uint32) instead of `uint_to_uniform(r.x)` for the
+DIST=0 path, recompile, dispatch, read the buffer as uint32. Then
+revert the temporary edit.
+
+Output format: print as hex, side by side:
+```
+ctr=0: shader=0x........ ref=0x........  MATCH/DIFFER
+ctr=1: ...
+...
+```
+
+**Report back**: the comparison table. If even ctr=0 differs,
+the shader's variant is non-canonical; we'll need to either
+(a) replace with a canonical Random123 implementation, or
+(b) document the variant explicitly and run a separate
+statistical-quality test to verify it's still sound.
+
+If they all match, the shader's round structure is mathematically
+equivalent to Random123's despite the different code shape — a
+nice surprise.
+
+Effort: ~30 min if Random123 is already vendored; ~1 hour if you
+need to fetch and add it.
+
+I'm running an independent Python cross-check on the Linux side
+in parallel; we'll compare findings.
+
+---
+
+
 
 X3 below is the priority. After X3 lands, the Y queue (three new
 chain shaders for HMC-friendly distributions) is ready to start
