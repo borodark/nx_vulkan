@@ -558,6 +558,27 @@ defmodule Nx.Vulkan do
                                     shader_path("normal_logpdf.spv"))
   end
 
+  @doc """
+  Fused NUTS leapfrog step for a univariate Normal log-density model.
+  One Vulkan dispatch per leapfrog step instead of ~12 elementwise
+  dispatches via the IR walker. Returns `{q_new_ref, p_new_ref}`.
+
+  `q_ref`, `p_ref`, `inv_mass_ref` are f32 buffers of identical size.
+  `eps`, `mu`, `sigma` are scalars (f32 in the shader push constants;
+  f64 here for caller convenience). f32 only.
+
+  Closed-form gradient:
+  `grad_q log N(q | mu, sigma) = -(q - mu) / sigma²` — no autodiff
+  machinery in the shader.
+  """
+  def leapfrog_normal(q_ref, p_ref, inv_mass_ref, eps, mu, sigma) do
+    Nx.Vulkan.Native.leapfrog_normal(
+      q_ref, p_ref, inv_mass_ref,
+      eps, mu, sigma,
+      shader_path("leapfrog_normal.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------

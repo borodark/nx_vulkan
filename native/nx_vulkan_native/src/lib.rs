@@ -186,6 +186,19 @@ unsafe extern "C" {
         n: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_leapfrog_normal(
+        q_new: *mut c_void,
+        p_new: *mut c_void,
+        q: *mut c_void,
+        p: *mut c_void,
+        inv_mass: *mut c_void,
+        n: u32,
+        eps: f32,
+        mu: f32,
+        sigma: f32,
+        spv_path: *const c_char,
+    ) -> i32;
 }
 
 // One-shot guard so Elixir can call init/0 idempotently. Vulkan's
@@ -1046,6 +1059,66 @@ fn normal_logpdf<'a>(
 
     let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
     Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
+}
+
+/// leapfrog_normal: fused NUTS leapfrog step for univariate Normal.
+/// Returns {q_new, p_new}. mu, sigma, eps come in as f32 push constants.
+/// q, p, inv_mass must all share byte size (n elements × 4 bytes).
+#[rustler::nif]
+fn leapfrog_normal<'a>(
+    env: Env<'a>,
+    q: ResourceArc<VulkanTensor>,
+    p: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    eps: f64,
+    mu: f64,
+    sigma: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q.n_bytes != p.n_bytes || q.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let n = (q.n_bytes / 4) as u32;
+    let out_bytes = q.n_bytes;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let q_new_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if q_new_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+    let p_new_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if p_new_handle.is_null() {
+        unsafe { nxv_buf_free(q_new_handle) };
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_normal(
+            q_new_handle,
+            p_new_handle,
+            q.handle,
+            p.handle,
+            inv_mass.handle,
+            n,
+            eps as f32,
+            mu as f32,
+            sigma as f32,
+            cstr.as_ptr(),
+        )
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(q_new_handle) };
+        unsafe { nxv_buf_free(p_new_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let q_new = VulkanTensor { handle: q_new_handle, n_bytes: out_bytes };
+    let p_new = VulkanTensor { handle: p_new_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), (ResourceArc::new(q_new), ResourceArc::new(p_new))).encode(env))
 }
 
 /// 4-input fused chain. ops + buf_idx are length-≤8 vecs;

@@ -178,6 +178,16 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
                        unsigned int n,
                        const char* spv_path);
 
+/* leapfrog_normal.spv — fused NUTS leapfrog step for a univariate Normal
+ * log-density model. Replaces ~12 elementwise dispatches via the IR walker
+ * with one dispatch. 5 buffers: q, p, inv_mass (read), q_new, p_new (write).
+ * Push constants carry {uint n; float eps; float mu; float sigma} = 16 bytes. */
+int nxv_leapfrog_normal(void* q_new, void* p_new,
+                         void* q, void* p, void* inv_mass,
+                         unsigned int n,
+                         float eps, float mu, float sigma,
+                         const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

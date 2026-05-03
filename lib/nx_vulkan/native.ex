@@ -100,4 +100,8 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def pool_stats(), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_normal(_q, _p, _inv_mass, _eps, _mu, _sigma, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

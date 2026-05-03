@@ -568,6 +568,43 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
     return dispatch(pipe, bufs, 4, groups, sizeof(unsigned int), &push_n);
 }
 
+int nxv_leapfrog_normal(void* q_new, void* p_new,
+                         void* q, void* p, void* inv_mass,
+                         unsigned int n,
+                         float eps, float mu, float sigma,
+                         const char* spv_path) {
+    if (!q_new || !p_new || !q || !p || !inv_mass || !spv_path) return -1;
+    /* 5 buffers in shader binding order: q, p, inv_mass, q_new, p_new. */
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 5);
+    if (!pipe) return -2;
+
+    VkBuf* buf_q  = (VkBuf*) q;
+    VkBuf* buf_p  = (VkBuf*) p;
+    VkBuf* buf_m  = (VkBuf*) inv_mass;
+    VkBuf* buf_qn = (VkBuf*) q_new;
+    VkBuf* buf_pn = (VkBuf*) p_new;
+
+    VkBuffer bufs[5] = {
+        buf_q->buffer, buf_p->buffer, buf_m->buffer,
+        buf_qn->buffer, buf_pn->buffer
+    };
+
+    /* Push: {uint n; float eps; float mu; float sigma} = 16 bytes. */
+    struct {
+        unsigned int n;
+        float eps;
+        float mu;
+        float sigma;
+    } push;
+    push.n = n;
+    push.eps = eps;
+    push.mu = mu;
+    push.sigma = sigma;
+
+    unsigned int groups = (n + 255) / 256;
+    return dispatch(pipe, bufs, 5, groups, sizeof(push), &push);
+}
+
 int nxv_fused_chain_4(void* out, void* a, void* b, void* c, void* d,
                       unsigned int n, unsigned int n_ops,
                       const unsigned int* ops,
