@@ -1,4 +1,126 @@
-# mac-248 — URGENT X3: sign-flip fix for the four leapfrog shaders
+# mac-248 — URGENT X3 (sign fix) + Y queue (Phase 2 distributions)
+
+X3 below is the priority. After X3 lands, the Y queue (three new
+chain shaders for HMC-friendly distributions) is ready to start
+in any order — Phase 2 of the original PLAN_FUSED_LEAPFROG.md is
+unblocked once the sign fix verifies the chain pattern.
+
+---
+
+## Y queue — Phase 2 distribution chains (after X3)
+
+Each is a clean port of the `leapfrog_chain_normal` template,
+with the gradient formula and push constants swapped. Same K-step
+loop, same shared-memory logp reduction, same I/O contract.
+**All assume the X3 sign fix is in** (use `+` for momentum
+updates, not `-`).
+
+### Y1 — `leapfrog_chain_studentt.spv` (real-valued, no transform)
+
+Student-t with degrees of freedom ν, location μ, scale σ. Defined
+on the entire real line — no transform needed. Closed-form
+gradient.
+
+```
+log p(q | ν, μ, σ) = log Γ((ν+1)/2) - log Γ(ν/2) - 0.5*log(πν)
+                     - log σ - ((ν+1)/2) * log(1 + (1/ν)*((q-μ)/σ)²)
+∇logp = -((ν+1)/(ν*σ²)) * (q - μ) / (1 + (1/ν) * ((q-μ)/σ)²)
+```
+
+In shader form, define `z = (qi - μ)/σ`, then:
+```glsl
+float z = (qi - pc.mu) / pc.sigma;
+float denom = 1.0 + z * z / pc.nu;
+float grad_q = -((pc.nu + 1.0) / (pc.nu * pc.sigma * pc.sigma))
+               * (qi - pc.mu) / denom;
+```
+
+For per-step logp, the constants `log Γ((ν+1)/2) - log Γ(ν/2) -
+0.5*log(πν) - log σ` are fixed at compile time (compute on host
+and pass as a single push constant `logp_const`, additive). The
+per-element contribution is `-((ν+1)/2) * log(denom)`. Per-step
+sum reduces over `n` (workgroup pattern, same as Normal chain).
+
+Push constants: `{n, K, eps, mu, sigma, nu, logp_const}` = 28 bytes.
+
+**Note**: Student-t reduces to Normal as ν→∞ and to Cauchy at
+ν=1; if it works at ν=3 (commonly used) it generalizes.
+
+### Y2 — `leapfrog_chain_cauchy.spv` (real-valued, ν=1 special case)
+
+Cauchy(loc, scale) — special case of Student-t at ν=1. Could be
+derived from Y1 by hardcoding ν=1, but the closed-form is cleaner
+to implement directly:
+
+```
+log p(q | loc, scale) = -log(π * scale) - log(1 + ((q - loc)/scale)²)
+∇logp = -2*(q - loc) / (scale² + (q - loc)²)
+```
+
+Shader:
+```glsl
+float diff = qi - pc.loc;
+float grad_q = -2.0 * diff / (pc.scale * pc.scale + diff * diff);
+```
+
+Per-element logp = `-log(1 + (diff/scale)²)`; constant per step is
+`-n * log(π * scale)` (workgroup-0 includes it).
+
+Push: `{n, K, eps, loc, scale, log_pi_scale}` = 24 bytes.
+
+### Y3 — `leapfrog_chain_halfnormal.spv` (positive, log-transform)
+
+HalfNormal(σ) on the unconstrained line via log-transform
+`q_uc = log(q)`. The unconstrained log-density (with Jacobian) is:
+```
+log p(q_uc | σ) = -log(σ) - 0.5*log(2π/2)            (HalfNormal constant)
+                  + q_uc                              (Jacobian for log transform)
+                  - 0.5 * exp(2*q_uc) / σ²
+∇logp(q_uc) = 1 - exp(2*q_uc) / σ²
+```
+
+Shader:
+```glsl
+float exp_2quc = exp(2.0 * qi);
+float grad_q = 1.0 - exp_2quc / (pc.sigma * pc.sigma);
+```
+
+Per-element logp = `q_uc - 0.5 * exp(2*q_uc)/σ²`; constant per
+step is `-n * (log(σ) + 0.5*log(π))`.
+
+Push: `{n, K, eps, sigma, log_const}` = 20 bytes.
+
+**Numerical caution**: `exp(2*q_uc)` overflows for `q_uc > ~44`
+(f32). For typical priors with σ ~ 1, the unconstrained range is
+small enough; document the limitation.
+
+### Compile + push for any Y task
+
+```sh
+glslangValidator -V shaders/leapfrog_chain_<name>.comp \
+                 -o shaders/leapfrog_chain_<name>.spv
+git add shaders/leapfrog_chain_<name>.{comp,spv}
+git commit -m "shaders: leapfrog_chain_<name> — Phase 2 chain"
+git push origin feat/fused-leapfrog-chain-normal
+```
+
+### What the Y queue DOES NOT need
+
+- Multi-WG variants (single-WG enough until proven otherwise)
+- f64 versions (X1 deferred until f32 chain pattern is fully
+  verified post-X3)
+- Per-distribution wiring on Linux (one PR after Y queue lands)
+
+### Sanity check before pushing each Y shader
+
+For Y1 (Student-t at ν=3, μ=0, σ=1, q=2.0, p=0.5, eps=0.1, K=2):
+hand-derive the first leapfrog step with the corrected sign and
+include the expected output in your commit message. Same protocol
+as we should have followed for the original chain shaders.
+
+---
+
+
 
 **Status update**: Stage 1.5.4 H1 + H2 are settled. The variance
 bias (var ≈ 0.73 vs EXLA reference 1.36) is **not f32 precision**
