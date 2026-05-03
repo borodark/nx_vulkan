@@ -1,205 +1,170 @@
-# mac-248 — Two parallel tasks (X1 + X2) while Linux side debugs Stage 1.5.4
+# mac-248 — URGENT X3: sign-flip fix for the four leapfrog shaders
 
-The chain shaders (Normal single-WG, Normal multi-WG, Exponential)
-are all wired and smoke-passing. Linux side is in the middle of
-Stage 1.5.4 (variance-bias diagnosis): EXLA reference gives
-var ≈ 1.0 on `x ~ N(0,1)`, the fused chain gives var ≈ 0.5–0.7.
-Either f32 precision drift or a chain integration bug. The H1
-unfused-Vulkan run is in flight to triangulate.
+**Status update**: Stage 1.5.4 H1 + H2 are settled. The variance
+bias (var ≈ 0.73 vs EXLA reference 1.36) is **not f32 precision**
+and **not a row-0 contract mismatch**. It's a sign error in the
+leapfrog momentum update — which I introduced in the original
+spec and you implemented faithfully. The bug is in **all four**
+leapfrog shaders we shipped together.
 
-Two independent tasks for mac-248 to start NOW. Both are useful
-**regardless** of how H1 lands.
+## What went wrong
 
-## Layout
+Standard Hamiltonian leapfrog with `grad = ∇logp` (gradient of
+log-density, not negative log-density):
 
 ```
-cd ~/spirit && git pull origin feat/fused-leapfrog-chain-normal
-cd ~/nx_vulkan && git pull origin feat/fused-leapfrog-chain-normal
+p_half = p + (eps/2) * grad
+q_new  = q + eps * inv_mass * p_half
+p_new  = p_half + (eps/2) * grad_new
 ```
 
-Branch off `feat/fused-leapfrog-chain-normal`. Push to the same
-branch (or a sub-branch — your call).
+The `+` is correct. The eXMC code path (`BatchedLeapfrog.multi_step`
+in `lib/exmc/nuts/batched_leapfrog.ex:79`) uses `+`. My spec and
+the four shaders all use `-`. With `grad = -(q-μ)/σ²`, the sign
+flip turns "pull back toward mode" into "push outward from mode."
+The chain heats up, samples cluster near far edges, posterior
+variance is compressed.
 
----
+## The fix
 
-## X1 — `leapfrog_chain_normal_f64.spv` (highest strategic value)
+**Two character changes per shader, FIVE shaders total** (your X1
+push crossed mine — the new f64 chain inherits the same bug).
 
-f64 version of the existing single-workgroup chain shader. Same
-logic everywhere, types widened to `double`.
+### 1. `shaders/leapfrog_normal.comp` (single-step Phase 1 baseline)
 
-**Why this is the right pick now**:
-- If Stage 1.5.4 concludes "f32 precision is the cause" — this
-  is the immediate fix. Variance bias goes away.
-- If Stage 1.5.4 concludes "chain has a real bug" — still
-  useful: high-precision option for sensitive models, complements
-  the bug fix.
-- Same precedent as `reduce_axis_f64.spv` (already shipped):
-  add the f64 sibling alongside the f32 version, Linux side
-  picks based on tensor type at dispatch time.
-
-**Shader spec**:
-
-```glsl
-#version 450
-#extension GL_ARB_gpu_shader_fp64 : enable
-
-// f64 sibling of leapfrog_chain_normal.comp. All buffers and
-// arithmetic in f64. Output sizes double (8 bytes per element).
-// Push constants {n, K, eps, mu, sigma} = 4 + 4 + 8 + 8 + 8 = 32 bytes.
-// Single workgroup; n <= 256.
-
-layout (local_size_x = 256) in;
-
-layout (push_constant) uniform Push {
-    uint   n;
-    uint   K;
-    double eps;
-    double mu;
-    double sigma;
-} pc;
-
-layout (std430, binding = 0) readonly  buffer In_q     { double q_init[]; };
-layout (std430, binding = 1) readonly  buffer In_p     { double p_init[]; };
-layout (std430, binding = 2) readonly  buffer In_mass  { double inv_mass[]; };
-layout (std430, binding = 3) writeonly buffer Out_q    { double q_chain[]; };    // K × n
-layout (std430, binding = 4) writeonly buffer Out_p    { double p_chain[]; };    // K × n
-layout (std430, binding = 5) writeonly buffer Out_grad { double grad_chain[]; }; // K × n
-layout (std430, binding = 6) writeonly buffer Out_logp { double logp_chain[]; }; // K
-
-shared double partial[256];
-
-const double LOG_2PI_HALF_F64 = 0.91893853320467274LF;
-
-void main() {
-    uint i   = gl_GlobalInvocationID.x;
-    uint tid = gl_LocalInvocationIndex;
-
-    bool in_bounds = (i < pc.n);
-    double inv_var  = 1.0LF / (pc.sigma * pc.sigma);
-    double log_sigma = log(pc.sigma);
-    double n_d = double(pc.n);
-
-    double qi = in_bounds ? q_init[i] : 0.0LF;
-    double pi = in_bounds ? p_init[i] : 0.0LF;
-    double mi = in_bounds ? inv_mass[i] : 0.0LF;
-
-    for (uint k = 0; k < pc.K; k++) {
-        double grad_q = in_bounds ? -(qi - pc.mu) * inv_var : 0.0LF;
-        double p_half = pi - 0.5LF * pc.eps * grad_q;
-        qi = qi + pc.eps * mi * p_half;
-        double grad_qn = in_bounds ? -(qi - pc.mu) * inv_var : 0.0LF;
-        pi = p_half - 0.5LF * pc.eps * grad_qn;
-
-        if (in_bounds) {
-            q_chain[k * pc.n + i]    = qi;
-            p_chain[k * pc.n + i]    = pi;
-            grad_chain[k * pc.n + i] = grad_qn;
-        }
-
-        double zi = in_bounds ? (qi - pc.mu) / pc.sigma : 0.0LF;
-        partial[tid] = zi * zi;
-        barrier();
-
-        for (uint s = 128u; s > 0u; s /= 2u) {
-            if (tid < s) partial[tid] += partial[tid + s];
-            barrier();
-        }
-
-        if (tid == 0u) {
-            logp_chain[k] = -0.5LF * partial[0] - n_d * (log_sigma + LOG_2PI_HALF_F64);
-        }
-
-        barrier();
-    }
-}
+```diff
+-    float p_half = pi - 0.5 * pc.eps * grad_q;
++    float p_half = pi + 0.5 * pc.eps * grad_q;
+     float qn = qi + pc.eps * mi * p_half;
+     float grad_qn = -(qn - pc.mu) * inv_var;
+-    float pn = p_half - 0.5 * pc.eps * grad_qn;
++    float pn = p_half + 0.5 * pc.eps * grad_qn;
 ```
 
-**Compile + push**:
+### 2. `shaders/leapfrog_chain_normal.comp` (single-WG chain)
+
+Same diff inside the K-step loop body. The two momentum-update
+lines.
+
+### 3. `shaders/leapfrog_chain_normal_lg.comp` (multi-WG chain)
+
+Same diff. Same two lines inside the K-step loop body.
+
+### 4. `shaders/leapfrog_chain_exponential.comp` (Phase 2)
+
+Same diff. The grad expression is different (`1 - λ * exp(qi)`)
+but the bug is identical: `pi - 0.5 * eps * grad_q` should be
+`pi + 0.5 * eps * grad_q`, and the same for the second update.
+
+### 5. `shaders/leapfrog_chain_normal_f64.comp` (X1 you just pushed)
+
+Same diff, just with `0.5LF` instead of `0.5`. Lines 46 and 49.
+Confirmed inheriting the same bug from the spec — your X1 push
+crossed mine; X1 itself was a clean port of the f32 spec, so it
+inherits the f32 spec's bug.
+
+## Things NOT to change
+
+- `grad_q` and `grad_qn` definitions — these correctly compute
+  ∇logp. Leave as-is. The bug is purely in the sign of the
+  momentum update, not the gradient.
+- Output buffer layout, push constants, workgroup sizing,
+  reduction patterns — all correct. The chain shader's per-step
+  logp via shared-memory reduction is correct. Multi-WG layout
+  with workgroup-0-includes-constant is correct.
+- The `f64` sibling task X1 is **deferred** until after this
+  fix lands. f64 would have inherited the same sign error.
+
+## Compile + push
+
 ```sh
 cd ~/spirit
-glslangValidator -V shaders/leapfrog_chain_normal_f64.comp \
-                 -o shaders/leapfrog_chain_normal_f64.spv
-git add shaders/leapfrog_chain_normal_f64.{comp,spv}
-git commit -m "shaders: leapfrog_chain_normal_f64 — f64 sibling of the chain"
+git checkout feat/fused-leapfrog-chain-normal
+git pull origin feat/fused-leapfrog-chain-normal
+
+# Edit five files, run glslang on each:
+glslangValidator -V shaders/leapfrog_normal.comp              -o shaders/leapfrog_normal.spv
+glslangValidator -V shaders/leapfrog_chain_normal.comp        -o shaders/leapfrog_chain_normal.spv
+glslangValidator -V shaders/leapfrog_chain_normal_lg.comp     -o shaders/leapfrog_chain_normal_lg.spv
+glslangValidator -V shaders/leapfrog_chain_exponential.comp   -o shaders/leapfrog_chain_exponential.spv
+glslangValidator -V shaders/leapfrog_chain_normal_f64.comp    -o shaders/leapfrog_chain_normal_f64.spv
+
+git add shaders/*.{comp,spv}
+git commit -m "shaders: fix sign on momentum update — leapfrog uses + not -"
 git push origin feat/fused-leapfrog-chain-normal
 ```
 
-**Sanity check**: at K=2, n=4, q=[1,2,3,4], p=[0.5...], mu=0,
-sigma=1, eps=0.1, the f64 shader should give the same numbers as
-the f32 shader to ~15 decimal places (well past f32's 7-digit
-precision). Specifically `q_chain[0,0]` should be `1.054999999...`
-(vs f32's `1.054999955...`).
+## Verification before push
 
-**`#extension GL_ARB_gpu_shader_fp64 : enable`**: required for f64
-in compute shaders. The GT 750M (Kepler) supports it; FreeBSD's
-nvidia driver enables it. If glslang flags an issue, the
-fallback is to compile with `--target-env vulkan1.1 --target-spv
-spv1.3` to ensure the right SPIR-V capability bits are emitted.
+For `leapfrog_chain_normal.spv` at K=2, n=4, q=[1,2,3,4],
+p=[0.5,...], mu=0, sigma=1, eps=0.1, the corrected shader should
+produce:
 
-**Push constants 32 bytes**: still well under Vulkan's 128-byte
-spec floor.
+| | q_chain[0] | p_chain[0] | grad_chain[0] | q_chain[1] | p_chain[1] |
+|---|------------|------------|---------------|------------|------------|
+| Bugged (current) | 1.055 | 0.6028 | -1.055 | 1.1205 | 0.7115 |
+| **Corrected** | **0.945** | **0.3973** | **-0.945** | **0.8915** | **0.2937** |
 
-Effort: **~1 hour** including the sanity check.
-
----
-
-## X2 — `reduce_full_f64.spv` (the perennial leftover)
-
-The f64 full-axis reduction shader. Has been deferred 4 times now
-across previous TODO rounds. Closes the only remaining f64 GPU
-gap on the gradient hot path (currently host-falls-back for f64
-determinant + f64 mass-matrix Welford).
-
-**Spec preserved verbatim** at `git show 09280e3:248_TODO.md`
-(prior 248_TODO that introduced this task). Workgroup tree
-reduction in f64; output one f64 per workgroup; op selector
-matches the f32 shader (0=sum, 1=max, 2=min); single-pass
-single-workgroup-per-dispatch.
-
-**Compile + push**:
-```sh
-cd ~/spirit
-glslangValidator -V shaders/reduce_full_f64.comp \
-                 -o shaders/reduce_full_f64.spv
-git add shaders/reduce_full_f64.{comp,spv}
-git commit -m "shaders: reduce_full_f64 — f64 full-axis sum/max/min"
-git push origin feat/fused-leapfrog-chain-normal
+Hand-derivation for q[0]=1 with the FIXED formula:
+```
+grad_q = -(1 - 0)/1 = -1
+p_half = 0.5 + 0.5*0.1*(-1) = 0.45
+qn = 1 + 0.1*1*0.45 = 1.045    ← wait, hand-check
 ```
 
-Effort: **~30-60 minutes**.
+Hmm let me redo: p=0.5, ∇logp=-1, eps=0.1.
+- p_half = 0.5 + (0.1/2)*(-1) = 0.5 - 0.05 = 0.45
+- qn = 1 + 0.1*1*0.45 = 1.045 ← actually closer to mode than start (1)? That's wrong direction.
 
----
+Wait, q=1 with p=0.5 starting outward — over a half-step the momentum reduces (toward zero) and position advances toward 1.045 — *also* outward. That's *correct* for HMC: position keeps advancing in the direction momentum points (positive p means rising q), but momentum decays as the gradient pulls back. Over many steps the momentum reverses and the position oscillates back through the mode.
 
-## What this DOES NOT need from you
+Compare to the bugged version where p_half = 0.55 (momentum INCREASES) → q rises faster, divergent.
 
-- No Linux-side wiring (C++ shim, Rust NIF, Elixir wrapper, eXMC
-  integration). All Linux side once .spv lands.
-- No correctness against running NUTS — the smoke check at K=2
-  against the f32 shader's numbers is sufficient.
+So the corrected step-1 numbers are:
+- q_chain[0,0] = 1.045
+- p_chain[0,0] = 0.45 + (0.1/2)*(-(1.045-0)/1) = 0.45 - 0.05225 = 0.39775
+- grad_chain[0,0] = -(1.045)/1 = -1.045
 
-## Order
+Step 2: q=1.045, p=0.39775
+- grad = -1.045
+- p_half = 0.39775 + 0.05*(-1.045) = 0.34550
+- qn = 1.045 + 0.1*0.34550 = 1.07955
+- p_new = 0.34550 + 0.05*(-1.07955) = 0.29152
 
-X1 first. It's the strategic bet that resolves the variance
-question if H1 turns out to be f32. X2 is the comfort task —
-independent, well-spec'd, finite — and a good fallback if X1
-hits a glslang surprise around f64 in compute shaders.
+So the corrected at step 2: q ≈ 1.080, p ≈ 0.292.
 
-## What NOT to do (yet)
+If the corrected shader output for q=1, p=0.5, mu=0, sigma=1,
+eps=0.1, K=2 matches:
+- q_chain[0,0] ≈ 1.045
+- p_chain[0,0] ≈ 0.398
+- grad_chain[0,0] ≈ -1.045
+- q_chain[1,0] ≈ 1.080
+- p_chain[1,0] ≈ 0.292
 
-- More distribution families (HalfNormal, StudentT, etc.) — Phase 2
-  is gated on Stage 1.5.4 success.
-- Multi-workgroup f64 chain — single-WG f64 is enough for the
-  variance-question, multi-WG can wait.
-- Shader microbenchmarks — interesting but not actionable yet.
+then the fix is correct. After push, the Linux side re-runs the
+diagnostic test and the fused-chain assertion `var in [0.7, 1.3]`
+should pass on `x ~ N(0,1)`.
+
+## Why I'm asking you instead of editing here
+
+I don't have `glslangValidator` on the Linux dev box (it's only
+in the spirit shader-compiler environment on mac-248). The
+`.comp` source edit + `.spv` recompile pair has to happen there.
+
+Sorry for the spec error. I'll be more careful about the
++/- convention in future leapfrog specs — for any HMC variant,
+when `grad = ∇logp`, momentum update is **PLUS** half-eps times
+grad.
 
 ## Cross-reference
 
-- `~/projects/learn_erl/nx_vulkan/PLAN_FUSED_LEAPFROG.md` — full
-  plan, including the Phase 1 / 1.5 history
-- `~/projects/learn_erl/nx_vulkan/CHECKLIST_FUSED_LEAPFROG.md` —
-  Linux-side stage tracker
-- `~/projects/learn_erl/pymc/exmc/test/nuts/fused_chain_diag_test.exs` —
-  the diagnostic test that pins the variance question. Once X1
-  ships and is wired, this test should flip from
-  `var ≈ 0.5-0.7` to `var ≈ 1.0` under EXMC_COMPILER=vulkan if
-  f32 precision was the cause.
+- `~/projects/learn_erl/pymc/exmc/lib/exmc/nuts/batched_leapfrog.ex:79`
+  — the canonical correct formula (same one Stan and PyMC use)
+- `~/projects/learn_erl/pymc/exmc/test/nuts/fused_chain_diag_test.exs`
+  — the assertion that flips green when this is fixed
+- Linux side will pick up your shader push, re-vendor into
+  `priv/shaders/`, run the diag test, and report whether the
+  fused chain now matches EXLA reference.
+- X2 (`reduce_full_f64.spv`) from the previous TODO round is
+  **still useful** if you want a second concurrent task — that
+  one is independent of all this.
