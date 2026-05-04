@@ -1,4 +1,44 @@
-# mac-248 — R1: replay the fair race on FreeBSD
+# mac-248 — R1: replay the fair race on FreeBSD (**BLOCKED — do not start yet**)
+
+> **Status as of 2026-05-04**: R1 is **on hold** until the Linux
+> side closes the multivariate-IR bug in the race script.
+> See "Blocking issue" below. The Linux-side race is currently
+> running with the d=1 subset only, which produces valid but
+> incomplete data. Don't run anything on mac-248 yet — when the
+> Linux script + race results are clean across all 7 cells, this
+> TODO will be marked `READY` in a follow-up commit. Pull then.
+
+## Blocking issue (Linux-side fix needed first)
+
+The race script `pymc/exmc/bench/fair_race.exs` (commit
+`6360abc37`) was written to cover 7 cells: Normal at d=1/8/50,
+Exponential, StudentT, HalfNormal, Weibull. The d=8 and d=50
+multivariate Normal cells trigger an `Nx.Defn.Grad` shape error:
+
+```
+** (ArgumentError) cannot reshape, current shape {8}
+   is not compatible with new shape {}
+   (nx 0.10.0) lib/nx/defn/grad.ex:22: Nx.Defn.Grad.transform/3
+```
+
+This is an eXMC IR / gradient-trace question, not a chain-shader
+question. The chain shaders themselves handle any n ≤ 256 (and
+the multi-WG variants handle n > 256). Linux side currently has
+the multivariate cells DROPPED from the script as a workaround
+to keep the d=1 race informative.
+
+The R1 race was supposed to be the cross-platform validation of
+the chain shader's speedup. With only d=1 cells, the question
+"does the chain shader's win scale with d" is unanswered. The
+multivariate cells are the most interesting ones because they
+exercise more parallelism per dispatch — exactly where the
+chain shader is supposed to excel.
+
+So R1 stays blocked until: (a) the multivariate IR bug is fixed
+on the Linux side, OR (b) the race scope is formally narrowed
+to d=1 only and this TODO is updated to reflect that.
+
+---
 
 ## Recent state — Y4 closed
 
