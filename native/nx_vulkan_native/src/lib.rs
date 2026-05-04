@@ -275,6 +275,15 @@ unsafe extern "C" {
         spv_path: *const c_char,
     ) -> i32;
 
+    fn nxv_leapfrog_chain_weibull(
+        q_chain: *mut c_void, p_chain: *mut c_void,
+        grad_chain: *mut c_void, logp_chain: *mut c_void,
+        q_init: *mut c_void, p_init: *mut c_void, inv_mass: *mut c_void,
+        n: u32, K: u32,
+        eps: f32, k: f32, lambda: f32, logp_const: f32,
+        spv_path: *const c_char,
+    ) -> i32;
+
     fn nxv_leapfrog_chain_normal_f64(
         q_chain: *mut c_void, p_chain: *mut c_void,
         grad_chain: *mut c_void, logp_chain: *mut c_void,
@@ -1571,6 +1580,43 @@ fn leapfrog_chain_halfnormal<'a>(
             q_init.handle, p_init.handle, inv_mass.handle,
             n, k,
             eps as f32, sigma as f32, log_const as f32,
+            cstr.as_ptr(),
+        )
+    };
+    encode_chain_result(env, rc, qh, ph, gh, lh, chain_bytes, logp_bytes)
+}
+
+#[rustler::nif]
+fn leapfrog_chain_weibull<'a>(
+    env: Env<'a>,
+    q_init: ResourceArc<VulkanTensor>,
+    p_init: ResourceArc<VulkanTensor>,
+    inv_mass: ResourceArc<VulkanTensor>,
+    k: u32,
+    eps: f64, weibull_k: f64, lambda: f64, logp_const: f64,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 { return Ok((atoms::error(), atoms::bad_op()).encode(env)); }
+
+    let n = (q_init.n_bytes / 4) as u32;
+    let chain_bytes = q_init.n_bytes * (k as u64);
+    let logp_bytes = (k as u64) * 4;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+    let (qh, ph, gh, lh) = match alloc_4(chain_bytes, chain_bytes, chain_bytes, logp_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok((atoms::error(), atoms::alloc_failed()).encode(env)),
+    };
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_leapfrog_chain_weibull(
+            qh, ph, gh, lh,
+            q_init.handle, p_init.handle, inv_mass.handle,
+            n, k,
+            eps as f32, weibull_k as f32, lambda as f32, logp_const as f32,
             cstr.as_ptr(),
         )
     };

@@ -132,4 +132,8 @@ defmodule Nx.Vulkan.Native do
   @doc false
   def leapfrog_chain_normal_f64(_q, _p, _inv_mass, _k, _eps, _mu, _sigma, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def leapfrog_chain_weibull(_q, _p, _inv_mass, _k, _eps, _weibull_k, _lambda, _logp_const, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

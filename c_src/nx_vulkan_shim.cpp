@@ -705,6 +705,32 @@ int nxv_leapfrog_chain_cauchy(void* q_chain, void* p_chain,
     return dispatch(pipe, bufs, 7, 1, sizeof(push), &push);
 }
 
+int nxv_leapfrog_chain_weibull(void* q_chain, void* p_chain,
+                                void* grad_chain, void* logp_chain,
+                                void* q_init, void* p_init, void* inv_mass,
+                                unsigned int n, unsigned int K,
+                                float eps, float k, float lambda,
+                                float logp_const,
+                                const char* spv_path) {
+    if (!q_chain || !p_chain || !grad_chain || !logp_chain ||
+        !q_init || !p_init || !inv_mass || !spv_path) return -1;
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 7);
+    if (!pipe) return -2;
+
+    VkBuffer bufs[7] = {
+        ((VkBuf*) q_init)->buffer, ((VkBuf*) p_init)->buffer, ((VkBuf*) inv_mass)->buffer,
+        ((VkBuf*) q_chain)->buffer, ((VkBuf*) p_chain)->buffer,
+        ((VkBuf*) grad_chain)->buffer, ((VkBuf*) logp_chain)->buffer
+    };
+
+    /* Push: {n, K, eps, k, lambda, logp_const} = 24 bytes. */
+    struct { unsigned int n, K; float eps, k, lambda, logp_const; } push;
+    push.n = n; push.K = K; push.eps = eps;
+    push.k = k; push.lambda = lambda; push.logp_const = logp_const;
+
+    return dispatch(pipe, bufs, 7, 1, sizeof(push), &push);
+}
+
 int nxv_leapfrog_chain_halfnormal(void* q_chain, void* p_chain,
                                    void* grad_chain, void* logp_chain,
                                    void* q_init, void* p_init, void* inv_mass,

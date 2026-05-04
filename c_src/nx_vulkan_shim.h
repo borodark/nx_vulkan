@@ -256,6 +256,19 @@ int nxv_leapfrog_chain_halfnormal(void* q_chain, void* p_chain,
                                    float eps, float sigma, float log_const,
                                    const char* spv_path);
 
+/* leapfrog_chain_weibull.spv — Weibull(k, lambda) on the
+ * unconstrained line via log-transform. Closed-form gradient
+ * `k * (1 - (exp(q_uc)/lambda)^k)`; logp_const carries
+ * `n * (log(k) - k * log(lambda))` precomputed by the host.
+ * Push constants {n, K, eps, k, lambda, logp_const} = 24 bytes. */
+int nxv_leapfrog_chain_weibull(void* q_chain, void* p_chain,
+                                void* grad_chain, void* logp_chain,
+                                void* q_init, void* p_init, void* inv_mass,
+                                unsigned int n, unsigned int K,
+                                float eps, float k, float lambda,
+                                float logp_const,
+                                const char* spv_path);
+
 /* leapfrog_chain_normal_f64.spv — f64 sibling of leapfrog_chain_normal.
  * All buffers double; output sizes are K * n * 8 (q, p, grad) and K * 8 (logp).
  * Push constants {n, K, eps, mu, sigma} = 32 bytes (eps/mu/sigma as double). */

@@ -708,6 +708,23 @@ defmodule Nx.Vulkan do
     )
   end
 
+  @doc """
+  Phase 2 chain shader for Weibull(k, lambda) on the unconstrained
+  line via log-transform `q_uc = log(q)`. Returns 4-tuple of refs.
+
+  Closed-form gradient: `∇logp(q_uc) = k · (1 − (exp(q_uc)/lambda)^k)`.
+  `logp_const` is precomputed as `n · (log(k) − k · log(lambda))` —
+  no `lgamma` in the shader.
+  """
+  def leapfrog_chain_weibull(q_ref, p_ref, inv_mass_ref, k_steps, eps, weibull_k, lambda, logp_const)
+      when is_integer(k_steps) and k_steps > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_weibull(
+      q_ref, p_ref, inv_mass_ref,
+      k_steps, eps, weibull_k, lambda, logp_const,
+      shader_path("leapfrog_chain_weibull.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------
