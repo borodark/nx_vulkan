@@ -19,7 +19,15 @@ Nx today has two GPU backends:
 On FreeBSD with NVIDIA hardware, neither works. Vulkan is the third
 backend, and the only one that runs on FreeBSD. The accompanying
 blog post is [*The GPU That Doesn't Need
-CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html).
+CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html); the
+follow-on [*A Walkable Path Under the Mountain*](http://www.dataalienist.com/blog-walkable-path.html)
+covers the eXMC + zed integration.
+
+**FreeBSD bring-up status:** the full pipeline (NIF, shaders, fused
+leapfrog chain) is verified on FreeBSD 15 with an NVIDIA GT 750M
+(2013 Mac Pro hardware). `pkg install vulkan-loader vulkan-headers
+vulkan-tools glslang shaderc`, then `mix compile && mix test` —
+clean. No special build flags required.
 
 ## Architecture
 
@@ -66,11 +74,15 @@ nx_vulkan/
 - Erlang/OTP 26+, Elixir 1.17+
 - Rust 1.78+ (see toolchain note below)
 - C++ compiler (clang or gcc, C++14)
-- Vulkan SDK (`libvulkan-dev` on Debian/Ubuntu;
-  `pkg install vulkan-headers vulkan-loader` on FreeBSD)
-- Spirit checkout at `~/projects/learn_erl/spirit/` with the
-  `feature/vulkan-backend` branch — `build.rs` path-deps it.
-  Override via `SPIRIT_DIR=/path/to/spirit mix compile`.
+- Vulkan SDK
+  - Debian/Ubuntu: `apt install libvulkan-dev vulkan-tools`
+  - FreeBSD: `pkg install vulkan-loader vulkan-headers vulkan-tools glslang shaderc`
+- Spirit's Vulkan backend is **vendored** under `c_src/spirit/`
+  (see [`c_src/spirit/VENDOR.md`](c_src/spirit/VENDOR.md) for the
+  pinned upstream commit). No external Spirit checkout required.
+  Set `SPIRIT_DIR=/path/to/spirit` only as a development override
+  to refresh `priv/shaders/*.spv` from a local Spirit checkout
+  on each build (mac-248's iteration workflow).
 
 ### Build
 

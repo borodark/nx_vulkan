@@ -178,6 +178,94 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
                        unsigned int n,
                        const char* spv_path);
 
+/* leapfrog_normal.spv — fused NUTS leapfrog step for a univariate Normal
+ * log-density model. Replaces ~12 elementwise dispatches via the IR walker
+ * with one dispatch. 5 buffers: q, p, inv_mass (read), q_new, p_new (write).
+ * Push constants carry {uint n; float eps; float mu; float sigma} = 16 bytes. */
+int nxv_leapfrog_normal(void* q_new, void* p_new,
+                         void* q, void* p, void* inv_mass,
+                         unsigned int n,
+                         float eps, float mu, float sigma,
+                         const char* spv_path);
+
+/* leapfrog_chain_normal.spv — fused chain of K NUTS leapfrog steps for a
+ * univariate Normal log-density model. Output buffers q_chain, p_chain,
+ * grad_chain are each K*n floats; logp_chain is K floats (per-step
+ * reduction). Assumes n <= 256 (single workgroup). 7 buffers total
+ * (3 read + 4 write). Push constants {n, K, eps, mu, sigma} = 20 bytes.
+ * Caller pre-allocates the four output buffers. */
+int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
+                               void* grad_chain, void* logp_chain,
+                               void* q_init, void* p_init, void* inv_mass,
+                               unsigned int n, unsigned int K,
+                               float eps, float mu, float sigma,
+                               const char* spv_path);
+
+/* leapfrog_chain_normal_lg.spv — multi-workgroup variant. Lifts the
+ * n <= 256 constraint. partial_logp output is K * num_workgroups floats
+ * (per-workgroup partials per step); caller sums num_workgroups partials
+ * to get the per-step logp. num_workgroups = ceil(n / 256). Workgroup 0
+ * includes the constant -n*(log(sigma) + 0.5*log(2pi)) so the host sum
+ * gives final logp directly. Push constants 24 bytes. */
+int nxv_leapfrog_chain_normal_lg(void* q_chain, void* p_chain,
+                                  void* grad_chain, void* partial_logp,
+                                  void* q_init, void* p_init, void* inv_mass,
+                                  unsigned int n, unsigned int K,
+                                  unsigned int num_workgroups,
+                                  float eps, float mu, float sigma,
+                                  const char* spv_path);
+
+/* leapfrog_chain_exponential.spv — Phase 2 sibling of leapfrog_chain_normal.
+ * Same I/O shape (4 output buffers, K * n + K). Single-workgroup (n<=256).
+ * Closed-form unconstrained gradient: grad_q_uc = 1 - lambda * exp(q_uc).
+ * Push constants {n, K, eps, lambda} = 16 bytes. */
+int nxv_leapfrog_chain_exponential(void* q_chain, void* p_chain,
+                                    void* grad_chain, void* logp_chain,
+                                    void* q_init, void* p_init, void* inv_mass,
+                                    unsigned int n, unsigned int K,
+                                    float eps, float lambda,
+                                    const char* spv_path);
+
+/* leapfrog_chain_studentt.spv — Phase 2: real-valued Student-t with df nu.
+ * Push constants {n, K, eps, mu, sigma, nu, logp_const} = 28 bytes. */
+int nxv_leapfrog_chain_studentt(void* q_chain, void* p_chain,
+                                 void* grad_chain, void* logp_chain,
+                                 void* q_init, void* p_init, void* inv_mass,
+                                 unsigned int n, unsigned int K,
+                                 float eps, float mu, float sigma,
+                                 float nu, float logp_const,
+                                 const char* spv_path);
+
+/* leapfrog_chain_cauchy.spv — Phase 2: real-valued Cauchy(loc, scale).
+ * Push constants {n, K, eps, loc, scale, log_pi_scale} = 24 bytes. */
+int nxv_leapfrog_chain_cauchy(void* q_chain, void* p_chain,
+                               void* grad_chain, void* logp_chain,
+                               void* q_init, void* p_init, void* inv_mass,
+                               unsigned int n, unsigned int K,
+                               float eps, float loc, float scale,
+                               float log_pi_scale,
+                               const char* spv_path);
+
+/* leapfrog_chain_halfnormal.spv — Phase 2: positive HalfNormal(sigma)
+ * on the unconstrained line via log-transform.
+ * Push constants {n, K, eps, sigma, log_const} = 20 bytes. */
+int nxv_leapfrog_chain_halfnormal(void* q_chain, void* p_chain,
+                                   void* grad_chain, void* logp_chain,
+                                   void* q_init, void* p_init, void* inv_mass,
+                                   unsigned int n, unsigned int K,
+                                   float eps, float sigma, float log_const,
+                                   const char* spv_path);
+
+/* leapfrog_chain_normal_f64.spv — f64 sibling of leapfrog_chain_normal.
+ * All buffers double; output sizes are K * n * 8 (q, p, grad) and K * 8 (logp).
+ * Push constants {n, K, eps, mu, sigma} = 32 bytes (eps/mu/sigma as double). */
+int nxv_leapfrog_chain_normal_f64(void* q_chain, void* p_chain,
+                                   void* grad_chain, void* logp_chain,
+                                   void* q_init, void* p_init, void* inv_mass,
+                                   unsigned int n, unsigned int K,
+                                   double eps, double mu, double sigma,
+                                   const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

@@ -558,6 +558,156 @@ defmodule Nx.Vulkan do
                                     shader_path("normal_logpdf.spv"))
   end
 
+  @doc """
+  Fused NUTS leapfrog step for a univariate Normal log-density model.
+  One Vulkan dispatch per leapfrog step instead of ~12 elementwise
+  dispatches via the IR walker. Returns `{q_new_ref, p_new_ref}`.
+
+  `q_ref`, `p_ref`, `inv_mass_ref` are f32 buffers of identical size.
+  `eps`, `mu`, `sigma` are scalars (f32 in the shader push constants;
+  f64 here for caller convenience). f32 only.
+
+  Closed-form gradient:
+  `grad_q log N(q | mu, sigma) = -(q - mu) / sigma²` — no autodiff
+  machinery in the shader.
+  """
+  def leapfrog_normal(q_ref, p_ref, inv_mass_ref, eps, mu, sigma) do
+    Nx.Vulkan.Native.leapfrog_normal(
+      q_ref, p_ref, inv_mass_ref,
+      eps, mu, sigma,
+      shader_path("leapfrog_normal.spv")
+    )
+  end
+
+  @doc """
+  Fused **K-step chain** of NUTS leapfrog steps for a univariate Normal
+  log-density model. Performs `k` consecutive leapfrog steps in one Vulkan
+  dispatch and returns all `k` intermediate states:
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+
+  - `q_chain`, `p_chain`, `grad_chain` — each `k * n` f32 elements,
+    laid out row-major (`step k, dimension i` at offset `k*n + i`).
+  - `logp_chain` — `k` f32 elements; per-step log-density reduced
+    across the `n` dimensions.
+
+  Per-step amortized cost is `(per_dispatch_baseline + k * compute) / k`.
+  At `k=32` on the dev box this is ~16 µs per leapfrog step vs ~537 µs
+  for the single-step `leapfrog_normal` and ~6000 µs for the unfused
+  IR-walker path.
+
+  Constraints (Phase 1.5):
+  - `n ≤ 256` (single workgroup; multi-workgroup version is future work).
+  - f32 only; long chains (`k ≥ 64`) may accumulate measurable drift
+    relative to a f64 reference.
+  - Univariate Normal log-density only — closed-form gradient
+    `−(q − mu) / sigma²` baked into the shader.
+  """
+  def leapfrog_chain_normal(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal.spv")
+    )
+  end
+
+  @doc """
+  Multi-workgroup variant of `leapfrog_chain_normal/7` for `n > 256`.
+  Returns `{q_chain_ref, p_chain_ref, grad_chain_ref, partial_logp_ref}`
+  where `partial_logp_ref` is a buffer of `K * num_workgroups` f32 floats
+  (per-workgroup partial sums per step). The caller does the per-step sum
+  across the `num_workgroups` axis to recover the final per-step logp.
+  Workgroup 0 includes the constant term so the host sum gives final logp
+  directly.
+  """
+  def leapfrog_chain_normal_lg(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal_lg(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal_lg.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 sibling of `leapfrog_chain_normal/7` for the Exponential(lambda)
+  family on the unconstrained line (log-transform). Same I/O shape: returns
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+
+  Closed-form unconstrained gradient: `grad_q_uc = 1 - lambda * exp(q_uc)`.
+  `n ≤ 256` (single workgroup); see `leapfrog_chain_normal_lg/7` for the
+  multi-workgroup pattern when an `_lg` exponential variant is needed.
+  """
+  def leapfrog_chain_exponential(q_ref, p_ref, inv_mass_ref, k, eps, lambda)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_exponential(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, lambda,
+      shader_path("leapfrog_chain_exponential.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 chain shader for Student-t(ν, μ, σ). Returns 4-tuple
+  `{q_chain_ref, p_chain_ref, grad_chain_ref, logp_chain_ref}`.
+  `logp_const` should be precomputed by the caller as
+  `log Γ((ν+1)/2) − log Γ(ν/2) − ½ log(πν) − log σ`.
+  """
+  def leapfrog_chain_studentt(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma, nu, logp_const)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_studentt(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma, nu, logp_const,
+      shader_path("leapfrog_chain_studentt.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 chain shader for Cauchy(loc, scale). Returns 4-tuple of refs.
+  `log_pi_scale` is precomputed as `−log(π · scale)`.
+  """
+  def leapfrog_chain_cauchy(q_ref, p_ref, inv_mass_ref, k, eps, loc, scale, log_pi_scale)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_cauchy(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, loc, scale, log_pi_scale,
+      shader_path("leapfrog_chain_cauchy.spv")
+    )
+  end
+
+  @doc """
+  Phase 2 chain shader for HalfNormal(σ) on the unconstrained line
+  via log-transform `q_uc = log(q)`. Returns 4-tuple of refs.
+  `log_const` is precomputed as `−log(σ) − ½ log(π)`.
+
+  **Numerical caveat**: the gradient `1 − exp(2·q_uc)/σ²` overflows
+  in f32 when `q_uc > ~44`; for σ ≈ 1 the unconstrained range is
+  comfortably small.
+  """
+  def leapfrog_chain_halfnormal(q_ref, p_ref, inv_mass_ref, k, eps, sigma, log_const)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_halfnormal(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, sigma, log_const,
+      shader_path("leapfrog_chain_halfnormal.spv")
+    )
+  end
+
+  @doc """
+  f64 sibling of `leapfrog_chain_normal/7`. Same I/O contract but all
+  buffers use 8 bytes per element (input refs must be f64-typed Vulkan
+  tensors). Useful when chain integration needs higher precision than
+  f32 (e.g., long chains, sensitive log-densities).
+  """
+  def leapfrog_chain_normal_f64(q_ref, p_ref, inv_mass_ref, k, eps, mu, sigma)
+      when is_integer(k) and k > 0 do
+    Nx.Vulkan.Native.leapfrog_chain_normal_f64(
+      q_ref, p_ref, inv_mass_ref,
+      k, eps, mu, sigma,
+      shader_path("leapfrog_chain_normal_f64.spv")
+    )
+  end
+
   # ------------------------------------------------------------------
   # Phase 2 — Nx.Defn JIT integration
   # ------------------------------------------------------------------
