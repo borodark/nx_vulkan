@@ -93,6 +93,36 @@ defmodule Nx.Vulkan.Compiler do
     expr = trace(fun, vars)
     var_ids = collect_var_ids(vars)
 
+    do_compile(expr, var_ids, key, vars, fun, opts)
+  end
+
+  # G1: tuple-shaped output (e.g. {loss, grad} from value_and_grad,
+  # ELBO from ADVI). Each element gets its own try_codegen pass.
+  # If ALL elements codegen successfully, build a multi-output
+  # compiled function that dispatches each per call and packages
+  # the results as a tuple. If any element fails, fall through
+  # to Evaluator for the whole expression — can't mix codegen
+  # for some outputs and Evaluator for others.
+  defp do_compile(tuple, var_ids, key, vars, fun, opts)
+       when is_tuple(tuple) and tuple_size(tuple) >= 2 do
+    elements = Tuple.to_list(tuple)
+
+    case try_codegen_all(elements, var_ids) do
+      {:ok, dispatchers} ->
+        if System.get_env("NXV_FUSE_DEBUG") == "1" do
+          IO.puts(
+            "[Nx.Vulkan.Compiler] CODEGEN tuple: #{tuple_size(tuple)} outputs"
+          )
+        end
+
+        wrap_tuple(dispatchers)
+
+      :unsupported ->
+        Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+    end
+  end
+
+  defp do_compile(expr, var_ids, key, vars, fun, opts) do
     case detect_chain(expr, var_ids) do
       {:ok, {:fused_4in, ops_with_buf, a_id, leaf_to_buf, _vars_list}, [], _, _} ->
         if System.get_env("NXV_FUSE_DEBUG") == "1" do
@@ -139,11 +169,35 @@ defmodule Nx.Vulkan.Compiler do
   # --- Codegen path ----------------------------------------------------
 
   defp try_codegen(expr, var_ids) do
+    case codegen_dispatcher(expr, var_ids) do
+      {:ok, dispatcher} -> {:ok, wrap_single(dispatcher)}
+      :unsupported -> :unsupported
+    end
+  end
+
+  # Try codegen on each element of a tuple. Returns {:ok, [dispatcher_per_element]}
+  # iff every element succeeds; :unsupported as soon as any element fails.
+  defp try_codegen_all(elements, var_ids) do
+    Enum.reduce_while(elements, {:ok, []}, fn element, {:ok, acc} ->
+      case codegen_dispatcher(element, var_ids) do
+        {:ok, dispatcher} -> {:cont, {:ok, [dispatcher | acc]}}
+        :unsupported -> {:halt, :unsupported}
+      end
+    end)
+    |> case do
+      {:ok, rev} -> {:ok, Enum.reverse(rev)}
+      :unsupported -> :unsupported
+    end
+  end
+
+  # Returns a dispatcher: `fn params -> result_tensor end` (no list/tuple wrapping).
+  # Wrapping for the Defn callback contract is the caller's job.
+  defp codegen_dispatcher(expr, var_ids) do
     case Nx.Vulkan.Codegen.analyze(expr, var_ids) do
       {:fused, glsl, metadata} ->
         case Nx.Vulkan.Codegen.compile_cached(glsl) do
           {:ok, spv_path} ->
-            {:ok, compile_codegen_dispatch(spv_path, metadata, expr, var_ids)}
+            {:ok, build_dispatcher(spv_path, metadata, expr, var_ids)}
 
           {:error, _reason} ->
             :unsupported
@@ -154,7 +208,20 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
-  defp compile_codegen_dispatch(spv_path, metadata, expr, var_ids) do
+  defp wrap_single(dispatcher) do
+    fn [params] -> [dispatcher.(params)] end
+  end
+
+  defp wrap_tuple(dispatchers) do
+    fn [params] ->
+      tuple = dispatchers |> Enum.map(& &1.(params)) |> List.to_tuple()
+      [tuple]
+    end
+  end
+
+  # Inner dispatcher: returns a single-result function `fn params -> tensor end`.
+  # Caller wraps with wrap_single (one output) or wrap_tuple (multi-output).
+  defp build_dispatcher(spv_path, metadata, expr, var_ids) do
     out_shape = expr.shape
     out_type = expr.type
     _n_inputs = length(metadata.bindings)
@@ -171,7 +238,7 @@ defmodule Nx.Vulkan.Compiler do
       |> Enum.sort_by(fn {_id, idx} -> idx end)
       |> Enum.map(fn {id, _idx} -> Map.fetch!(id_to_pos, id) end)
 
-    fn [params] ->
+    fn params ->
       # Resolve thunks to tensors
       input_tensors = Enum.map(binding_positions, fn pos -> Enum.fetch!(params, pos).() end)
 
@@ -246,7 +313,7 @@ defmodule Nx.Vulkan.Compiler do
                   }
               end
 
-            [result]
+            result
 
           {:error, _} ->
             raise "Nx.Vulkan.Codegen dispatch failed"
