@@ -270,6 +270,47 @@ defmodule Nx.Vulkan.Codegen do
     end
   end
 
+  @doc """
+  Split a mixed expression tree into stages at non-fusable boundaries.
+
+  Returns a list of `{:elementwise | :library | :reduce, expr, deps}`
+  tuples in execution order. Each stage can be compiled independently;
+  the dispatcher executes them sequentially, passing intermediate
+  results.
+  """
+  @spec split_stages(Expr.t()) :: [stage()]
+  def split_stages(%T{data: %Expr{}} = expr) do
+    dag = linearize(expr, %{})
+
+    # Walk the DAG bottom-up, grouping consecutive fusable ops.
+    # A non-fusable op (dot, conv, reduce) creates a stage boundary.
+    dag
+    |> Enum.reduce([], fn {_id, {op, tensor}}, stages ->
+      cond do
+        op in @fusable_ops or op == :parameter or op == :constant ->
+          add_to_current_stage(stages, :elementwise, {op, tensor})
+
+        op in @reduce_ops ->
+          [{:reduce, [{op, tensor}]} | stages]
+
+        op in @library_ops ->
+          [{:library, [{op, tensor}]} | stages]
+
+        true ->
+          [{:unsupported, [{op, tensor}]} | stages]
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp add_to_current_stage([{:elementwise, ops} | rest], :elementwise, entry) do
+    [{:elementwise, [entry | ops]} | rest]
+  end
+
+  defp add_to_current_stage(stages, kind, entry) do
+    [{kind, [entry]} | stages]
+  end
+
   # ----------------------------------------------------------------
   # Expression tree walking
   # ----------------------------------------------------------------

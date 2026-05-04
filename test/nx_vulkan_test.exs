@@ -1311,10 +1311,14 @@ defmodule Nx.VulkanTest do
     test "4-input fused chain: leapfrog body q + eps*p (one dispatch)" do
       :ok = Nx.Vulkan.init()
 
-      {:ok, eps} = Nx.Vulkan.upload_f32([2.0, 2.0, 2.0])  # a
-      {:ok, p}   = Nx.Vulkan.upload_f32([3.0, 4.0, 5.0])  # b
-      {:ok, q}   = Nx.Vulkan.upload_f32([1.0, 1.0, 1.0])  # c
-      {:ok, dummy} = Nx.Vulkan.upload_f32([0.0, 0.0, 0.0]) # d (unused)
+      # a
+      {:ok, eps} = Nx.Vulkan.upload_f32([2.0, 2.0, 2.0])
+      # b
+      {:ok, p} = Nx.Vulkan.upload_f32([3.0, 4.0, 5.0])
+      # c
+      {:ok, q} = Nx.Vulkan.upload_f32([1.0, 1.0, 1.0])
+      # d (unused)
+      {:ok, dummy} = Nx.Vulkan.upload_f32([0.0, 0.0, 0.0])
 
       # eps * p + q → one dispatch
       {:ok, c} = Nx.Vulkan.fused_chain_4(eps, p, q, dummy, [{:multiply, 1}, {:add, 2}])
@@ -1325,18 +1329,21 @@ defmodule Nx.VulkanTest do
     end
 
     test "4-input fused chain: half-step p + 0.5 * eps * grad" do
-      {:ok, p}    = Nx.Vulkan.upload_f32([1.0, 1.0])    # a (chain register start)
-      {:ok, half} = Nx.Vulkan.upload_f32([0.5, 0.5])    # b
-      {:ok, eps}  = Nx.Vulkan.upload_f32([2.0, 2.0])    # c
-      {:ok, grad} = Nx.Vulkan.upload_f32([3.0, 4.0])    # d
+      # a (chain register start)
+      {:ok, p} = Nx.Vulkan.upload_f32([1.0, 1.0])
+      # b
+      {:ok, half} = Nx.Vulkan.upload_f32([0.5, 0.5])
+      # c
+      {:ok, eps} = Nx.Vulkan.upload_f32([2.0, 2.0])
+      # d
+      {:ok, grad} = Nx.Vulkan.upload_f32([3.0, 4.0])
 
       # r = p; r += half*eps*grad...
       # Cleaner expression: r = p; r = p + (chain producing 0.5*eps*grad)
       # Actually simpler: chain on a=half: r=half; r*=eps; r*=grad; r += p
       # 0.5 * 2 * 3 + 1 = 4; 0.5 * 2 * 4 + 1 = 5
       {:ok, c} =
-        Nx.Vulkan.fused_chain_4(half, eps, grad, p,
-          [{:multiply, 1}, {:multiply, 2}, {:add, 3}])
+        Nx.Vulkan.fused_chain_4(half, eps, grad, p, [{:multiply, 1}, {:multiply, 2}, {:add, 3}])
 
       {:ok, vals} = Nx.Vulkan.download_f32(c, 2)
       assert vals == [4.0, 5.0]
@@ -1414,8 +1421,10 @@ defmodule Nx.VulkanTest do
         # logpdf(-1; 0, 1) same as logpdf(1; 0, 1)
         log_sqrt_2pi = 0.91893853320467274178
 
-        Enum.zip(Nx.to_flat_list(out),
-          [-log_sqrt_2pi, -0.5 - log_sqrt_2pi, -0.5 - log_sqrt_2pi])
+        Enum.zip(
+          Nx.to_flat_list(out),
+          [-log_sqrt_2pi, -0.5 - log_sqrt_2pi, -0.5 - log_sqrt_2pi]
+        )
         |> Enum.each(fn {v, e} -> assert_in_delta v, e, 1.0e-4 end)
       after
         Nx.global_default_backend(previous)
@@ -1553,7 +1562,8 @@ defmodule Nx.VulkanTest do
         f = fn q, p, eps, grad ->
           q_new = Nx.Vulkan.Fast.leapfrog_position(q, eps, p)
           p_new = Nx.Vulkan.Fast.momentum_step(p, eps, grad)
-          Nx.add(q_new, p_new)  # combine to make defn return one value
+          # combine to make defn return one value
+          Nx.add(q_new, p_new)
         end
 
         q = Nx.tensor([1.0, 1.0], backend: Nx.Vulkan.Backend)
@@ -1757,10 +1767,13 @@ defmodule Nx.VulkanTest do
 
       # 1/0.0 → :infinity; -1/0.0 → :neg_infinity. Encode → upload →
       # download must preserve the IEEE bit pattern.
+      # +inf
+      # -inf
+      # quiet NaN
       bin =
-        <<0x7F800000::32-native>> <>     # +inf
-        <<0xFF800000::32-native>> <>     # -inf
-        <<0x7FC00000::32-native>>        # quiet NaN
+        <<0x7F800000::32-native>> <>
+          <<0xFF800000::32-native>> <>
+          <<0x7FC00000::32-native>>
 
       t = Nx.from_binary(bin, :f32, backend: Nx.Vulkan.Backend)
       vals = Nx.to_flat_list(t)
@@ -1768,7 +1781,8 @@ defmodule Nx.VulkanTest do
       # Now use a host-materialize path (transpose) and verify the
       # pipeline doesn't crash on the atom values.
       t2d = Nx.reshape(t, {1, 3})
-      _ = Nx.transpose(t2d)              # forces broadcast/transpose host fallback
+      # forces broadcast/transpose host fallback
+      _ = Nx.transpose(t2d)
       assert vals == [:infinity, :neg_infinity, :nan]
     end
 
@@ -1831,6 +1845,77 @@ defmodule Nx.VulkanTest do
       t64 = Nx.as_type(t, :f64)
       reshaped = Nx.reshape(t64, {2, 2})
       assert Nx.to_flat_list(reshaped) == [1.0, 2.0, 3.0, 4.0]
+    end
+  end
+
+  describe "Codegen — GLSL emission from Nx.Defn.Expr trees" do
+    setup do
+      :ok = Nx.Vulkan.init()
+      :ok
+    end
+
+    test "emit_elementwise generates valid GLSL for sigmoid(a*b + c)" do
+      # Trace the function to get an Expr tree
+      previous = Process.put(Nx.Shared.backend_pdict_key(), {Nx.Defn.Expr, []})
+
+      try do
+        a = Nx.Defn.Expr.parameter(:root, {:f, 32}, {4}, 0)
+        b = Nx.Defn.Expr.parameter(:root, {:f, 32}, {4}, 1)
+        c = Nx.Defn.Expr.parameter(:root, {:f, 32}, {4}, 2)
+
+        expr = Nx.sigmoid(Nx.add(Nx.multiply(a, b), c))
+
+        var_ids = [
+          {0, a.data.id, {4}, {:f, 32}},
+          {1, b.data.id, {4}, {:f, 32}},
+          {2, c.data.id, {4}, {:f, 32}}
+        ]
+
+        {glsl, metadata} = Nx.Vulkan.Codegen.emit_elementwise(expr, var_ids)
+
+        # GLSL should contain the shader template
+        assert glsl =~ "#version 450"
+        assert glsl =~ "local_size_x = 256"
+        assert glsl =~ "out_buf[i] = result"
+        assert glsl =~ "exp"
+        # Should have 3 input buffers + 1 output
+        assert metadata.n_buffers == 4
+
+        # Verify it compiles to valid SPIR-V
+        case Nx.Vulkan.Codegen.compile_spv(glsl) do
+          {:ok, spv} ->
+            assert is_binary(spv)
+            assert byte_size(spv) > 0
+
+          {:error, err} ->
+            flunk("GLSL compilation failed: #{err}")
+        end
+      after
+        if previous,
+          do: Process.put(Nx.Shared.backend_pdict_key(), previous),
+          else: Process.delete(Nx.Shared.backend_pdict_key())
+      end
+    end
+
+    test "compile_cached caches SPIR-V by source hash" do
+      glsl = """
+      #version 450
+      layout (local_size_x = 256) in;
+      layout (push_constant) uniform Push { uint n; } pc;
+      layout (std430, binding = 0) readonly buffer I0 { float buf0[]; };
+      layout (std430, binding = 1) writeonly buffer Output { float out_buf[]; };
+      void main() {
+          uint i = gl_GlobalInvocationID.x;
+          if (i >= pc.n) return;
+          out_buf[i] = buf0[i] * 2.0;
+      }
+      """
+
+      {:ok, path1} = Nx.Vulkan.Codegen.compile_cached(glsl)
+      {:ok, path2} = Nx.Vulkan.Codegen.compile_cached(glsl)
+
+      assert path1 == path2
+      assert File.exists?(path1)
     end
   end
 end

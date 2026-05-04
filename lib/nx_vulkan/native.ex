@@ -88,8 +88,17 @@ defmodule Nx.Vulkan.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  def apply_binary_broadcast_f64(_a, _b, _op, _ndim, _out_shape, _a_strides, _b_strides, _spv_path),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def apply_binary_broadcast_f64(
+        _a,
+        _b,
+        _op,
+        _ndim,
+        _out_shape,
+        _a_strides,
+        _b_strides,
+        _spv_path
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   def logsumexp(_a, _outer, _reduce, _inner, _spv_path),
@@ -100,4 +109,8 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def pool_stats(), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def dispatch_generated(_input_refs, _n, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

@@ -104,19 +104,127 @@ defmodule Nx.Vulkan.Compiler do
       {:ok, outer_ops, b_pre_ops, a_var_id, b_var_id} ->
         if System.get_env("NXV_FUSE_DEBUG") == "1" do
           tag = if b_pre_ops == [], do: "FUSED", else: "FUSED+pre"
-          IO.puts("[Nx.Vulkan.Compiler] #{tag}: pre=#{inspect(b_pre_ops)} outer=#{inspect(outer_ops)}")
+
+          IO.puts(
+            "[Nx.Vulkan.Compiler] #{tag}: pre=#{inspect(b_pre_ops)} outer=#{inspect(outer_ops)}"
+          )
         end
 
         compile_fused(outer_ops, b_pre_ops, a_var_id, b_var_id, vars, expr)
 
       :no_match ->
-        if System.get_env("NXV_FUSE_DEBUG") == "1" do
-          IO.puts("[Nx.Vulkan.Compiler] no_match — vars=#{length(var_ids)} root_op=#{inspect_root(expr)}")
+        # Try the Codegen path — generates a custom GLSL shader for the
+        # full expression tree (handles arbitrary depth, any input count).
+        case try_codegen(expr, var_ids) do
+          {:ok, compiled_fn} ->
+            if System.get_env("NXV_FUSE_DEBUG") == "1" do
+              IO.puts("[Nx.Vulkan.Compiler] CODEGEN: custom shader for #{inspect_root(expr)}")
+            end
+
+            compiled_fn
+
+          :unsupported ->
+            if System.get_env("NXV_FUSE_DEBUG") == "1" do
+              IO.puts(
+                "[Nx.Vulkan.Compiler] no_match — vars=#{length(var_ids)} root_op=#{inspect_root(expr)}"
+              )
+            end
+
+            # Fall through: evaluator handles the rest.
+            Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+        end
+    end
+  end
+
+  # --- Codegen path ----------------------------------------------------
+
+  defp try_codegen(expr, var_ids) do
+    # Codegen path requires dispatch_generated NIF — check availability.
+    # Once the NIF is wired, remove this guard.
+    if function_exported?(Nx.Vulkan.Native, :dispatch_generated, 3) and
+         not match?({:error, _}, Nx.Vulkan.Native.dispatch_generated([], 0, "")) do
+      do_try_codegen(expr, var_ids)
+    else
+      :unsupported
+    end
+  rescue
+    # NIF not loaded — skip codegen path
+    _ -> :unsupported
+  end
+
+  defp do_try_codegen(expr, var_ids) do
+    case Nx.Vulkan.Codegen.analyze(expr, var_ids) do
+      {:fused, glsl, metadata} ->
+        case Nx.Vulkan.Codegen.compile_cached(glsl) do
+          {:ok, spv_path} ->
+            {:ok, compile_codegen_dispatch(spv_path, metadata, expr, var_ids)}
+
+          {:error, _reason} ->
+            :unsupported
         end
 
-        # Fall through: evaluator handles the rest.
-        Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+      _ ->
+        :unsupported
     end
+  end
+
+  defp compile_codegen_dispatch(spv_path, metadata, expr, var_ids) do
+    out_shape = expr.shape
+    out_type = expr.type
+    _n_inputs = length(metadata.bindings)
+
+    # Map parameter IDs to thunk positions
+    id_to_pos =
+      var_ids
+      |> Enum.map(fn {pos, id, _shape, _type} -> {id, pos} end)
+      |> Enum.into(%{})
+
+    # Order bindings by buffer index to match shader layout
+    binding_positions =
+      metadata.bindings
+      |> Enum.sort_by(fn {_id, idx} -> idx end)
+      |> Enum.map(fn {id, _idx} -> Map.fetch!(id_to_pos, id) end)
+
+    fn [params] ->
+      # Resolve thunks to tensors
+      input_tensors = Enum.map(binding_positions, fn pos -> Enum.fetch!(params, pos).() end)
+
+      # Check all inputs are on Vulkan backend
+      all_vulkan =
+        Enum.all?(input_tensors, fn t ->
+          match?(%Nx.Vulkan.Backend{}, t.data)
+        end)
+
+      if all_vulkan do
+        input_refs = Enum.map(input_tensors, fn t -> t.data.ref end)
+        n = byte_size_of_shape(out_shape)
+
+        case Nx.Vulkan.Native.dispatch_generated(input_refs, n, spv_path) do
+          {:ok, ref} ->
+            [
+              %T{
+                data: %Nx.Vulkan.Backend{ref: ref, shape: out_shape, type: out_type},
+                shape: out_shape,
+                type: out_type,
+                names: List.duplicate(nil, tuple_size(out_shape)),
+                vectorized_axes: []
+              }
+            ]
+
+          {:error, _} ->
+            # Shader dispatch failed — re-raise
+            raise "Nx.Vulkan.Codegen dispatch failed"
+        end
+      else
+        # Not all on Vulkan — shouldn't reach here (Evaluator fallback
+        # handles non-Vulkan inputs). Raise to surface the issue.
+        raise "Nx.Vulkan.Codegen: inputs not on Vulkan backend"
+      end
+    end
+  end
+
+  defp byte_size_of_shape(shape) do
+    shape |> Tuple.to_list() |> Enum.reduce(1, &*/2)
   end
 
   defp inspect_root(%T{data: %Expr{op: op, args: args}}) do
@@ -338,7 +446,10 @@ defmodule Nx.Vulkan.Compiler do
          %T{
            data: %Expr{
              op: :multiply,
-             args: [%T{data: %Expr{op: :parameter, id: id1}}, %T{data: %Expr{op: :parameter, id: id2}}]
+             args: [
+               %T{data: %Expr{op: :parameter, id: id1}},
+               %T{data: %Expr{op: :parameter, id: id2}}
+             ]
            }
          },
          b_id,
@@ -459,9 +570,7 @@ defmodule Nx.Vulkan.Compiler do
 
   defp run_fused_4in(a, b, c, d, ops_with_buf, out_shape, out_type) do
     case {a.data, b.data, c.data, d.data} do
-      {%Nx.Vulkan.Backend{ref: ar},
-       %Nx.Vulkan.Backend{ref: br},
-       %Nx.Vulkan.Backend{ref: cr},
+      {%Nx.Vulkan.Backend{ref: ar}, %Nx.Vulkan.Backend{ref: br}, %Nx.Vulkan.Backend{ref: cr},
        %Nx.Vulkan.Backend{ref: dr}} ->
         {:ok, ref} = Nx.Vulkan.fused_chain_4(ar, br, cr, dr, ops_with_buf)
 
