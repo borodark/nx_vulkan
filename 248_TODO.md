@@ -1,229 +1,276 @@
-# mac-248 — Y4: leapfrog_chain_weibull.spv (closes the last `:vulkan_known_failure`)
+# mac-248 — R1: replay the fair race on FreeBSD
 
-## Recent state — what's already done
+## Recent state — Y4 closed
 
-All prior shader tasks merged:
+- ✅ Y4 `leapfrog_chain_weibull.spv` shipped (`spirit/67531dca`),
+  vendored, wired, smoke-tested on Linux. Math agrees to f32
+  epsilon (q[0,0]=0.05, p[0,0]=0.4895, logp[0]=-1.2481 at K=1).
+  Linux side at `nx_vulkan/56fc1cc`, eXMC dispatch + new
+  `:requires_vulkan` chain test on `pymc/8d265a2eb`.
+- All 6 chain shaders complete: Normal, Exponential, Student-t,
+  Cauchy, HalfNormal, Weibull. Plus `_lg` and f64 Normal siblings,
+  `reduce_full_f64`, canonical Random123 Philox.
 
-- ✅ X3 sign fix (5 leapfrog shaders)
-- ✅ Y queue (Student-t, Cauchy, HalfNormal Phase 2 chains)
-- ✅ Z1 Philox audit + Z2 canonical Random123 replacement
-- ✅ X1 f64 chain + X2 reduce_full_f64 (.spv vendored; Linux-side
-  wiring of reduce_full_f64 is a follow-up over there, not your task)
-- ✅ FreeBSD bring-up validated on mac-248
-- ✅ Hex-prep merged onto main (`6a4540d` after the 718d80a repair)
-- ✅ Stage 1.5.4 variance bias resolved (var = 1.03 vs ref 1.01)
-- ✅ eXMC dispatch generalised to all 5 chain shaders via tagged
-  meta on pymc/main `807a1db3f`
-- ✅ End-to-end smoke test of the four new families on
-  EXMC_COMPILER=vulkan (Linux RTX 3060 Ti, 2026-05-04). Result:
-
-  | Family | EXLA m / v | Vulkan m / v | Verdict |
-  |--------|------------|--------------|---------|
-  | Normal      | -0.222 / 1.355 | -0.222 / 1.355 | ✓ identical |
-  | Exponential |  0.491 / 0.286 |  0.549 / 0.285 | ✓ matches |
-  | StudentT    |  0.576 / 29.26 |  0.549 / 29.77 | ✓ matches |
-  | Cauchy      |  1.584 / 68.7  |  2.230 / 1182  | (Cauchy has no finite variance — vacuous) |
-  | HalfNormal  |  0.951 / 0.574 |  0.593 / 0.139 | ✓ within tolerance |
-
-  Your shaders work end-to-end through eXMC's NUTS speculative path.
-
-The codegen branch (`feat/vulkan-codegen` at `2cd9f19`) is on a
-separate gate and is **not mac-248 work** — its remaining open
-item (G4: op coverage in `Nx.Vulkan.Codegen.analyze/2`) is
-Elixir compiler engineering. Stays off your queue.
+The original hierarchical Weibull test stays `:vulkan_known_failure`
+because it's multi-RV with observed data — chain dispatch can't
+engage there. That's a separate problem class (codegen op
+coverage on `feat/vulkan-codegen` or chain-shader generalization
+to multi-RV models). Not on your queue.
 
 ---
 
-## Y4 — `leapfrog_chain_weibull.spv` (the active task)
+## R1 — Race on FreeBSD GT 750M
 
-The one remaining `:vulkan_known_failure` test in the eXMC suite
-is **`test/weibull_test.exs:98` "Weibull RV compiles and samples
-via NUTS"** — flagged in `pymc/exmc/docs/VULKAN_KNOWN_ISSUES.md`
-issue #2. Same template as your Phase 2 shaders. Exponential is
-the closest sibling: also unconstrained-via-log-transform.
+A fair race ran on the Linux RTX 3060 Ti (2026-05-04) — Vulkan
+fused chain vs EXLA reference across 7 single-distribution
+models. The natural sequel: re-run the same race on mac-248's
+FreeBSD GT 750M to measure how the chain shader scales across
+GPU generations and OS substrates.
 
-### Distribution and parameterization
+This isn't a "is Vulkan fast" benchmark — that's already
+answered on Linux. The FreeBSD race tests **portability of the
+speedup ratio**: does the fused chain win on FreeBSD/Kepler
+the same way it wins on Linux/Ampere, or is something
+substrate-specific eating the gain?
 
-eXMC's `Exmc.Dist.Weibull` parameterises Weibull(k, λ) with
-shape `k > 0`, scale `λ > 0`. NUTS samples the unconstrained
-parameter `q_uc = log(q)`, `q ∈ (0, ∞)`. Working on the
-unconstrained line, the log-density (with log-Jacobian) is:
+### Backend baseline — pick whichever applies
 
-```
-log p(q_uc | k, λ) = log(k) − k·log(λ) + k·q_uc − (exp(q_uc)/λ)^k
-```
+| Option | When |
+|--------|------|
+| **A. EXLA host client** (CPU-only, no CUDA on FreeBSD) | If EXLA builds on FreeBSD via `mix deps.compile exla` |
+| **B. Vulkan unfused** (per-op IR walker) | If EXLA doesn't build — same Vulkan substrate, different dispatch strategy |
+| **C. BinaryBackend** (pure Elixir) | Last resort — informational only, not a real comparison |
 
-(the `+q_uc` Jacobian for the log transform combines with
-Weibull's pdf's `(k-1)·q_uc` to give `k·q_uc`.)
+Try Option A first (`cd ~/projects/learn_erl/pymc/exmc && mix deps.compile exla 2>&1 | tail -5`). If it builds clean, you have an EXLA CPU baseline; if it errors out within 30 seconds, fall back to Option B. Don't sink hours into making EXLA build on FreeBSD — that's a separate engineering project.
 
-Gradient (closed form — no autodiff in the shader):
+### Subjects (same as the Linux race)
 
-```
-∇logp(q_uc) = k · (1 − (exp(q_uc)/λ)^k)
-```
+| # | Model | d |
+|---|-------|---|
+| 1 | `x ~ Normal(0, 1)` | 1 |
+| 2 | `x ~ Normal(0, 1)` | 8 |
+| 3 | `x ~ Normal(0, 1)` | 50 |
+| 4 | `x ~ Exponential(2)` | 1 |
+| 5 | `x ~ StudentT(df=3, ...)` | 1 |
+| 6 | `x ~ HalfNormal(σ=1)` | 1 |
+| 7 | `x ~ Weibull(k=2, λ=1)` | 1 |
 
-Per-element logp contribution (constants pulled out):
+7 subjects. Cauchy excluded (variance undefined → ESS noisy).
 
-```
-contrib = k·q_uc − (exp(q_uc)/λ)^k
-```
+### Protocol
 
-The constant `n · (log(k) − k·log(λ))` is precomputed by the
-host and passed in as `logp_const`. **No `lgamma` in the
-shader** — the log-gamma terms become host-side constants.
+| Knob | Value |
+|------|-------|
+| `num_warmup` | 1000 |
+| `num_samples` | 1000 |
+| seeds per cell | 5 (medians + IQR) |
+| chain count | 1 |
 
-### Shader spec
+5 seeds × 7 models × 2 backends = **70 runs total**.
 
-```glsl
-#version 450
+### Runtime expectation
 
-// Fused chain of K NUTS leapfrog steps for a Weibull(k, lambda)
-// log-density model on the unconstrained line.
-// Closed-form gradient; no autodiff. Sign convention is post-X3:
-//   p_half = p + 0.5 * eps * grad_q   (PLUS, not MINUS)
+GT 750M is Kepler-class (2013), substantially slower than the
+Ampere RTX 3060 Ti for compute. Expect Vulkan-fused per-step
+to be ~3-5× slower in absolute terms. Total wall-clock for
+the full race: budget **2-3 hours**. If a single cell exceeds
+10 minutes (Option B with K=32 at d=50 might), abort that cell
+and report partial.
 
-layout (local_size_x = 256) in;
+### Implementation
 
-layout (push_constant) uniform Push {
-    uint  n;
-    uint  K;
-    float eps;
-    float k;            // Weibull shape parameter
-    float lambda;       // Weibull scale parameter
-    float logp_const;   // n * (log(k) - k * log(lambda))
-} pc;
+A Mix script lives at the dev box at `/tmp/fair_race.exs`. It
+hasn't been written yet — Linux side will write it as part of
+the Linux race execution and push to a shared location. For
+now, here's the schematic per cell:
 
-layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
-layout (std430, binding = 1) readonly  buffer In_p     { float p_init[]; };
-layout (std430, binding = 2) readonly  buffer In_mass  { float inv_mass[]; };
-layout (std430, binding = 3) writeonly buffer Out_q    { float q_chain[]; };
-layout (std430, binding = 4) writeonly buffer Out_p    { float p_chain[]; };
-layout (std430, binding = 5) writeonly buffer Out_grad { float grad_chain[]; };
-layout (std430, binding = 6) writeonly buffer Out_logp { float logp_chain[]; };
-
-shared float partial[256];
-
-float weibull_grad(float q_uc) {
-    float ratio = exp(q_uc) / pc.lambda;
-    return pc.k * (1.0 - pow(ratio, pc.k));
-}
-
-float weibull_logp_contrib(float q_uc) {
-    float ratio = exp(q_uc) / pc.lambda;
-    return pc.k * q_uc - pow(ratio, pc.k);
-}
-
-void main() {
-    uint i   = gl_GlobalInvocationID.x;
-    uint tid = gl_LocalInvocationIndex;
-    bool in_bounds = (i < pc.n);
-
-    float qi = in_bounds ? q_init[i] : 0.0;
-    float pi = in_bounds ? p_init[i] : 0.0;
-    float mi = in_bounds ? inv_mass[i] : 0.0;
-
-    for (uint k = 0; k < pc.K; k++) {
-        float grad_q = in_bounds ? weibull_grad(qi) : 0.0;
-        float p_half = pi + 0.5 * pc.eps * grad_q;
-        qi = qi + pc.eps * mi * p_half;
-        float grad_qn = in_bounds ? weibull_grad(qi) : 0.0;
-        pi = p_half + 0.5 * pc.eps * grad_qn;
-
-        if (in_bounds) {
-            q_chain[k * pc.n + i]    = qi;
-            p_chain[k * pc.n + i]    = pi;
-            grad_chain[k * pc.n + i] = grad_qn;
-        }
-
-        partial[tid] = in_bounds ? weibull_logp_contrib(qi) : 0.0;
-        barrier();
-        for (uint s = 128u; s > 0u; s /= 2u) {
-            if (tid < s) partial[tid] += partial[tid + s];
-            barrier();
-        }
-        if (tid == 0u) {
-            logp_chain[k] = partial[0] + pc.logp_const;
-        }
-        barrier();
-    }
-}
+```elixir
+# Per (model, seed, backend):
+#   1. Build the IR
+#   2. Set the right Application env vars for the backend
+#   3. Set fused_leapfrog_meta if the backend is Vulkan + cell is single-RV
+#   4. {trace, stats} = Sampler.sample(ir, %{}, num_warmup: 1000, num_samples: 1000, seed: seed)
+#   5. Compute ESS via Exmc.Diagnostics.ess (per-parameter min if d > 1)
+#   6. Record: wall_ms, ess_min, mean, var, divergences
+# Report median across the 5 seeds per (model, backend) cell.
 ```
 
-Push constants total: 24 bytes (well under Vulkan's 128-byte floor).
+The `fused_leapfrog_meta` shape per cell:
 
-### Hand-check at K=1, n=4
+| Cell | Meta |
+|------|------|
+| Normal d=1/8/50 | `{:normal, 0.0, 1.0}` |
+| Exponential | `{:exponential, 2.0}` |
+| StudentT | `{:studentt, 0.0, 1.0, 3.0, logp_const_t}` |
+| HalfNormal | `{:halfnormal, 1.0, log_const_h}` |
+| Weibull | `{:weibull, 2.0, 1.0, n*(log(2) - 2*log(1)) = n*0.6931}` |
 
-With `k=2.0, λ=1.0, eps=0.1, q_init=[0,0,0,0], p_init=[0.5,...],
-inv_mass=[1,...]`:
+### Output format
 
-- `grad(0) = 2·(1 − (e^0/1)^2) = 2·(1 − 1) = 0`
-- `p_half = 0.5 + 0.05·0 = 0.5`
-- `qn = 0 + 0.1·1·0.5 = 0.05`
-- `grad(0.05) = 2·(1 − (e^0.05)^2) = 2·(1 − 1.10517) = -0.21034`
-- `pn = 0.5 + 0.05·(-0.21034) = 0.48948`
-- `contrib(0.05) = 2·0.05 − (e^0.05)^2 = 0.1 − 1.10517 = -1.00517`
-- sum over 4 elements: -4.02068
-- `logp_const = 4·(log(2) − 2·log(1)) = 4·0.6931 = 2.7726`
-- `logp_chain[0] = -4.02068 + 2.7726 ≈ -1.248`
+Single Markdown table. Add a column for the Linux numbers (from
+the prior race) so the FreeBSD column reads in context:
 
-Sanity: q_chain[0,0]≈0.050, p_chain[0,0]≈0.4895,
-grad_chain[0,0]≈-0.2103, logp_chain[0]≈-1.248. Confirm in your
-commit message before pushing.
-
-### Compile + push
-
-```sh
-cd ~/spirit
-git pull origin feat/fused-leapfrog-chain-normal
-glslangValidator -V shaders/leapfrog_chain_weibull.comp \
-                 -o shaders/leapfrog_chain_weibull.spv
-git add shaders/leapfrog_chain_weibull.{comp,spv}
-git commit -m "shaders: leapfrog_chain_weibull — fused Weibull chain (sanity: q[0,0]≈0.05, logp[0]≈-1.248 at K=1, k=2, λ=1)"
-git push origin feat/fused-leapfrog-chain-normal
+```
+| Model     | d  | Linux Vk ms | FreeBSD Vk ms | Linux ratio | FreeBSD ratio | substrate Δ |
+|-----------|----|-------------|---------------|-------------|---------------|-------------|
+| Normal    |  1 | …           | …             | …           | …             | …           |
+…
 ```
 
-### After your push, Linux side will
+Substrate Δ = (FreeBSD ratio / Linux ratio). If close to 1.0,
+the speedup is portable. If ≠ 1.0, something substrate-specific
+is at play.
 
-1. Vendor `leapfrog_chain_weibull.spv` into `nx_vulkan/priv/shaders/`.
-2. Add C++ shim entry, Rust NIF, Native stub, Elixir wrapper —
-   same template as `leapfrog_chain_exponential` (closest sibling).
-3. Add a `{:weibull, k, lambda, logp_const}` clause to
-   `Exmc.NUTS.Tree.do_dispatch/10` in pymc/exmc — multi-clause
-   defp pattern matching, no case/if, same convention as the
-   other 5 chain dispatch clauses.
-4. Re-run `test/weibull_test.exs:98` under
-   `EXMC_COMPILER=vulkan`. When it passes, untag from
-   `:vulkan_known_failure`. Update
-   `exmc/docs/VULKAN_KNOWN_ISSUES.md` to mark issue #2 closed.
+Plus a one-line headline: "GT 750M Vulkan fused chain on
+FreeBSD: matches/beats/lags Linux ratio on N/7 cells."
 
-This closes the last `:vulkan_known_failure` in the eXMC test
-suite. The chain shader story becomes complete for the
-distributions eXMC currently ships.
+### What this race answers
 
----
+- **Is the chain shader's win portable across GPUs?** If FreeBSD
+  ratios match Linux ratios, the win is fundamental to the
+  per-dispatch-amortization architecture, not a property of any
+  particular driver or hardware generation.
+- **Does FreeBSD's nvidia driver have any Vulkan-overhead quirks
+  vs Linux's?** A divergence in ratios surfaces this.
+- **Validates the walkable-path post's cross-platform claim
+  with real measurements.** Not just "runs" but "runs at a
+  predictable speed."
 
-## What's NOT in this task
+### What it does NOT answer
 
-- **Multi-WG variants** of Phase 2 chain shaders (Y5 placeholder)
-  — useful when models have d > 256 but no current eXMC test
-  exercises that. Defer until a real model needs it.
-- **Codegen op coverage** (G4 from prior TODO) — Elixir-side
-  work, not your strength. Stays on `feat/vulkan-codegen` for
-  whoever picks up codegen performance work.
-- **`reduce_full_f64.spv` wiring** — `.spv` already vendored on
-  main; Linux side adds the C++ shim + NIF + Elixir wrapper.
-  Not your task.
+- **Multi-chain scaling on FreeBSD** — single chain only here.
+- **Hierarchical models** — chain dispatch doesn't engage; out
+  of scope.
+- **Long-chain (5000+ samples) behavior** — 1000+1000 budget.
+
+### Risks (read carefully before starting)
+
+1. **EXLA does not build on FreeBSD.** XLA needs Bazel + a
+   heavy C++ build chain that has never been first-class on
+   FreeBSD. `mix deps.compile exla` will likely fail within
+   30-60 seconds with a Bazel-related error. **What to do**:
+   note the exact error in your follow-up commit (one paragraph
+   is enough — don't try to debug the XLA build), fall back
+   to Option B (Vulkan unfused) for the baseline. If even
+   `deps.get` fails for EXLA on FreeBSD (lockfile mismatch),
+   skip EXLA in mix.exs locally for the duration of the race
+   (`{:exla, "..."` line commented out), set
+   `EXMC_COMPILER=vulkan`, and run BOTH the fused and unfused
+   Vulkan paths against each other.
+
+2. **GT 750M VRAM is 1-2 GB; chain output buffers can grow.**
+   At the largest race cell (Normal d=50, K=32 batch in
+   speculative path), each chain dispatch allocates 4 output
+   buffers of `K × n × 4 = 6.4 KB` each — trivial. Even
+   pessimistic with d=50, K=128 (extension batch): 25.6 KB ×
+   4 = 100 KB per dispatch. Should not pressure VRAM. **If
+   you see `VK_ERROR_OUT_OF_DEVICE_MEMORY`** during a cell:
+   confirm with `nvidia-smi` (FreeBSD nvidia tools) that the
+   compositor or X server isn't reserving most of the VRAM,
+   then reduce `num_warmup` to 500 for that cell.
+
+3. **f32 numerical drift over long chains may diverge between
+   Linux and FreeBSD even at the same seed.** Both backends are
+   f32, but different GPU silicon executes f32 arithmetic with
+   slightly different fused-multiply-add behavior, denormal
+   handling, etc. Over 1000 warmup × ~16 leapfrog steps =
+   16,000 f32 leapfrogs, drift accumulates. **Expected:**
+   posterior moments (mean, var) match across hosts within
+   MCMC noise (|Δm| < 0.3, |Δv| < 0.5). **What's NOT
+   expected:** bit-identical traces. Don't compare per-sample
+   trajectories; compare the Markov-chain summary statistics.
+   If a cell's mean/var diverges past those bounds, that's a
+   real finding worth flagging in the report — could be a
+   FreeBSD-specific f32 quirk worth investigating.
+
+4. **Per-cell wall-clock blow-up.** A bad cell can take
+   hours under Option B (unfused Vulkan, which is the path
+   the chain shaders exist to fix). The Normal d=50 cell
+   under Option B specifically risks 30+ minutes per seed ×
+   5 seeds = 2.5 hours for that single cell. **Mitigation**:
+   per-cell hard timeout of 10 minutes (Mix script enforces
+   via `Task.async_stream` with `:timeout`). On timeout, the
+   cell records `:dnf` instead of numbers. Race continues to
+   the next cell. Report any DNFs explicitly; don't pretend
+   they didn't happen.
+
+5. **Compositor / X server interference.** If mac-248 has X
+   running and a compositor, the GT 750M is also rendering
+   the desktop, which contends with compute dispatches. Most
+   FreeBSD workstation configs leave the GPU mostly idle for
+   compute, but if you see wildly variable per-seed wall
+   times (e.g., one seed 5s, the next 30s), this is the
+   first thing to suspect. **Mitigation**: run the race
+   from a TTY (Ctrl+Alt+F1) or after stopping the X server
+   for the duration. Document the answer in the report —
+   "X stopped" or "X running, using GPU N% per nvidia-smi".
+
+6. **Tagged meta typos.** The fused_leapfrog_meta shapes are
+   distribution-specific. If a meta's tag doesn't match a
+   `do_dispatch` clause, the race silently falls through to
+   the unfused Vulkan path — and the cell measures the WRONG
+   thing without raising. **Mitigation**: enable
+   `Application.put_env(:exmc, :fused_dispatch_debug, true)`
+   if the diagnostics module supports it (TBD), or add a
+   single `IO.inspect` at the top of `do_dispatch/10` for the
+   duration of the race so you can confirm each cell hit the
+   right clause. Remove before commit.
+
+7. **GLSL not installed on FreeBSD post-bring-up.** The chain
+   shaders are pre-compiled SPIR-V vendored in
+   `nx_vulkan/priv/shaders/` — you don't need glslang at
+   race time. But if the codegen branch is somehow active
+   (`feat/vulkan-codegen` checked out instead of `main`), it
+   tries to JIT-compile GLSL via `glslangValidator`. **Mitigation**:
+   confirm `git -C ~/nx_vulkan branch --show-current` returns
+   `main`, not `feat/vulkan-codegen`, before starting the race.
+
+8. **Result reproducibility.** The race uses `seed: seed` for
+   each (model, seed) pair. The Erlang `:rand` PRNG is
+   deterministic given a seed, but if mac-248 has been
+   running other Erlang processes that consumed entropy from
+   the same global state, results may differ slightly across
+   runs. **Mitigation**: each race iteration calls
+   `:rand.seed_s(:exsss, {seed, ...})` explicitly via
+   `Sampler.sample(seed: seed)` — no shared state.
+
+### What does count as a successful race
+
+- All 7 cells complete without `:dnf` under the hard
+  per-cell timeout.
+- All 7 cells' posterior summaries (mean, var) match within
+  the MCMC-noise tolerance described in risk #3.
+- A clean ratio table (FreeBSD vs Linux) — even if the
+  ratio is 0.5 or 2.0, that's a real measurement worth
+  publishing. Only "I couldn't get cell N to run" is a
+  failure outcome.
+
+### Coordination with Linux side
+
+I (Linux dev box) will run the same race in parallel. Once both
+results are in, the combined table goes into the *walkable-path*
+blog as the cross-platform measurement that makes the original
+post's "runs on FreeBSD via Vulkan" claim quantitative.
+
+If the Mix script ends up shared (it should — same race, same
+Elixir), I'll push it to `~/projects/learn_erl/pymc/exmc/bench/fair_race.exs`
+once the Linux side is done. Pull, run, report.
+
+## What this TODO is NOT
+
+- Not asking for shader changes — your 6 chain shaders are
+  done.
+- Not asking for FreeBSD-specific fixes — the FreeBSD bring-up
+  already validated everything builds + runs. This is just
+  measurement.
 
 ## Cross-reference
 
-- `~/projects/learn_erl/pymc/exmc/lib/exmc/dist/weibull.ex` —
-  reference Weibull math (the gradient + logp formulas the
-  shader reimplements)
-- `~/projects/learn_erl/pymc/exmc/test/weibull_test.exs:98` —
-  the test that flips green
-- `~/projects/learn_erl/pymc/exmc/docs/VULKAN_KNOWN_ISSUES.md`
-  issue #2 — the doc this closes
-- `~/projects/learn_erl/spirit/shaders/leapfrog_chain_exponential.comp`
-  — closest sibling shader; copy and adapt
 - `~/projects/learn_erl/nx_vulkan/PLAN_FUSED_LEAPFROG.md` —
-  Phase 2 scope; Weibull was always the last family on the list
+  full chain-shader history; Phase 2 done.
+- `~/projects/learn_erl/pymc/www.dataalienist.com/blog-walkable-path.html`
+  — the post the cross-platform measurement updates.
+- Linux race results (when ready): `~/projects/learn_erl/pymc/exmc/bench/fair_race_linux.csv`
+- Send your FreeBSD CSV to the same dir (`fair_race_freebsd.csv`)
+  via the same nas path the project uses. Or paste the table
+  inline in a 248 follow-up commit.
