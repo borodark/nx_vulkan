@@ -128,6 +128,16 @@ defmodule Nx.Vulkan.Codegen do
     end
   end
 
+  # Anything not a single Nx.Tensor wrapping an Nx.Defn.Expr — most
+  # commonly a tuple/list of expressions (the shape value_and_grad
+  # returns) — falls through. The compiler's calling site then
+  # routes to Nx.Defn.Evaluator, which dispatches per-op via the
+  # IR walker. Slower than fused codegen, but correct, and avoids
+  # the FunctionClauseError that breaks the entire defn JIT for
+  # any caller producing tuple/list outputs (NUTS value_and_grad,
+  # ADVI ELBO, etc.).
+  def analyze(_other, _var_ids), do: :unsupported
+
   @doc """
   Emit a GLSL compute shader for a fully-fusable elementwise expression.
 
