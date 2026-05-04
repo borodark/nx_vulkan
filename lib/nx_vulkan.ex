@@ -212,29 +212,39 @@ defmodule Nx.Vulkan do
   @doc "f64 elementwise binary; dispatches elementwise_binary_f64.spv."
   def apply_binary_f64(a, b, op) do
     code = Map.fetch!(@ops_binary, op)
-    Nx.Vulkan.Native.apply_binary_f64(a, b, code,
-                                       shader_path("elementwise_binary_f64.spv"))
+    Nx.Vulkan.Native.apply_binary_f64(a, b, code, shader_path("elementwise_binary_f64.spv"))
   end
 
   @doc "f64 elementwise unary; dispatches elementwise_unary_f64.spv."
   def apply_unary_f64(a, op) do
     code = Map.fetch!(@ops_unary, op)
-    Nx.Vulkan.Native.apply_unary_f64(a, code,
-                                      shader_path("elementwise_unary_f64.spv"))
+    Nx.Vulkan.Native.apply_unary_f64(a, code, shader_path("elementwise_unary_f64.spv"))
   end
 
   @doc "f64 per-axis reduction; dispatches reduce_axis_f64.spv."
   def reduce_axis_f64(a, outer, reduce_size, inner, op) do
-    Nx.Vulkan.Native.reduce_axis_f64(a, outer, reduce_size, inner, op,
-                                      shader_path("reduce_axis_f64.spv"))
+    Nx.Vulkan.Native.reduce_axis_f64(
+      a,
+      outer,
+      reduce_size,
+      inner,
+      op,
+      shader_path("reduce_axis_f64.spv")
+    )
   end
 
   @doc "f64 broadcast elementwise binary; dispatches elementwise_binary_broadcast_f64.spv."
   def apply_binary_broadcast_f64(a, b, op, ndim, out_shape, a_strides, b_strides) do
     op_const = Map.fetch!(@ops_binary, op)
+
     Nx.Vulkan.Native.apply_binary_broadcast_f64(
-      a, b, op_const, ndim,
-      pad4(out_shape), pad4(a_strides), pad4(b_strides),
+      a,
+      b,
+      op_const,
+      ndim,
+      pad4(out_shape),
+      pad4(a_strides),
+      pad4(b_strides),
       shader_path("elementwise_binary_broadcast_f64.spv")
     )
   end
@@ -245,8 +255,7 @@ defmodule Nx.Vulkan do
   two-pass shader. f32 only.
   """
   def logsumexp(a, outer, reduce_size, inner) do
-    Nx.Vulkan.Native.logsumexp(a, outer, reduce_size, inner,
-                                shader_path("logsumexp.spv"))
+    Nx.Vulkan.Native.logsumexp(a, outer, reduce_size, inner, shader_path("logsumexp.spv"))
   end
 
   # ------------------------------------------------------------------
@@ -532,7 +541,12 @@ defmodule Nx.Vulkan do
       |> Enum.unzip()
 
     Nx.Vulkan.Native.fused_chain_4(
-      a_ref, b_ref, c_ref, d_ref, codes, buf_idx,
+      a_ref,
+      b_ref,
+      c_ref,
+      d_ref,
+      codes,
+      buf_idx,
       shader_path("fused_elementwise_4in.spv")
     )
   end
@@ -544,8 +558,7 @@ defmodule Nx.Vulkan do
   on the host).
   """
   def kinetic_energy(p_ref, inv_mass_ref) do
-    Nx.Vulkan.Native.kinetic_energy(p_ref, inv_mass_ref,
-                                     shader_path("kinetic_energy.spv"))
+    Nx.Vulkan.Native.kinetic_energy(p_ref, inv_mass_ref, shader_path("kinetic_energy.spv"))
   end
 
   @doc """
@@ -554,8 +567,7 @@ defmodule Nx.Vulkan do
   Output shape matches `x`. f32 only.
   """
   def normal_logpdf(x_ref, mu_ref, sigma_ref) do
-    Nx.Vulkan.Native.normal_logpdf(x_ref, mu_ref, sigma_ref,
-                                    shader_path("normal_logpdf.spv"))
+    Nx.Vulkan.Native.normal_logpdf(x_ref, mu_ref, sigma_ref, shader_path("normal_logpdf.spv"))
   end
 
   # ------------------------------------------------------------------

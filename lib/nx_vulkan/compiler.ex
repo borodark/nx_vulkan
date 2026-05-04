@@ -183,22 +183,72 @@ defmodule Nx.Vulkan.Compiler do
 
       if all_vulkan do
         input_refs = Enum.map(input_tensors, fn t -> t.data.ref end)
-        n = byte_size_of_shape(out_shape)
 
-        case Nx.Vulkan.Native.dispatch_generated(input_refs, n, spv_path) do
+        dispatch_result =
+          case Map.get(metadata, :pattern) do
+            :full_reduce ->
+              # Full reduce: output is num_workgroups partial sums.
+              # Push = [n_elements], groups = ceil(n/256).
+              n_elem = Map.fetch!(metadata, :n_elements)
+              n_groups = div(n_elem + 255, 256)
+              out_elems = n_groups  # one partial per workgroup
+              Nx.Vulkan.Native.dispatch_generated_full(
+                input_refs, out_elems, [n_elem], n_groups, spv_path
+              )
+
+            :axis_reduce ->
+              # Axis reduce: output is outer*inner elements.
+              # Push = [outer, reduce_size, inner], groups = ceil(outer*inner/256).
+              outer = Map.fetch!(metadata, :outer)
+              reduce_size = Map.fetch!(metadata, :reduce_size)
+              inner = Map.fetch!(metadata, :inner)
+              out_elems = outer * inner
+              n_groups = div(out_elems + 255, 256)
+              Nx.Vulkan.Native.dispatch_generated_full(
+                input_refs, out_elems, [outer, reduce_size, inner], n_groups, spv_path
+              )
+
+            _ ->
+              # Elementwise: push = [n], groups = ceil(n/256).
+              n = byte_size_of_shape(out_shape)
+              Nx.Vulkan.Native.dispatch_generated(input_refs, n, spv_path)
+          end
+
+        case dispatch_result do
           {:ok, ref} ->
-            [
-              %T{
-                data: %Nx.Vulkan.Backend{ref: ref, shape: out_shape, type: out_type},
-                shape: out_shape,
-                type: out_type,
-                names: List.duplicate(nil, tuple_size(out_shape)),
-                vectorized_axes: []
-              }
-            ]
+            result =
+              case Map.get(metadata, :pattern) do
+                :full_reduce ->
+                  # Partial sums from workgroups — sum on host for scalar result.
+                  n_elem = Map.fetch!(metadata, :n_elements)
+                  n_groups = div(n_elem + 255, 256)
+                  {:ok, bin} = Nx.Vulkan.Native.download_binary(ref, n_groups * 4)
+                  total = for(<<x::float-32-native <- bin>>, do: x) |> Enum.sum()
+
+                  scalar_bin = <<total::float-32-native>>
+                  {:ok, scalar_ref} = Nx.Vulkan.Native.upload_binary(scalar_bin)
+
+                  %T{
+                    data: %Nx.Vulkan.Backend{ref: scalar_ref, shape: out_shape, type: out_type},
+                    shape: out_shape,
+                    type: out_type,
+                    names: List.duplicate(nil, tuple_size(out_shape)),
+                    vectorized_axes: []
+                  }
+
+                _ ->
+                  %T{
+                    data: %Nx.Vulkan.Backend{ref: ref, shape: out_shape, type: out_type},
+                    shape: out_shape,
+                    type: out_type,
+                    names: List.duplicate(nil, tuple_size(out_shape)),
+                    vectorized_axes: []
+                  }
+              end
+
+            [result]
 
           {:error, _} ->
-            # Shader dispatch failed — re-raise
             raise "Nx.Vulkan.Codegen dispatch failed"
         end
       else

@@ -86,6 +86,34 @@ defmodule Nx.Vulkan.Codegen do
   """
   @spec analyze(Expr.t(), [non_neg_integer()]) ::
           {:fused, String.t(), map()} | {:mixed, [stage()]} | :unsupported
+  def analyze(%T{data: %Expr{op: reduce_op}} = expr, var_ids)
+      when reduce_op in @reduce_ops do
+    # Root is a reduction — check if the inner expression is fusable
+    [inner | rest] = expr.data.args
+    opts = List.last(rest) || []
+
+    case inner do
+      %T{data: %Expr{}} ->
+        inner_dag = linearize(inner, %{})
+        inner_ops = Enum.map(inner_dag, fn {_id, {op, _}} -> op end)
+
+        inner_fusable =
+          Enum.all?(inner_ops, fn op ->
+            op in @fusable_ops or op == :parameter or op == :constant
+          end)
+
+        if inner_fusable do
+          {glsl, metadata} = emit_fused_reduce(expr, inner, reduce_op, opts, var_ids)
+          {:fused, glsl, metadata}
+        else
+          :unsupported
+        end
+
+      _ ->
+        :unsupported
+    end
+  end
+
   def analyze(%T{data: %Expr{}} = expr, var_ids) do
     dag = linearize(expr, %{})
     groups = partition(dag, var_ids)
@@ -150,6 +178,136 @@ defmodule Nx.Vulkan.Codegen do
     }
 
     {glsl, metadata}
+  end
+
+  @doc """
+  Emit a GLSL shader that fuses elementwise ops into a reduction.
+  Handles both full-axis (scalar output) and single-axis reductions.
+  """
+  @spec emit_fused_reduce(Expr.t(), Expr.t(), atom(), keyword(), [non_neg_integer()]) ::
+          {String.t(), map()}
+  def emit_fused_reduce(out_expr, inner_expr, reduce_op, opts, _var_ids) do
+    params = collect_params(inner_expr, %{})
+    bindings = params |> Map.keys() |> Enum.sort() |> Enum.with_index()
+    {body_code, _} = emit_expr(inner_expr, bindings)
+
+    n_inputs = length(bindings)
+    axes = if is_list(opts), do: Keyword.get(opts, :axes), else: nil
+    in_shape = inner_expr.shape
+    out_shape = out_expr.shape
+
+    init_val = reduce_init(reduce_op)
+    combine = reduce_combine(reduce_op)
+
+    if axes == nil or axes == Enum.to_list(0..(tuple_size(in_shape) - 1)) do
+      # Full reduction → scalar output via workgroup tree reduce
+      n_elements = in_shape |> Tuple.to_list() |> Enum.reduce(1, &*/2)
+
+      glsl = """
+      #version 450
+
+      layout (local_size_x = 256) in;
+
+      layout (push_constant) uniform Push {
+          uint n;
+      } pc;
+
+      #{emit_buffer_declarations(bindings, :readonly)}
+      layout (std430, binding = #{n_inputs}) writeonly buffer Output { float out_buf[]; };
+
+      shared float partial[256];
+
+      #{emit_helper_functions()}
+
+      void main() {
+          uint tid = gl_LocalInvocationIndex;
+          uint i = gl_GlobalInvocationID.x;
+
+      #{emit_input_loads_guarded(bindings, "i", "pc.n")}
+          float val = (i < pc.n) ? (#{body_code}) : #{init_val};
+
+          partial[tid] = val;
+          barrier();
+
+          for (uint s = 128u; s > 0u; s /= 2u) {
+              if (tid < s) partial[tid] = #{String.replace(combine, "val", "partial[tid + s]") |> String.replace("acc", "partial[tid]")};
+              barrier();
+          }
+
+          if (tid == 0u) out_buf[gl_WorkGroupID.x] = partial[0];
+      }
+      """
+
+      metadata = %{
+        bindings: bindings,
+        n_buffers: n_inputs + 1,
+        push_size: 4,
+        type: :f32,
+        pattern: :full_reduce,
+        n_elements: n_elements,
+        out_shape: out_shape
+      }
+
+      {glsl, metadata}
+    else
+      # Single-axis reduction → outer/reduce/inner decomposition
+      [axis] = axes
+      in_dims = Tuple.to_list(in_shape)
+      outer = in_dims |> Enum.take(axis) |> Enum.reduce(1, &*/2)
+      reduce_size = Enum.at(in_dims, axis)
+      inner = in_dims |> Enum.drop(axis + 1) |> Enum.reduce(1, &*/2)
+
+      glsl = """
+      #version 450
+
+      layout (local_size_x = 256) in;
+
+      layout (push_constant) uniform Push {
+          uint outer;
+          uint reduce_size;
+          uint inner;
+      } pc;
+
+      #{emit_buffer_declarations(bindings, :readonly)}
+      layout (std430, binding = #{n_inputs}) writeonly buffer Output { float out_buf[]; };
+
+      #{emit_helper_functions()}
+
+      void main() {
+          uint slot = gl_GlobalInvocationID.x;
+          uint n_slots = pc.outer * pc.inner;
+          if (slot >= n_slots) return;
+
+          uint o = slot / pc.inner;
+          uint ii = slot % pc.inner;
+          uint base = o * pc.reduce_size * pc.inner + ii;
+
+          float acc = #{init_val};
+          for (uint k = 0u; k < pc.reduce_size; ++k) {
+              uint i = base + k * pc.inner;
+      #{emit_indexed_loads(bindings, "i")}
+              float val = #{body_code};
+              acc = #{combine};
+          }
+
+          out_buf[slot] = acc;
+      }
+      """
+
+      metadata = %{
+        bindings: bindings,
+        n_buffers: n_inputs + 1,
+        push_size: 12,
+        type: :f32,
+        pattern: :axis_reduce,
+        outer: outer,
+        reduce_size: reduce_size,
+        inner: inner,
+        out_shape: out_shape
+      }
+
+      {glsl, metadata}
+    end
   end
 
   @doc """
@@ -434,6 +592,14 @@ defmodule Nx.Vulkan.Codegen do
     bindings
     |> Enum.map(fn {_id, idx} ->
       "    float v#{idx} = buf#{idx}[i];"
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp emit_input_loads_guarded(bindings, index_var, guard_var) do
+    bindings
+    |> Enum.map(fn {_id, idx} ->
+      "    float v#{idx} = (#{index_var} < #{guard_var}) ? buf#{idx}[#{index_var}] : 0.0;"
     end)
     |> Enum.join("\n")
   end

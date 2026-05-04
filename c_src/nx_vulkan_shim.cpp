@@ -704,7 +704,8 @@ int nxv_transpose(void* out, void* a, unsigned int m, unsigned int n,
  * ---------------------------------------------------------------- */
 
 int nxv_dispatch_generated(void* out, void** inputs, unsigned int n_inputs,
-                           unsigned int n_elements,
+                           unsigned int n_groups,
+                           unsigned int push_size, const void* push_data,
                            const char* spv_path)
 {
     auto& ctx = g_vk_ctx;
@@ -716,7 +717,7 @@ int nxv_dispatch_generated(void* out, void** inputs, unsigned int n_inputs,
     unsigned int n_buffers = n_inputs + 1;  // inputs + output
 
     VkPipe pipe{};
-    if (create_pipeline(&pipe, shader, n_buffers, sizeof(unsigned int), 0) != 0) return -1;
+    if (create_pipeline(&pipe, shader, n_buffers, push_size, 0) != 0) return -1;
 
     // Build buffer array: inputs first, output last
     std::vector<VkBuffer> bufs(n_buffers);
@@ -725,9 +726,8 @@ int nxv_dispatch_generated(void* out, void** inputs, unsigned int n_inputs,
     }
     bufs[n_inputs] = ((VkBuf*)out)->buffer;
 
-    unsigned int groups = (n_elements + 255) / 256;
-    int rc = dispatch(&pipe, bufs.data(), n_buffers, groups,
-                      sizeof(unsigned int), &n_elements);
+    int rc = dispatch(&pipe, bufs.data(), n_buffers, n_groups,
+                      push_size, push_data);
 
     destroy_pipeline(&pipe);
     return rc;

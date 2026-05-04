@@ -128,7 +128,9 @@ unsafe extern "C" {
         out: *mut c_void,
         inputs: *mut *mut c_void,
         n_inputs: u32,
-        n_elements: u32,
+        n_groups: u32,
+        push_size: u32,
+        push_data: *const c_void,
         spv_path: *const c_char,
     ) -> i32;
 
@@ -1149,23 +1151,48 @@ fn pool_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     Ok((atoms::ok(), map).encode(env))
 }
 
-/// Generic dispatch for codegen-emitted shaders. Takes a list of input
-/// tensor refs, an element count, and a .spv path. Allocates one output
-/// buffer of n_elements * 4 bytes (f32), dispatches the shader, returns
-/// the output tensor ref.
+/// Generic dispatch for codegen-emitted shaders. Simple form:
+/// push constant = [n_elements], groups = ceil(n/256).
 #[rustler::nif]
 fn dispatch_generated<'a>(
     env: Env<'a>,
     input_refs: Vec<ResourceArc<VulkanTensor>>,
-    n_elements: u32,
+    out_elements: u32,
     spv_path: String,
 ) -> NifResult<Term<'a>> {
-    if n_elements == 0 {
+    let push_data = vec![out_elements];
+    let n_groups = (out_elements + 255) / 256;
+    do_dispatch_generated(env, input_refs, out_elements, push_data, n_groups, spv_path)
+}
+
+/// Full dispatch with explicit push data and group count.
+#[rustler::nif]
+fn dispatch_generated_full<'a>(
+    env: Env<'a>,
+    input_refs: Vec<ResourceArc<VulkanTensor>>,
+    out_elements: u32,
+    push_data: Vec<u32>,
+    n_groups: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    do_dispatch_generated(env, input_refs, out_elements, push_data, n_groups, spv_path)
+}
+
+fn do_dispatch_generated<'a>(
+    env: Env<'a>,
+    input_refs: Vec<ResourceArc<VulkanTensor>>,
+    out_elements: u32,
+    push_data: Vec<u32>,
+    n_groups: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if out_elements == 0 || n_groups == 0 {
         return Ok((atoms::error(), atoms::bad_arg()).encode(env));
     }
 
     let n_inputs = input_refs.len() as u32;
-    let out_bytes = (n_elements as u64) * 4;  // f32
+    let out_bytes = (out_elements as u64) * 4;  // f32
+    let push_size = (push_data.len() as u32) * 4;
 
     let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
 
@@ -1174,7 +1201,6 @@ fn dispatch_generated<'a>(
         return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
     }
 
-    // Build array of input handles
     let mut input_handles: Vec<*mut c_void> = input_refs.iter()
         .map(|r| r.handle)
         .collect();
@@ -1185,7 +1211,9 @@ fn dispatch_generated<'a>(
             out_handle,
             input_handles.as_mut_ptr(),
             n_inputs,
-            n_elements,
+            n_groups,
+            push_size,
+            push_data.as_ptr() as *const c_void,
             cstr.as_ptr(),
         )
     };

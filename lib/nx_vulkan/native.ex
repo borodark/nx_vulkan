@@ -113,4 +113,8 @@ defmodule Nx.Vulkan.Native do
   @doc false
   def dispatch_generated(_input_refs, _n, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def dispatch_generated_full(_input_refs, _out_elements, _push_data, _n_groups, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
