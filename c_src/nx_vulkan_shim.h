@@ -178,6 +178,14 @@ int nxv_normal_logpdf(void* out, void* x, void* mu, void* sigma,
                        unsigned int n,
                        const char* spv_path);
 
+/* Generic dispatch for codegen-emitted shaders. N input buffers + 1
+ * output buffer. Push constant is a single uint32 (element count).
+ * No specialization constant. `n_inputs` is the number of input
+ * buffers; total buffer count is n_inputs + 1. */
+int nxv_dispatch_generated(void* out, void** inputs, unsigned int n_inputs,
+                           unsigned int n_elements,
+                           const char* spv_path);
+
 #ifdef __cplusplus
 }
 #endif

@@ -699,4 +699,38 @@ int nxv_transpose(void* out, void* a, unsigned int m, unsigned int n,
     return 0;
 }
 
+/* ---------------------------------------------------------------- *
+ * Generic dispatch for codegen-emitted shaders
+ * ---------------------------------------------------------------- */
+
+int nxv_dispatch_generated(void* out, void** inputs, unsigned int n_inputs,
+                           unsigned int n_elements,
+                           const char* spv_path)
+{
+    auto& ctx = g_vk_ctx;
+    if (!ctx.device) return -1;
+
+    VkShaderModule shader = load_shader(spv_path);
+    if (!shader) return -1;
+
+    unsigned int n_buffers = n_inputs + 1;  // inputs + output
+
+    VkPipe pipe{};
+    if (create_pipeline(&pipe, shader, n_buffers, sizeof(unsigned int), 0) != 0) return -1;
+
+    // Build buffer array: inputs first, output last
+    std::vector<VkBuffer> bufs(n_buffers);
+    for (unsigned int i = 0; i < n_inputs; i++) {
+        bufs[i] = ((VkBuf*)inputs[i])->buffer;
+    }
+    bufs[n_inputs] = ((VkBuf*)out)->buffer;
+
+    unsigned int groups = (n_elements + 255) / 256;
+    int rc = dispatch(&pipe, bufs.data(), n_buffers, groups,
+                      sizeof(unsigned int), &n_elements);
+
+    destroy_pipeline(&pipe);
+    return rc;
+}
+
 }

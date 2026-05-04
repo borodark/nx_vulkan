@@ -23,6 +23,7 @@ mod atoms {
         size_mismatch,
         dispatch_failed,
         bad_op,
+        bad_arg,
     }
 }
 
@@ -122,6 +123,14 @@ unsafe extern "C" {
 
     // logsumexp uses the same shim as reduce_axis (same push layout) but
     // is f32-only — output 4 bytes/element.
+
+    fn nxv_dispatch_generated(
+        out: *mut c_void,
+        inputs: *mut *mut c_void,
+        n_inputs: u32,
+        n_elements: u32,
+        spv_path: *const c_char,
+    ) -> i32;
 
     fn nxv_matmul_v(
         out: *mut c_void,
@@ -1138,6 +1147,56 @@ fn pool_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     ).map_err(|_| Error::BadArg)?;
 
     Ok((atoms::ok(), map).encode(env))
+}
+
+/// Generic dispatch for codegen-emitted shaders. Takes a list of input
+/// tensor refs, an element count, and a .spv path. Allocates one output
+/// buffer of n_elements * 4 bytes (f32), dispatches the shader, returns
+/// the output tensor ref.
+#[rustler::nif]
+fn dispatch_generated<'a>(
+    env: Env<'a>,
+    input_refs: Vec<ResourceArc<VulkanTensor>>,
+    n_elements: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if n_elements == 0 {
+        return Ok((atoms::error(), atoms::bad_arg()).encode(env));
+    }
+
+    let n_inputs = input_refs.len() as u32;
+    let out_bytes = (n_elements as u64) * 4;  // f32
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let out_handle = unsafe { nxv_buf_alloc(out_bytes) };
+    if out_handle.is_null() {
+        return Ok((atoms::error(), atoms::alloc_failed()).encode(env));
+    }
+
+    // Build array of input handles
+    let mut input_handles: Vec<*mut c_void> = input_refs.iter()
+        .map(|r| r.handle)
+        .collect();
+
+    let cstr = std::ffi::CString::new(spv_path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe {
+        nxv_dispatch_generated(
+            out_handle,
+            input_handles.as_mut_ptr(),
+            n_inputs,
+            n_elements,
+            cstr.as_ptr(),
+        )
+    };
+
+    if rc != 0 {
+        unsafe { nxv_buf_free(out_handle) };
+        return Ok((atoms::error(), atoms::dispatch_failed()).encode(env));
+    }
+
+    let out = VulkanTensor { handle: out_handle, n_bytes: out_bytes };
+    Ok((atoms::ok(), ResourceArc::new(out)).encode(env))
 }
 
 fn on_load(env: Env, _info: Term) -> bool {

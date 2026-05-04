@@ -139,20 +139,6 @@ defmodule Nx.Vulkan.Compiler do
   # --- Codegen path ----------------------------------------------------
 
   defp try_codegen(expr, var_ids) do
-    # Codegen path requires dispatch_generated NIF — check availability.
-    # Once the NIF is wired, remove this guard.
-    if function_exported?(Nx.Vulkan.Native, :dispatch_generated, 3) and
-         not match?({:error, _}, Nx.Vulkan.Native.dispatch_generated([], 0, "")) do
-      do_try_codegen(expr, var_ids)
-    else
-      :unsupported
-    end
-  rescue
-    # NIF not loaded — skip codegen path
-    _ -> :unsupported
-  end
-
-  defp do_try_codegen(expr, var_ids) do
     case Nx.Vulkan.Codegen.analyze(expr, var_ids) do
       {:fused, glsl, metadata} ->
         case Nx.Vulkan.Codegen.compile_cached(glsl) do
