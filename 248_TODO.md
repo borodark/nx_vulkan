@@ -1,42 +1,47 @@
-# mac-248 — R1: replay the fair race on FreeBSD (**BLOCKED — do not start yet**)
+# mac-248 — R1: replay the fair race on FreeBSD (**READY — multivariate IR fix landed**)
 
-> **Status as of 2026-05-04**: R1 is **on hold** until the Linux
-> side closes the multivariate-IR bug in the race script.
-> See "Blocking issue" below. The Linux-side race is currently
-> running with the d=1 subset only, which produces valid but
-> incomplete data. Don't run anything on mac-248 yet — when the
-> Linux script + race results are clean across all 7 cells, this
-> TODO will be marked `READY` in a follow-up commit. Pull then.
+> **Status update 2026-05-04**: R1 is now **READY**. The blocking
+> multivariate-IR bug was a missing `Nx.sum` on free-RV per-element
+> logp tensors — fixed on `pymc/main` at `3b17d8e40`. Linux race
+> re-collected Normal d=8 + d=50; predicted scaling confirmed:
+> Vulkan crossover happens around d=20-30, Vulkan **wins at d=50
+> with ratio 1.45×**. Race subjects: 7 cells (Normal at d=1/8/50,
+> Exponential, StudentT, HalfNormal, Weibull). See
+> `~/projects/learn_erl/pymc/exmc/bench/fair_race_results_linux.md`
+> for the Linux numbers to compare against.
+>
+> One additional ask landed since: the Linux side just shipped
+> Phases A+B of "auto-route to chain shader from IR" on branch
+> `pymc/feat/dsl-shader-codegen` — `Sampler.sample/3` now
+> auto-engages the chain shader for any of the 6 supported
+> single-RV families with no `Application.put_env` hack required.
+> The race script doesn't depend on this (it sets the env
+> explicitly), but the auto-route is what makes the chain shader
+> useful in real usage.
 
-## Blocking issue (Linux-side fix needed first)
+## Linux race result (your reference)
 
-The race script `pymc/exmc/bench/fair_race.exs` (commit
-`6360abc37`) was written to cover 7 cells: Normal at d=1/8/50,
-Exponential, StudentT, HalfNormal, Weibull. The d=8 and d=50
-multivariate Normal cells trigger an `Nx.Defn.Grad` shape error:
+| Model         |  d | EXLA wall (ms) | Vulkan wall (ms) | EXLA ESS/s | Vulkan ESS/s | ratio |
+|---------------|----|----------------|------------------|------------|--------------|-------|
+| Normal        |  1 |          7,884 |           32,260 |       54.3 |         13.3 |  0.24 |
+| Normal        |  8 |          2,029 |            2,749 |       32.5 |         24.0 |  0.74 |
+| Normal        | 50 |          3,554 |            4,329 |        6.4 |          9.3 | **1.45** |
+| Exponential   |  1 |         15,740 |           42,691 |       30.6 |         13.8 |  0.45 |
+| StudentT df=3 |  1 |         15,606 |           36,057 |       12.0 |          6.7 |  0.56 |
+| HalfNormal    |  1 |         16,238 |           55,235 |       28.0 |          4.7 |  0.17 |
+| Weibull k=2   |  1 |         15,749 |           40,570 |       25.4 |          9.8 |  0.39 |
 
-```
-** (ArgumentError) cannot reshape, current shape {8}
-   is not compatible with new shape {}
-   (nx 0.10.0) lib/nx/defn/grad.ex:22: Nx.Defn.Grad.transform/3
-```
+(d=1 cells from full 1000/1000; d=8/d=50 from quick race
+post-fix at 100/100. Full d=8/d=50 numbers will be re-collected
+on Linux and pushed to the same file before you start; pull then.)
 
-This is an eXMC IR / gradient-trace question, not a chain-shader
-question. The chain shaders themselves handle any n ≤ 256 (and
-the multi-WG variants handle n > 256). Linux side currently has
-the multivariate cells DROPPED from the script as a workaround
-to keep the d=1 race informative.
+Crossover: somewhere around d=20-30 on Linux RTX 3060 Ti. The
+chain shader's per-thread parallelism scales linearly with `n`;
+EXLA's per-call CUDA overhead doesn't.
 
-The R1 race was supposed to be the cross-platform validation of
-the chain shader's speedup. With only d=1 cells, the question
-"does the chain shader's win scale with d" is unanswered. The
-multivariate cells are the most interesting ones because they
-exercise more parallelism per dispatch — exactly where the
-chain shader is supposed to excel.
-
-So R1 stays blocked until: (a) the multivariate IR bug is fixed
-on the Linux side, OR (b) the race scope is formally narrowed
-to d=1 only and this TODO is updated to reflect that.
+Your job: replay this race on FreeBSD GT 750M and report whether
+the FreeBSD column matches Linux ratios within run-to-run
+variance, or shows substrate-specific divergence.
 
 ---
 
