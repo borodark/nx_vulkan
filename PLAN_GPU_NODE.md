@@ -122,7 +122,7 @@ The plan is to *enumerate then measure*, the same shape that worked for H1-H5.
 
 ### W1 — Codegen substrate (highest unknown)
 
-Pick the shader synthesis approach. Prototype Q1's three options against the existing 6 chain shaders. Goal: synthesize a Beta or Gamma chain shader in <100 ms with first-call validation against a reference EXLA impl.
+Pick the shader synthesis approach. Prototype Q1's three options against the existing 6 chain shaders. Goal: synthesize a Beta or Gamma chain shader in **<1000 ms end-to-end** (template render + glslc compile + vkCreateShaderModule + vkCreateComputePipelines + first-call statistical validation against a reference EXLA impl). The 1-second budget is realistic given `glslc` alone is 50-200 ms and validation needs ~100 throwaway dispatches.
 
 **Risk:** GLSL synthesis is harder than it looks once derivatives enter the picture. The existing shaders hand-derived `dlogp/dq` for each family; an automated synthesizer needs either a closed-form gradient table per family, or symbolic differentiation, or autodiff in the shader (expensive).
 
