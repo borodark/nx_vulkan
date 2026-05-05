@@ -35,6 +35,29 @@ const char* nxv_device_name(void);
 /* Returns 1 if the selected device supports f64, 0 otherwise. */
 int nxv_has_f64(void);
 
+/* H3 dispatch timing accumulators. Times are nanoseconds; count is the
+ * number of dispatch() calls since the last reset. Caller may pass NULL
+ * for any out parameter to skip it. */
+void nxv_timing_reset(void);
+void nxv_timing_get(unsigned long long* count,
+                    unsigned long long* dispatch_ns,
+                    unsigned long long* submit_ns,
+                    unsigned long long* wait_ns,
+                    unsigned long long* record_ns);
+
+/* Batched upload: copies N host buffers into N device buffers in a single
+ * submit_and_wait round-trip. dsts holds VkBuf* handles. Returns 0 on
+ * success. */
+int nxv_buf_upload_batch(void** dsts, const void** data,
+                         const unsigned long* sizes, unsigned int n_buffers);
+
+/* Batched download: copies N device buffers into N out_data pointers in a
+ * single submit_and_wait round-trip (instead of N round-trips). srcs is an
+ * array of VkBuf* handles (the same opaque pointers returned by
+ * nxv_buf_alloc). Returns 0 on success. */
+int nxv_buf_download_batch(void** srcs, void** out_data,
+                           const unsigned long* sizes, unsigned int n_buffers);
+
 /* Tensor primitives (v0.0.2) ------------------------------------------ */
 /* Stubs placed here so Rust can declare them; implementations land in
  * the next iteration once the resource type lifetime is in place. */

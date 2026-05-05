@@ -32,6 +32,29 @@ unsafe extern "C" {
     fn nxv_device_name() -> *const c_char;
     fn nxv_has_f64() -> i32;
 
+    fn nxv_timing_reset();
+    fn nxv_timing_get(
+        count: *mut u64,
+        dispatch_ns: *mut u64,
+        submit_ns: *mut u64,
+        wait_ns: *mut u64,
+        record_ns: *mut u64,
+    );
+
+    fn nxv_buf_download_batch(
+        srcs: *const *mut c_void,
+        out_data: *const *mut c_void,
+        sizes: *const u64,
+        n_buffers: u32,
+    ) -> i32;
+
+    fn nxv_buf_upload_batch(
+        dsts: *const *mut c_void,
+        data: *const *const c_void,
+        sizes: *const u64,
+        n_buffers: u32,
+    ) -> i32;
+
     fn nxv_buf_alloc(n_bytes: u64) -> *mut c_void;
     fn nxv_buf_free(handle: *mut c_void);
     fn nxv_buf_upload(handle: *mut c_void, data: *const c_void, n_bytes: u64) -> i32;
@@ -381,6 +404,34 @@ fn has_f64<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     Ok((rc != 0).encode(env))
 }
 
+/// H3 dispatch timing — reset all accumulators to zero.
+#[rustler::nif]
+fn timing_reset<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    unsafe { nxv_timing_reset() };
+    Ok(rustler::types::atom::ok().encode(env))
+}
+
+/// H3 dispatch timing — read current accumulator values.
+/// Returns {count, dispatch_ns, submit_ns, wait_ns, record_ns}.
+#[rustler::nif]
+fn timing_get<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    let mut count: u64 = 0;
+    let mut dispatch_ns: u64 = 0;
+    let mut submit_ns: u64 = 0;
+    let mut wait_ns: u64 = 0;
+    let mut record_ns: u64 = 0;
+    unsafe {
+        nxv_timing_get(
+            &mut count,
+            &mut dispatch_ns,
+            &mut submit_ns,
+            &mut wait_ns,
+            &mut record_ns,
+        )
+    };
+    Ok((count, dispatch_ns, submit_ns, wait_ns, record_ns).encode(env))
+}
+
 /// Upload an Elixir binary (raw bytes — typically packed f32) to a
 /// freshly-allocated GPU buffer. Returns a ResourceArc wrapping the
 /// VulkanTensor; when the Elixir reference is GC'd, the buffer is
@@ -407,6 +458,66 @@ fn upload_binary<'a>(env: Env<'a>, data: Binary<'a>) -> NifResult<Term<'a>> {
     let tensor = VulkanTensor { handle, n_bytes };
     let resource = ResourceArc::new(tensor);
     Ok((atoms::ok(), resource).encode(env))
+}
+
+/// Batched in-place upload of 2 binaries into 2 existing GPU buffers in a
+/// single submit_and_wait round-trip. Saves 1 fence wait versus two
+/// `upload_binary_into/2` calls.
+#[rustler::nif]
+fn upload_binary_into_batch2<'a>(
+    env: Env<'a>,
+    t1: ResourceArc<VulkanTensor>,
+    d1: Binary<'a>,
+    t2: ResourceArc<VulkanTensor>,
+    d2: Binary<'a>,
+) -> NifResult<Term<'a>> {
+    let n1 = d1.len() as u64;
+    let n2 = d2.len() as u64;
+    if n1 != t1.n_bytes || n2 != t2.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let dsts: [*mut c_void; 2] = [t1.handle, t2.handle];
+    let datas: [*const c_void; 2] = [
+        d1.as_slice().as_ptr() as *const c_void,
+        d2.as_slice().as_ptr() as *const c_void,
+    ];
+    let sizes: [u64; 2] = [n1, n2];
+
+    let rc = unsafe {
+        nxv_buf_upload_batch(dsts.as_ptr(), datas.as_ptr(), sizes.as_ptr(), 2)
+    };
+    if rc != 0 {
+        return Ok((atoms::error(), atoms::upload_failed()).encode(env));
+    }
+    Ok(rustler::types::atom::ok().encode(env))
+}
+
+/// Upload an Elixir binary into an existing GPU buffer. Skips allocation —
+/// reuses the buffer in `tensor`. `data.len()` must match `tensor.n_bytes`.
+/// Returns `:ok` on success.
+#[rustler::nif]
+fn upload_binary_into<'a>(
+    env: Env<'a>,
+    tensor: ResourceArc<VulkanTensor>,
+    data: Binary<'a>,
+) -> NifResult<Term<'a>> {
+    let n_bytes = data.len() as u64;
+    if n_bytes != tensor.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let rc = unsafe {
+        nxv_buf_upload(tensor.handle, data.as_slice().as_ptr() as *const c_void, n_bytes)
+    };
+    if rc != 0 {
+        return Ok((atoms::error(), atoms::upload_failed()).encode(env));
+    }
+    Ok(rustler::types::atom::ok().encode(env))
 }
 
 /// Download `n_bytes` from a GPU tensor back into an Elixir binary.
@@ -439,6 +550,64 @@ fn download_binary<'a>(
 
     let term = bin.release(env).encode(env);
     Ok((atoms::ok(), term).encode(env))
+}
+
+/// Batched download of 4 GPU tensors in a single submit_and_wait round-trip.
+/// Returns `{:ok, {b1, b2, b3, b4}}` where each bi is the corresponding
+/// tensor's contents as an Elixir binary. Saves 3 fence waits versus 4
+/// individual `download_binary/2` calls.
+#[rustler::nif]
+fn download_binary_batch4<'a>(
+    env: Env<'a>,
+    t1: ResourceArc<VulkanTensor>,
+    t2: ResourceArc<VulkanTensor>,
+    t3: ResourceArc<VulkanTensor>,
+    t4: ResourceArc<VulkanTensor>,
+) -> NifResult<Term<'a>> {
+    let n1 = t1.n_bytes;
+    let n2 = t2.n_bytes;
+    let n3 = t3.n_bytes;
+    let n4 = t4.n_bytes;
+
+    let mut b1 = OwnedBinary::new(n1 as usize)
+        .ok_or_else(|| Error::Term(Box::new("alloc b1")))?;
+    let mut b2 = OwnedBinary::new(n2 as usize)
+        .ok_or_else(|| Error::Term(Box::new("alloc b2")))?;
+    let mut b3 = OwnedBinary::new(n3 as usize)
+        .ok_or_else(|| Error::Term(Box::new("alloc b3")))?;
+    let mut b4 = OwnedBinary::new(n4 as usize)
+        .ok_or_else(|| Error::Term(Box::new("alloc b4")))?;
+
+    let _g = SUBMIT_LOCK.lock().map_err(|_| Error::BadArg)?;
+
+    let srcs: [*mut c_void; 4] = [t1.handle, t2.handle, t3.handle, t4.handle];
+    let outs: [*mut c_void; 4] = [
+        b1.as_mut_slice().as_mut_ptr() as *mut c_void,
+        b2.as_mut_slice().as_mut_ptr() as *mut c_void,
+        b3.as_mut_slice().as_mut_ptr() as *mut c_void,
+        b4.as_mut_slice().as_mut_ptr() as *mut c_void,
+    ];
+    let sizes: [u64; 4] = [n1, n2, n3, n4];
+
+    let rc = unsafe {
+        nxv_buf_download_batch(
+            srcs.as_ptr(),
+            outs.as_ptr(),
+            sizes.as_ptr(),
+            4,
+        )
+    };
+    if rc != 0 {
+        return Ok((atoms::error(), atoms::download_failed()).encode(env));
+    }
+
+    let bins = (
+        b1.release(env).encode(env),
+        b2.release(env).encode(env),
+        b3.release(env).encode(env),
+        b4.release(env).encode(env),
+    );
+    Ok((atoms::ok(), bins).encode(env))
 }
 
 /// Returns the byte size of the tensor.

@@ -166,6 +166,50 @@ int nxv_has_f64(void) {
     return g_vk_ctx.has_float64 ? 1 : 0;
 }
 
+void nxv_timing_reset(void) {
+    Engine::Backend::vulkan::timing_reset();
+}
+
+void nxv_timing_get(unsigned long long* count,
+                    unsigned long long* dispatch_ns,
+                    unsigned long long* submit_ns,
+                    unsigned long long* wait_ns,
+                    unsigned long long* record_ns) {
+    uint64_t c = 0, d = 0, s = 0, w = 0, r = 0;
+    Engine::Backend::vulkan::timing_get(&c, &d, &s, &w, &r);
+    if (count)       *count = (unsigned long long) c;
+    if (dispatch_ns) *dispatch_ns = (unsigned long long) d;
+    if (submit_ns)   *submit_ns = (unsigned long long) s;
+    if (wait_ns)     *wait_ns = (unsigned long long) w;
+    if (record_ns)   *record_ns = (unsigned long long) r;
+}
+
+int nxv_buf_download_batch(void** srcs, void** out_data,
+                           const unsigned long* sizes, unsigned int n_buffers) {
+    if (!srcs || !out_data || !sizes || n_buffers == 0) return -1;
+    std::vector<Engine::Backend::vulkan::VkBuf*> bufs(n_buffers);
+    std::vector<VkDeviceSize> vsizes(n_buffers);
+    for (unsigned int i = 0; i < n_buffers; i++) {
+        bufs[i] = (Engine::Backend::vulkan::VkBuf*) srcs[i];
+        vsizes[i] = (VkDeviceSize) sizes[i];
+    }
+    return Engine::Backend::vulkan::download_batch(
+        bufs.data(), out_data, vsizes.data(), n_buffers);
+}
+
+int nxv_buf_upload_batch(void** dsts, const void** data,
+                         const unsigned long* sizes, unsigned int n_buffers) {
+    if (!dsts || !data || !sizes || n_buffers == 0) return -1;
+    std::vector<Engine::Backend::vulkan::VkBuf*> bufs(n_buffers);
+    std::vector<VkDeviceSize> vsizes(n_buffers);
+    for (unsigned int i = 0; i < n_buffers; i++) {
+        bufs[i] = (Engine::Backend::vulkan::VkBuf*) dsts[i];
+        vsizes[i] = (VkDeviceSize) sizes[i];
+    }
+    return Engine::Backend::vulkan::upload_batch(
+        bufs.data(), data, vsizes.data(), n_buffers);
+}
+
 /* Tensor primitives — heap-allocate a VkBuf so the handle survives
  * across NIF calls. Lifetime is owned by the Rust ResourceArc; when
  * the Elixir reference is GC'd, Rust calls nxv_buf_free which

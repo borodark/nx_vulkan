@@ -177,6 +177,25 @@ int dispatch(VkPipe* p, VkBuffer* buffers, uint32_t n_buffers,
              uint32_t group_count_x,
              uint32_t push_size = 0, const void* push_data = nullptr);
 
+/* H3 dispatch timing accumulators. All times in nanoseconds; count is the
+ * number of dispatch() calls since the last reset. */
+void timing_reset();
+void timing_get(uint64_t* count, uint64_t* dispatch_ns, uint64_t* submit_ns,
+                uint64_t* wait_ns, uint64_t* record_ns);
+
+/* Batched host→device upload: packs N host source pointers into one
+ * staging buffer + issues N copies in one submit_and_wait. Saves N-1
+ * fence waits. Returns 0 on success. */
+int upload_batch(VkBuf** dsts, const void** data,
+                 const VkDeviceSize* sizes, uint32_t n_buffers);
+
+/* Batched device→host download: copies N device buffers into one staging
+ * region with a single command buffer + single submit_and_wait. Sources
+ * may differ in size; out_data[i] receives sizes[i] bytes from srcs[i].
+ * Returns 0 on success. */
+int download_batch(VkBuf** srcs, void** out_data, const VkDeviceSize* sizes,
+                   uint32_t n_buffers);
+
 /* ----------------------------------------------------------------
  * Parallel primitives — matching Backend::par interface
  * ---------------------------------------------------------------- */

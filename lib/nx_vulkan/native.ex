@@ -22,11 +22,28 @@ defmodule Nx.Vulkan.Native do
   @doc false
   def has_f64(), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "H3 dispatch timing — reset accumulators."
+  def timing_reset(), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "H3 dispatch timing — read {count, dispatch_ns, submit_ns, wait_ns, record_ns}."
+  def timing_get(), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc false
   def upload_binary(_data), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Upload a binary into an existing GPU buffer (no alloc)."
+  def upload_binary_into(_tensor, _data), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Batched upload of 2 binaries into 2 existing GPU buffers in one round-trip."
+  def upload_binary_into_batch2(_t1, _d1, _t2, _d2),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc false
   def download_binary(_tensor, _n_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Batched download of 4 GPU tensors in a single submit/wait round-trip."
+  def download_binary_batch4(_t1, _t2, _t3, _t4),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   def byte_size(_tensor), do: :erlang.nif_error(:nif_not_loaded)

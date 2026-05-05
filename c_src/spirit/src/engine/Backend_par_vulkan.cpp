@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
+#include <atomic>
+#include <chrono>
 
 #define VK_CHECK(f, msg) do { \
     VkResult _r = (f); \
@@ -26,6 +28,31 @@
 namespace Engine {
 namespace Backend {
 namespace vulkan {
+
+/* H3 dispatch timing accumulators (nanoseconds). Read via getters in the
+ * shim layer; reset between phases by callers. */
+static std::atomic<uint64_t> g_dispatch_count{0};
+static std::atomic<uint64_t> g_dispatch_total_ns{0};
+static std::atomic<uint64_t> g_submit_total_ns{0};
+static std::atomic<uint64_t> g_wait_total_ns{0};
+static std::atomic<uint64_t> g_record_total_ns{0};
+
+void timing_reset() {
+    g_dispatch_count.store(0);
+    g_dispatch_total_ns.store(0);
+    g_submit_total_ns.store(0);
+    g_wait_total_ns.store(0);
+    g_record_total_ns.store(0);
+}
+
+void timing_get(uint64_t* count, uint64_t* dispatch_ns, uint64_t* submit_ns,
+                uint64_t* wait_ns, uint64_t* record_ns) {
+    if (count)       *count = g_dispatch_count.load();
+    if (dispatch_ns) *dispatch_ns = g_dispatch_total_ns.load();
+    if (submit_ns)   *submit_ns = g_submit_total_ns.load();
+    if (wait_ns)     *wait_ns = g_wait_total_ns.load();
+    if (record_ns)   *record_ns = g_record_total_ns.load();
+}
 
 /* Global context instance */
 VkContext g_vk_ctx;
@@ -232,8 +259,17 @@ static int submit_and_wait(VkCommandBuffer cmd)
     submit.pCommandBuffers = &cmd;
 
     vkResetFences(ctx.device, 1, &ctx.sync_fence);
+
+    auto t_submit_start = std::chrono::steady_clock::now();
     VK_CHECK(vkQueueSubmit(ctx.compute_queue, 1, &submit, ctx.sync_fence), "submit");
+    auto t_submit_end = std::chrono::steady_clock::now();
     VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.sync_fence, VK_TRUE, UINT64_MAX), "wait");
+    auto t_wait_end = std::chrono::steady_clock::now();
+
+    g_submit_total_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_submit_end - t_submit_start).count());
+    g_wait_total_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_wait_end - t_submit_end).count());
     return 0;
 }
 
@@ -297,6 +333,112 @@ int download(VkBuf* src, void* data, VkDeviceSize size)
     void* mapped;
     vkMapMemory(ctx.device, staging.memory, 0, size, 0, &mapped);
     memcpy(data, mapped, size);
+    vkUnmapMemory(ctx.device, staging.memory);
+
+    buf_free(&staging);
+    return 0;
+}
+
+/* Batched upload — pack N host source pointers into one staging buffer
+ * (single map+memcpy), then issue N vkCmdCopyBuffer regions into N
+ * destination GPU buffers, one submit_and_wait. Saves N-1 fence waits.
+ * Returns 0 on success. */
+int upload_batch(VkBuf** dsts, const void** data,
+                 const VkDeviceSize* sizes, uint32_t n_buffers)
+{
+    auto& ctx = g_vk_ctx;
+    if (n_buffers == 0) return 0;
+
+    VkDeviceSize total = 0;
+    std::vector<VkDeviceSize> offsets(n_buffers);
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        offsets[i] = total;
+        total += sizes[i];
+    }
+
+    VkBuf staging{};
+    buf_alloc(&staging, total,
+              VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    void* mapped;
+    vkMapMemory(ctx.device, staging.memory, 0, total, 0, &mapped);
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        memcpy((uint8_t*) mapped + offsets[i], data[i], sizes[i]);
+    }
+    vkUnmapMemory(ctx.device, staging.memory);
+
+    VkCommandBuffer cmd = ctx.xfer_cmd;
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        VkBufferCopy region{};
+        region.srcOffset = offsets[i];
+        region.dstOffset = 0;
+        region.size = sizes[i];
+        vkCmdCopyBuffer(cmd, staging.buffer, dsts[i]->buffer, 1, &region);
+    }
+
+    vkEndCommandBuffer(cmd);
+    submit_and_wait(cmd);
+
+    buf_free(&staging);
+    return 0;
+}
+
+/* Batched download — copy N source buffers into one staging buffer in a
+ * single command buffer + single submit_and_wait, then memcpy each region
+ * into the matching out_data pointer. Saves N-1 fence waits. Sources may
+ * be of different sizes; out_data[i] receives sizes[i] bytes from srcs[i].
+ *
+ * Returns 0 on success. */
+int download_batch(VkBuf** srcs, void** out_data, const VkDeviceSize* sizes,
+                   uint32_t n_buffers)
+{
+    auto& ctx = g_vk_ctx;
+    if (n_buffers == 0) return 0;
+
+    VkDeviceSize total = 0;
+    std::vector<VkDeviceSize> offsets(n_buffers);
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        offsets[i] = total;
+        total += sizes[i];
+    }
+
+    VkBuf staging{};
+    buf_alloc(&staging, total,
+              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    VkCommandBuffer cmd = ctx.xfer_cmd;
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        VkBufferCopy region{};
+        region.srcOffset = 0;
+        region.dstOffset = offsets[i];
+        region.size = sizes[i];
+        vkCmdCopyBuffer(cmd, srcs[i]->buffer, staging.buffer, 1, &region);
+    }
+
+    vkEndCommandBuffer(cmd);
+    submit_and_wait(cmd);
+
+    void* mapped;
+    vkMapMemory(ctx.device, staging.memory, 0, total, 0, &mapped);
+    for (uint32_t i = 0; i < n_buffers; i++) {
+        memcpy(out_data[i], (uint8_t*) mapped + offsets[i], sizes[i]);
+    }
     vkUnmapMemory(ctx.device, staging.memory);
 
     buf_free(&staging);
@@ -438,6 +580,7 @@ int dispatch(VkPipe* p, VkBuffer* buffers, uint32_t n_buffers,
              uint32_t push_size, const void* push_data)
 {
     auto& ctx = g_vk_ctx;
+    auto t_dispatch_start = std::chrono::steady_clock::now();
 
     /* Update descriptor set */
     std::vector<VkWriteDescriptorSet> writes(n_buffers);
@@ -475,7 +618,16 @@ int dispatch(VkPipe* p, VkBuffer* buffers, uint32_t n_buffers,
     vkCmdDispatch(cmd, group_count_x, 1, 1);
     vkEndCommandBuffer(cmd);
 
+    auto t_record_end = std::chrono::steady_clock::now();
+    g_record_total_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_record_end - t_dispatch_start).count());
+
     submit_and_wait(cmd);
+
+    auto t_dispatch_end = std::chrono::steady_clock::now();
+    g_dispatch_total_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_dispatch_end - t_dispatch_start).count());
+    g_dispatch_count.fetch_add(1);
 
     return 0;
 }
