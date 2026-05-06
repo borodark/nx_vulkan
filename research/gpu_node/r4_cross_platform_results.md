@@ -64,3 +64,55 @@ expects the sampler to exceed the timeout, but FreeBSD's faster
 fence waits let it complete in time. Not a bug — the bulkhead
 mechanism works correctly, the test's timeout constant needs
 platform-aware calibration.
+
+## R5 — Post-Phase-1 Synthesis Cross-Platform
+
+### Synthesis smoke test (Beta shader)
+
+| Platform | synth+compile | first dispatch | logp | Match? |
+|----------|--------------|----------------|------|--------|
+| Linux RTX 3060 Ti | 157ms cold / 8ms cached | 39ms | -1.5162 | ref |
+| **FreeBSD GT 750M** | **135ms** cold | **21ms** | **-1.5162** | ✓ |
+| **FreeBSD GT 650M** | **191ms** cold / 2ms cached | **21ms** | **-1.5162** | ✓ |
+
+Synthesized Beta shader compiles and produces identical logp on all three platforms.
+
+### W2 validator (post-Phase-1, no regression)
+
+| Platform | Pass | Fail | Excluded |
+|----------|------|------|----------|
+| FreeBSD GT 750M | 13 | 0 | 4 |
+| FreeBSD GT 650M | 13 | 0 | 4 |
+
+Identical to R4. Phase 1 didn't break anything.
+
+### W4 warmup (post-Phase-1)
+
+#### mac-248 GT 750M
+
+| Family | Cold (µs) | Warm p50 (µs) | p99/p50 |
+|--------|----------|---------------|---------|
+| Normal | 26,248 | 15,530 | 1.65 |
+| Exponential | 37,109 | 27,171 | 1.39 |
+| StudentT | 28,971 | 25,524 | 1.38 |
+| HalfNormal | 56,530 | 45,175 | 1.37 |
+| Weibull | 33,331 | 28,933 | 1.76 |
+
+#### mac-247 GT 650M
+
+| Family | Cold (µs) | Warm p50 (µs) | p99/p50 |
+|--------|----------|---------------|---------|
+| Normal | 29,790 | 18,425 | 1.77 |
+| Exponential | 48,545 | 42,947 | 1.48 |
+| StudentT | 50,187 | 42,926 | 1.37 |
+| HalfNormal | 66,504 | 68,199 | 1.61 |
+| Weibull | 58,003 | 66,808 | 1.46 |
+
+Consistent with R4 — no regression from Phase 1.
+
+### W6 chaos (post-Phase-1)
+
+| Platform | Pass | Fail | Notes |
+|----------|------|------|-------|
+| FreeBSD GT 750M | 2 | 1 | timeout calibration (same as R4) |
+| FreeBSD GT 650M | 2 | 1 | timeout calibration (regressed from R4's 3/0) |

@@ -6,10 +6,10 @@ Each window = 5 samples (~14-30 dispatches depending on tree depth).
 
 | Family | Cold window (µs) | Warm p50 (µs) | Warm p99 (µs) | Warm @ window | Total dispatches |
 |---|---|---|---|---|---|
-| Normal | 20494 | 10938 | 20941 | 50 | 2771 |
-| Exponential | 30831 | 27288 | 37845 | 20 | 5034 |
-| StudentT | 29138 | 26078 | 36587 | 20 | 6981 |
-| HalfNormal | 45791 | 45279 | 58196 | 20 | 8781 |
-| Weibull | 23391 | 28099 | 40736 | 20 | 5769 |
+| Normal | 26248 | 15530 | 25571 | 20 | 2771 |
+| Exponential | 37109 | 27171 | 37697 | 20 | 5034 |
+| StudentT | 28971 | 25524 | 35188 | 20 | 6981 |
+| HalfNormal | 56530 | 45175 | 62081 | 20 | 8781 |
+| Weibull | 33331 | 28933 | 50941 | 20 | 5769 |
 
 Per-family CSVs in `bench/warmup_curves/{family}.csv`.
