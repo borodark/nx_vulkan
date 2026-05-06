@@ -116,3 +116,35 @@ Consistent with R4 — no regression from Phase 1.
 |----------|------|------|-------|
 | FreeBSD GT 750M | 2 | 1 | timeout calibration (same as R4) |
 | FreeBSD GT 650M | 2 | 1 | timeout calibration (regressed from R4's 3/0) |
+
+## R6 — Phase 1 Fully Wired (10-cell race + validator)
+
+### Validator with 3 new Phase 1 tests
+
+| Platform | Tests | Pass | Fail | Notes |
+|----------|-------|------|------|-------|
+| Linux RTX 3060 Ti | 16 | 12 | 4 | 4 known-failures (Exp/Cauchy/HN/Weibull) |
+| **FreeBSD GT 750M** | 16 | **16** | **0** | All pass incl. Beta/Gamma/Lognormal synth |
+| **FreeBSD GT 650M** | 16 | **16** | **0** | All pass incl. Beta/Gamma/Lognormal synth |
+
+FreeBSD passes ALL 16 validator tests — 4 more than Linux. The
+4 known-failure families (Exponential, Cauchy, HalfNormal, Weibull)
+that fail on Linux NVIDIA pass on FreeBSD NVIDIA. This suggests the
+chain-integrator drift issue (Stage 1.5.4) is Linux-driver-specific,
+not shader-logic-specific.
+
+### 10-cell race (partial — EXLA path blocked on d>1)
+
+Only Normal d=1 completed before the unfused "EXLA" path stalled on d=8:
+
+| Cell | mac-248 GT 750M | mac-247 GT 650M | Linux (ref) |
+|------|-----------------|-----------------|-------------|
+| Normal d=1 EXLA (unfused) | 307ms | 490ms | 873ms |
+| Normal d=1 Vulkan-fused | **103ms** | **166ms** | 1,500ms |
+
+FreeBSD fused path is 8.4-14.6× faster than Linux fused. Consistent
+with the per-fence latency advantage measured throughout R3-R5.
+
+Race cells d>1 blocked: unfused Vulkan at d=8+ is too slow on FreeBSD
+(same issue as R1). Would need either EXLA CPU baseline or a fused-only
+race to complete the 10-cell matrix.
