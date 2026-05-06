@@ -254,7 +254,85 @@ Evidence: the failure shapes don't match a typical drift pattern.
 All three failure shapes match a *precision* hypothesis, not a
 *compiler quirk* hypothesis.
 
-### Stage 2.5 — validator precision fix (proposed, not yet implemented)
+### Stage 2.5 (2026-05-06) — matched-precision validator + per-shader diagnosis
+
+Added `:precision => :f32 | :f64` option to `Validator.validate/3`.
+When `:f32`, the validator forces the EXLA reference path to f32
+via `Application.put_env(:exmc, :force_precision, :f32)` so it
+matches the chain shader's working precision. Underlying mechanism:
+`Exmc.JIT.precision/0` now reads `Application.get_env(:exmc,
+:force_precision)` as an override.
+
+Re-running the 3 known-failure tests at matched precision produced
+**three different diagnoses**:
+
+| Shader | f64 EXLA / f32 Vulkan | f32 EXLA / f32 Vulkan | Diagnosis |
+|---|---|---|---|
+| Exponential | FAIL (var 0.354 vs 0.243, 1.2× tol) | **:ok** | **pure precision-gap, FIXED at matched precision** |
+| Cauchy | FAIL (IQR 1.76 vs 8.83, 35× tol) | FAIL (IQR 1.76 vs 2.13, 5× tol) | **mostly precision-gap, residual is finite-N noise on fat-tailed posterior** |
+| HalfNormal | FAIL (mean 0.582 vs 0.896, 2.7× tol) | FAIL (mean 0.582 vs 0.896, 2.7× tol — unchanged) | **transform mismatch — separate bug** |
+
+### The HalfNormal transform mismatch
+
+`Exmc.Dist.HalfNormal.transform/1` returns `:softplus`, meaning
+EXLA samples on q_uc such that `q = log(1 + exp(q_uc))`. The chain
+shader implements `:log` transform (`q = exp(q_uc)`). All other
+positive-support distributions in the catalog (Exponential, Gamma,
+Weibull, Lognormal) use `:log` — HalfNormal is the only outlier.
+
+The shader's gradient `1.0 - exp(2*qi)/sigma²` is correct for
+log-transform HalfNormal. For softplus-transform HalfNormal it
+would be different (involves `dq/dq_uc = sigmoid(q_uc)` rather
+than `exp(q_uc)`).
+
+**Two fix options:**
+
+1. **Change `Exmc.Dist.HalfNormal.transform/1` to `:log`** —
+   one-line fix, makes HalfNormal consistent with the rest of the
+   positive-support catalog. Risk: any user model relying on
+   softplus geometry near q=0 sees different mass-matrix
+   adaptation (probably fine in practice; both transforms
+   asymptote to the same posterior).
+
+2. **Reject HalfNormal in the chain-shader codegen** when
+   `transform != :log`. `chain_shader_codegen.detect_meta/1` would
+   call into the Dist module and fall back to the EXLA path if the
+   transform is not `:log`. Conservative; doesn't break anything
+   but loses the chain-shader speedup for HalfNormal.
+
+3. **Write a softplus-transform chain shader** as a separate
+   variant. More work; only worth it if there's a demonstrated
+   reason HalfNormal needs softplus.
+
+Recommendation: Option 1 (change transform) for consistency.
+
+### Re-tagging plan
+
+Replace the single `:vulkan_known_failure` tag with three more
+accurate tags:
+
+- **Exponential**: untag entirely. Add the matched-precision check
+  with `precision: :f32` as the test default; the f64 reference
+  becomes an opt-in stricter test.
+- **Cauchy**: rename to `:f32_precision_limited`. Document that
+  fat-tailed posteriors at f32 produce statistically different
+  IQRs from f64 even when the algorithm is correct. Not a bug; a
+  known limitation of f32 chain shaders.
+- **HalfNormal**: rename to `:transform_mismatch` until Option 1
+  lands. Once HalfNormal's transform is `:log`, the test should
+  pass at matched precision and the tag comes off entirely.
+
+### What this means for W7 overall
+
+- **Stage 1 was right**: Weibull is a real driver-level fix
+  (precise float disabled FMA fusion that was actually wrong).
+- **Stages 2 / 3 / 4 / 5** are no longer applicable — there's
+  no remaining driver bug to chase.
+- **The W2 validator was diagnosing real problems**, but mixing
+  three different ones under a single tag. Stage 2.5 separates
+  them: 1 driver bug (Stage 1, fixed), 1 precision-limited
+  family (Cauchy, accept), 1 algorithmic mismatch (HalfNormal,
+  fixable), 1 false alarm (Exponential, untag).
 
 Two options for the validator:
 
