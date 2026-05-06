@@ -1111,3 +1111,95 @@ table format. Push as a single commit on `feat/gpu-node`.
 If R8 confirms 16/16 on both Macs and Weibull wall is unchanged,
 W7 Stage 1 lands as a real fix (one shader recovered) and we move
 to Stage 2 for the others.
+
+---
+
+## R9 (2026-05-06) — W7 closure + matched-precision validator
+
+W7 closes with three real fixes plus a clean diagnosis of what's
+left:
+
+- W7 Stage 1 (`spirit@704dd2df` + `nx_vulkan@29dd09b`): `precise float`
+  on chain shader loop accumulators. **Fixed Weibull's Linux NVIDIA
+  fp32 drift** — real driver-level FMA fusion bug, fix is portable.
+- W7 Stage 2.5 (`pymc@83f7464cf`): matched-precision validator. Adds
+  `precision: :f32 | :f64` opt to `Validator.validate/3`. Untangles
+  shader-correctness from f32-vs-f64 precision-gap artifacts.
+- W7 Stage 2.5 follow-up (`pymc@65cf9e486`): re-tag the 3 historical
+  failures by their actual diagnosis + fix HalfNormal's transform.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+### What changed for the 4 historical "vulkan_known_failure" tests
+
+| Shader | Pre-W7 status | New status | Tag |
+|---|---|---|---|
+| Weibull | red on Linux | **green on all platforms** (W7 Stage 1) | none |
+| Exponential | red on Linux | **green at matched-precision** (test now uses `precision: :f32`) | none |
+| HalfNormal | red on Linux | **green at matched-precision** (transform changed `:softplus` → `:log`) | none |
+| Cauchy | red on Linux | green-by-skip (auto-excluded) | `:f32_precision_limited` |
+
+The `Exmc.Dist.HalfNormal.transform/1` change from `:softplus` to
+`:log` is a behavior change for non-shader users too. The
+mathematical posterior is unchanged (both transforms are valid
+bijections), but the unconstrained space (and therefore mass-matrix
+adaptation, ESS, etc.) shifts.
+
+### R9 ask 1 + 2 — Re-run validator + W6 + fair race on both Macs
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/nuts/vulkan/         # validator + server + bulkhead
+RACE_QUICK=1 mix run bench/fair_race.exs                      # full 10-cell race
+```
+
+### Linux RTX 3060 Ti baseline (post-W7-2.5 follow-up)
+
+```
+test/exmc/nuts/vulkan/  →  22 tests, 0 failures, 1 excluded
+test/exmc_test.exs      →  11 doctests, 18 tests, 0 failures
+```
+
+The 1 excluded is Cauchy (`:f32_precision_limited`). It auto-skips
+under `EXMC_COMPILER=vulkan` because f32 chain shaders structurally
+cannot reproduce f64 reference IQRs for fat-tailed posteriors.
+
+### What we want to confirm on FreeBSD
+
+Both Macs were already 16/16 on the validator under the old
+f64-EXLA-vs-f32-Vulkan default. With the new tests using
+`precision: :f32`, the validator becomes a stricter shader-
+correctness check (smaller tolerances at matched precision).
+Expectation: still 16/16 (or 22 since the suite grew slightly).
+If anything goes red, that's a real shader bug we need to know
+about on FreeBSD.
+
+The HalfNormal Dist transform change is the riskier one. If your
+FreeBSD samples for HalfNormal posteriors look wildly different
+from before (e.g., ESS or wall_ms shifts by >2×), that's the
+transform change biting.
+
+### R9 ask 3 — Spot-check HalfNormal sampler stability on FreeBSD
+
+If you have a HalfNormal-using model in any of your existing
+benchmarks or tests, re-run it with the new transform and compare
+the posterior. Should be statistically equivalent (both transforms
+sample the same posterior) but mass-matrix adaptation may settle
+differently.
+
+If the existing tests don't exercise HalfNormal, just running
+`mix test` (full suite) covers the basic regression check.
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R9` section,
+single new commit on `feat/gpu-node`. Should be the last pre-merge
+mac-248 ask before this branch lands on `pymc/main`.
+
+If R9 is clean (no regressions on either Mac), W7 is closed and
+`feat/gpu-node` is ready to merge.
