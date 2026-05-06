@@ -55,6 +55,66 @@ The template engine handles the leapfrog skeleton. You provide three GLSL fragme
 :ok = Nx.Vulkan.PipelineCache.persist()
 ```
 
+## Position vs EXLA and EMLX
+
+Three GPU backends exist for Nx today. Each won a different platform first.
+
+| | EXLA | EMLX | Nx.Vulkan |
+|---|---|---|---|
+| **Backing API** | Google XLA | Apple MLX (Metal) | Khronos Vulkan compute |
+| **Maturity** | Years; production | Released 2024 | Released 2026 (this repo) |
+| **Linux + NVIDIA CUDA** | ✓ canonical | ✗ | ✓ (Linux NVIDIA Vulkan driver) |
+| **macOS + Apple Silicon** | ✗ | ✓ canonical | ✓ (MoltenVK) |
+| **FreeBSD + NVIDIA** | ✗ | ✗ | ✓ **only path** |
+| **Windows / WSL2** | partial via TF | ✗ | ✓ (Vulkan ships on Windows) |
+| **Op coverage** | full Nx surface (~200 ops) | full Nx surface | **partial** — see below |
+| **`Nx.Defn.jit`** | full XLA HLO | full MLX graph | partial via `Nx.Vulkan.Compiler` |
+| **fp64 compute** | full | none (Metal limit) | depends on driver (RTX: yes; mesa-radv: yes) |
+| **Production deployment** | Google scale | Apple personal devices | nascent — used inside [`exmc`](../pymc/exmc) |
+
+### What Nx.Vulkan does today that the others don't
+
+- **Per-family chain shader synthesis at runtime** for HMC/NUTS samplers. `Nx.Vulkan.ShaderTemplate` + `Nx.Vulkan.Synthesis` + `Nx.Vulkan.ChainShaderSpecs` produce a working SPV under 200 ms cold path; subsequent calls hit a content-addressed disk cache. Neither EXLA nor EMLX synthesizes specialized kernels at runtime — they're trace-and-compile-and-cache against the user's defn.
+- **Long-lived per-machine GPU node**, not per-process. `Nx.Vulkan.Node` with `with_node/2` lets multiple BEAM processes share a pipeline cache and a buffer registry through one named GenServer — useful when 67 trading-instrument processes all want GPU dispatch but can't each pay the pipeline-create cost.
+- **Disk-persistent `vkPipelineCache`**, header-validated against the device UUID. Survives BEAM restarts. EXLA's HLO cache is per-process; EMLX caches in MLX's process-local pool.
+
+### What's missing to reach parity
+
+The honest gap, by category. "Parity" here means "pick the same backend for the same workload and get within 2× of EXLA's wall-time."
+
+**Op coverage — biggest gap.** Nx has roughly 200 ops; EXLA and EMLX cover essentially all of them. Nx.Vulkan currently ships:
+
+- Elementwise unary + binary (via `Nx.Vulkan.Native.apply_unary` / `apply_binary` over Spirit's compiled SPV).
+- Reductions (sum, min, max, axis reductions).
+- `matmul` / `matmul_v` (specialised + variants).
+- Random sampling.
+- Transpose, cast, broadcast.
+- 9 chain shader families (Normal/Exp/StudentT/Cauchy/HalfNormal/Weibull/Beta/Gamma/Lognormal) for HMC integration — these are *not* generic Nx ops; they're specialised compute kernels that the Nx layer wouldn't expose to user defn but that exmc's NUTS sampler talks to directly.
+
+What's *not* there yet: convolutions, FFTs, sort, scatter/gather, padding modes beyond fill-with-constant, complex numbers, sparse ops, autodiff via VJP/JVP wiring. Each is a small-to-medium Vulkan compute shader plus a `Nx.Backend` callback. Estimated effort to close the op-coverage gap: **6-12 months of focused work**, parallelisable across multiple shader authors.
+
+**`Nx.Defn` JIT integration — partial.** `Nx.Vulkan.Compiler` exists and auto-detects fusable elementwise chains, dispatching `Nx.Vulkan.fused_chain/3` instead of N separate shader calls. This catches the trivial cases. What's missing: full graph-level optimisation (operator fusion across reductions, kernel-launch coalescing, layout-aware scheduling). EXLA's XLA does all this; ours doesn't yet. Estimated effort: **3-6 months** to reach "Nx.Defn power-user gets reasonable speedups without thinking about it."
+
+**Performance tooling — small gap.** Profiling, dispatch counters, pipeline-cache hit telemetry — much of this exists (`Nx.Vulkan.Native.timing_get/0` exposes per-fence/dispatch counters), but it's not packaged as a user-facing dashboard the way EXLA's HLO dump is. **1-2 months.**
+
+**Correctness gaps for fat-tailed distributions.** Cauchy is auto-skipped at `:f32_precision_limited` because f32 chain shaders structurally can't reproduce f64 reference IQR for distributions without defined moments. Either the validator gets a documented "expected gap" mode, or the chain shader path gets an opt-in fp64 implementation (Spirit supports it; some shaders ship in `_f64` variants already). **2 weeks.**
+
+**Op-by-op reaches 2× of EXLA**: with current ops, mesa-radv on the FreeBSD GT 750M already beats NVIDIA Linux EXLA by 7× on the chain shader workload. The gap on Linux is 2-3× (post-W3 optimisation work; see Performance below). For elementwise + reductions + matmul on equivalent-class hardware, Vulkan and EXLA are within 50% of each other on Linux today. The gap mostly closes for free as new ops land — Vulkan compute is fundamentally fast.
+
+### Roadmap
+
+```
+Phase 0: bring-up                                            ✓ shipped (2026 Q1)
+Phase 1: chain shader synthesis + GPU node + persistent cache ✓ shipped (2026 Q2)
+Phase 2: in-flight dispatch cancellation                     in progress
+Phase 3: multi-client mDNS discovery                          planned 2026 Q3
+Phase 4: op-coverage push (conv, FFT, sort, scatter)          2026 Q3-Q4
+Phase 5: full Nx.Defn graph optimisation                      2027 H1
+Phase 6: f64 chain shader variants for fat-tailed dists       opportunistic
+```
+
+For a workload that lives entirely in elementwise+reduce+matmul (most NUTS samplers, many neural network forward passes), Nx.Vulkan is **already a viable EXLA alternative on Linux** and **the only option on FreeBSD**. For graph-heavy inference (large language model serving, conv-heavy CV), the gap closes in the 2026 Q3-Q4 horizon.
+
 ## Why FreeBSD matters
 
 Nx today has two GPU backends:
