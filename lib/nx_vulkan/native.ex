@@ -28,6 +28,15 @@ defmodule Nx.Vulkan.Native do
   @doc "H3 dispatch timing — read {count, dispatch_ns, submit_ns, wait_ns, record_ns}."
   def timing_get(), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Phase 2 W5 — load on-disk pipeline cache blob into the spirit context."
+  def pipeline_cache_load(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Phase 2 W5 — atomically write spirit's current pipeline cache to disk."
+  def pipeline_cache_persist(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Phase 2 W5 — read the device's pipelineCacheUUID as a 16-byte binary."
+  def device_uuid(), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc false
   def upload_binary(_data), do: :erlang.nif_error(:nif_not_loaded)
 
@@ -120,6 +129,15 @@ defmodule Nx.Vulkan.Native do
 
   @doc false
   def leapfrog_normal(_q, _p, _inv_mass, _eps, _mu, _sigma, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Generic K-step leapfrog chain for synthesized shaders.
+
+  `push` is a raw binary assembled by the Elixir-side codegen (max 128 bytes).
+  Returns `{:ok, {q_chain, p_chain, grad_chain, logp_chain}}`.
+  """
+  def leapfrog_chain_synth(_q, _p, _inv_mass, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false

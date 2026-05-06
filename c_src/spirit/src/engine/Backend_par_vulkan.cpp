@@ -191,12 +191,19 @@ int vk_init(int device_id)
     VK_CHECK(vkAllocateCommandBuffers(ctx.device, &cmd_ai, &ctx.xfer_cmd),
              "failed to allocate xfer command buffer");
 
+    /* Phase 2 W5 — empty pipeline cache by default. The shim layer
+     * may re-initialize with disk-restored data via
+     * pipeline_cache_create() before the first pipeline is built. */
+    pipeline_cache_create(nullptr, 0);
+
     return 0;
 }
 
 void vk_destroy()
 {
     auto& ctx = g_vk_ctx;
+
+    pipeline_cache_destroy();
 
     for (auto& kv : ctx.shader_cache)
         vkDestroyShaderModule(ctx.device, kv.second, nullptr);
@@ -554,10 +561,98 @@ int create_pipeline(VkPipe* p, VkShaderModule shader,
     pipe_ci.stage.pSpecializationInfo = &spec_info;
     pipe_ci.layout = p->pipeline_layout;
 
-    VK_CHECK(vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1,
+    VK_CHECK(vkCreateComputePipelines(ctx.device, ctx.pipeline_cache, 1,
              &pipe_ci, nullptr, &p->pipeline), "compute pipeline");
 
     return 0;
+}
+
+/* Phase 2 W5 — pipeline cache lifecycle.
+ *
+ * The cache is the driver-opaque blob produced by
+ * vkGetPipelineCacheData. Its first 32 bytes are a Vulkan-spec-mandated
+ * header: {headerSize:u32, headerVersion:u32, vendorID:u32, deviceID:u32,
+ * pipelineCacheUUID:[16]u8}. We sniff that header on load and reject the
+ * blob if vendor/device/UUID don't match the running device — the
+ * driver would otherwise *silently* discard mismatched data with no
+ * error code, leaving us unable to distinguish "no init" from "stale
+ * cache." Better to know up-front. */
+
+int pipeline_cache_create(const void* init_data, size_t init_size)
+{
+    auto& ctx = g_vk_ctx;
+    if (ctx.pipeline_cache != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(ctx.device, ctx.pipeline_cache, nullptr);
+        ctx.pipeline_cache = VK_NULL_HANDLE;
+    }
+
+    const void* effective_init_data = nullptr;
+    size_t effective_init_size = 0;
+
+    if (init_data && init_size >= 32) {
+        const uint8_t* h = (const uint8_t*) init_data;
+        uint32_t header_size    = (uint32_t)h[0]  | ((uint32_t)h[1]  << 8) | ((uint32_t)h[2]  << 16) | ((uint32_t)h[3]  << 24);
+        uint32_t header_version = (uint32_t)h[4]  | ((uint32_t)h[5]  << 8) | ((uint32_t)h[6]  << 16) | ((uint32_t)h[7]  << 24);
+        uint32_t vendor_id      = (uint32_t)h[8]  | ((uint32_t)h[9]  << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+        uint32_t device_id      = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+
+        bool header_ok =
+            header_size >= 32 &&
+            header_size <= init_size &&
+            header_version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+            vendor_id == ctx.device_props.vendorID &&
+            device_id == ctx.device_props.deviceID &&
+            memcmp(h + 16, ctx.device_props.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+
+        if (header_ok) {
+            effective_init_data = init_data;
+            effective_init_size = init_size;
+        } else {
+            fprintf(stderr,
+                    "spirit-vulkan: pipeline cache header mismatch "
+                    "(vendor=%u/%u device=%u/%u) — discarding %zu bytes\n",
+                    vendor_id, ctx.device_props.vendorID,
+                    device_id, ctx.device_props.deviceID,
+                    init_size);
+        }
+    }
+
+    VkPipelineCacheCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    ci.initialDataSize = effective_init_size;
+    ci.pInitialData = effective_init_data;
+
+    VK_CHECK(vkCreatePipelineCache(ctx.device, &ci, nullptr, &ctx.pipeline_cache),
+             "create pipeline cache");
+    return 0;
+}
+
+int pipeline_cache_get_data(void* out_buf, size_t* size_inout)
+{
+    auto& ctx = g_vk_ctx;
+    if (!size_inout) return -1;
+    if (ctx.pipeline_cache == VK_NULL_HANDLE) {
+        *size_inout = 0;
+        return 0;
+    }
+
+    size_t sz = *size_inout;
+    VkResult r = vkGetPipelineCacheData(ctx.device, ctx.pipeline_cache, &sz, out_buf);
+    *size_inout = sz;
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        fprintf(stderr, "spirit-vulkan: vkGetPipelineCacheData failed (%d)\n", r);
+        return -1;
+    }
+    return 0;
+}
+
+void pipeline_cache_destroy()
+{
+    auto& ctx = g_vk_ctx;
+    if (ctx.pipeline_cache != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(ctx.device, ctx.pipeline_cache, nullptr);
+        ctx.pipeline_cache = VK_NULL_HANDLE;
+    }
 }
 
 void destroy_pipeline(VkPipe* p)

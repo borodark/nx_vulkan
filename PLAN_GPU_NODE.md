@@ -136,7 +136,7 @@ Build the EXLA-reference vs synthesized-shader statistical comparison framework.
 
 ### W3 — Process model + protocol
 
-Spike a `Exmc.GPUNode.Server` GenServer that holds the pipeline cache, exposes `register_shader/2`, `dispatch/3`, `evict/1`. Distributed Erlang transport. Reuse `mdns_lite` from the `zed` plan for discovery. Run client + server on same machine first; cross-machine in phase 2.
+Spike a `Nx.Vulkan.Node` GenServer that holds the pipeline cache, exposes `register_shader/2`, `dispatch/3`, `evict/1`. Distributed Erlang transport. Reuse `mdns_lite` from the `zed` plan for discovery. Run client + server on same machine first; cross-machine in phase 2.
 
 **Decision point:** does the GPU node serve via `:rpc.call`, or via a `:gen_statem` with explicit message passing? The latter is more expressive (back-pressure, request priorities) but more code.
 
@@ -160,6 +160,16 @@ What does a watchdog timeout look like in practice? How long does the NVIDIA dri
 
 Spike with deliberately bad shaders (infinite loops via push-constant inputs the shader trusts). Find the failure modes before production does. Confirm clients fall back to EXLA cleanly.
 
+### W7 — Linux NVIDIA chain-shader fp32 drift (added post-R6, 2026-05-06)
+
+R6 cross-platform validation revealed the 4 chain shaders we'd been calling "broken" (Exponential, Cauchy, HalfNormal, Weibull) **pass cleanly on FreeBSD NVIDIA driver** with the same SPIR-V binaries. The drift is Linux-NVIDIA-specific.
+
+Most likely culprit: NVIDIA's GLSL→SPIR-V→PTX pipeline aggressively fuses `a*b + c` into FMA, changing rounding semantics for the loop-carried leapfrog accumulators. Cheapest test: add `precise float` qualifiers to the 4 affected shaders, recompile, re-run W2. If green, FMA fusion confirmed.
+
+Doesn't block Phase 2 — the Phase 1 synthesized shaders (Beta/Gamma/Lognormal) pass on Linux already. W7 is about getting the 4 hand-written shaders unblocked on Linux too.
+
+Full hypothesis tree (H7.1 FMA fusion / H7.2 loop-carried reordering / H7.3 denormal handling / H7.4 driver version / H7.5 NVK comparison) + investigation plan in `research/gpu_node/WORKSTREAM_W7_linux_nvidia_drift.md`.
+
 ---
 
 ## Phased prototyping plan
@@ -168,13 +178,13 @@ Spike with deliberately bad shaders (infinite loops via push-constant inputs the
 
 Existing `nx_vulkan` already has the pipeline cache (`get_or_create_pipe` in `c_src/nx_vulkan_shim.cpp`). Wrap it in a GenServer. Move it from "implicit per-process state via dlopen" to "explicit named GenServer with a state map." No new shaders yet; just port the existing 6.
 
-**Deliverable:** `Exmc.GPUNode.Server` running locally, `tree.ex` dispatching through it instead of through direct NIF calls. Fair race numbers unchanged or marginally faster (the GenServer hop is ~1 µs, negligible vs the 1 ms fence wait).
+**Deliverable:** `Nx.Vulkan.Node` running locally, `tree.ex` dispatching through it instead of through direct NIF calls. Fair race numbers unchanged or marginally faster (the GenServer hop is ~1 µs, negligible vs the 1 ms fence wait).
 
 ### Phase 1 (weeks 2-3) — Synthesis prototype
 
 W1 + W2: pick a substrate (likely template-based GLSL with text substitution to start, since the existing shaders are already templated by push constants). Implement Beta + Gamma chain shaders via synthesis. Validate.
 
-**Deliverable:** `Exmc.GPUNode.Server.register_shader({:beta, alpha, beta_param})` synthesizes, compiles, validates, registers. Subsequent `dispatch/3` calls work. Fair race extended with Beta and Gamma cells.
+**Deliverable:** `Nx.Vulkan.Node.register_shader({:beta, alpha, beta_param})` synthesizes, compiles, validates, registers. Subsequent `dispatch/3` calls work. Fair race extended with Beta and Gamma cells.
 
 ### Phase 2 (week 4) — Warmup + caching
 
@@ -209,7 +219,7 @@ W6: timeouts, fallback to EXLA, OOM handling. Driver crash recovery.
 
 ## What this research produces
 
-- A working `Exmc.GPUNode.Server` that holds the existing 6 chain shaders, plus 1-2 synthesized shaders (Beta and Gamma), demonstrated to converge on conjugate models.
+- A working `Nx.Vulkan.Node` that holds the existing 6 chain shaders, plus 1-2 synthesized shaders (Beta and Gamma), demonstrated to converge on conjugate models.
 - A characterization document: warmup curve per shader, eviction policy parameters, recovery semantics under bad inputs.
 - A clear answer to "do we ship a long-lived GPU node?" — the prototype either demonstrates it or it doesn't, and the measurements tell us why.
 - An informed input to the `zed` plan: what the GPU-node lifecycle and supervision tree need to look like at the deployment-tool level.

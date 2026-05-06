@@ -58,6 +58,46 @@ int nxv_buf_upload_batch(void** dsts, const void** data,
 int nxv_buf_download_batch(void** srcs, void** out_data,
                            const unsigned long* sizes, unsigned int n_buffers);
 
+/* Phase 2 W5 — pipeline cache disk persistence.
+ *
+ * Loads the on-disk blob at `path` (if it exists) and rebuilds the
+ * spirit pipeline cache from it. Header sniff happens inside spirit;
+ * mismatched UUID is silently discarded with a stderr warning.
+ *
+ * Returns 0 on success (including the "no file" + "header mismatch"
+ * cases — both produce a fresh empty cache). Returns negative if the
+ * file exists but cannot be read. */
+int nxv_pipeline_cache_load(const char* path);
+
+/* Persists the current pipeline cache to `path` via write-temp-then-
+ * rename (atomic on same FS). Caller is responsible for ensuring the
+ * parent directory exists.
+ *
+ * Returns 0 on success, negative on I/O error. */
+int nxv_pipeline_cache_persist(const char* path);
+
+/* Reads the current device's pipelineCacheUUID into out[16].
+ * Returns 0 on success, negative if the device isn't initialized. */
+int nxv_device_uuid(unsigned char out[16]);
+
+/* Generic K-step leapfrog chain dispatch for synthesized shaders.
+ *
+ * Identical buffer binding order to all the family-specific
+ * nxv_leapfrog_chain_* entries (q_init, p_init, inv_mass, q_chain,
+ * p_chain, grad_chain, logp_chain at bindings 0-6).
+ *
+ * The push-constants block layout is OPAQUE to this shim — `push_data`
+ * is a raw `push_size`-byte blob assembled by the caller (Elixir-side
+ * codegen knows the per-shader layout). Maximum 128 bytes (Vulkan
+ * minimum guaranteed push-constants size).
+ *
+ * Returns 0 on success, negative on error. */
+int nxv_leapfrog_chain_synth(void* q_chain, void* p_chain,
+                              void* grad_chain, void* logp_chain,
+                              void* q_init, void* p_init, void* inv_mass,
+                              const void* push_data, unsigned int push_size,
+                              const char* spv_path);
+
 /* Tensor primitives (v0.0.2) ------------------------------------------ */
 /* Stubs placed here so Rust can declare them; implementations land in
  * the next iteration once the resource type lifetime is in place. */

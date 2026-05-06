@@ -65,6 +65,13 @@ struct VkContext
      * xfer_cmd: upload/download copy commands. */
     VkCommandBuffer dispatch_cmd = VK_NULL_HANDLE;
     VkCommandBuffer xfer_cmd     = VK_NULL_HANDLE;
+
+    /* Phase 2 W5 — persistent pipeline cache.
+     * Holds compiled SPIR-V → device ISA. Created at init with
+     * pInitialData restored from disk (if header matches the device
+     * UUID). Passed to every vkCreateComputePipelines call. Persisted
+     * back to disk via pipeline_cache_persist(). */
+    VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
 };
 
 /* Global context — matches Spirit's pattern of global state in
@@ -188,6 +195,23 @@ void timing_get(uint64_t* count, uint64_t* dispatch_ns, uint64_t* submit_ns,
  * fence waits. Returns 0 on success. */
 int upload_batch(VkBuf** dsts, const void** data,
                  const VkDeviceSize* sizes, uint32_t n_buffers);
+
+/* Phase 2 W5 — pipeline cache lifecycle.
+ *
+ * pipeline_cache_create() is called once during vk_init after the
+ * VkDevice is up. If `init_data` is non-null and the embedded header
+ * matches the current device's pipelineCacheUUID, the cache is
+ * restored from it. Otherwise a fresh empty cache is created.
+ * Returns 0 on success.
+ *
+ * pipeline_cache_get_data() serializes the current cache into a
+ * caller-allocated buffer. Pass `out_buf=nullptr` to query required
+ * size; then allocate and call again with the buffer.
+ *
+ * pipeline_cache_destroy() tears down the cache (called from vk_destroy). */
+int pipeline_cache_create(const void* init_data, size_t init_size);
+int pipeline_cache_get_data(void* out_buf, size_t* size_inout);
+void pipeline_cache_destroy();
 
 /* Batched device→host download: copies N device buffers into one staging
  * region with a single command buffer + single submit_and_wait. Sources

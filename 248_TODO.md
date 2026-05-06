@@ -590,3 +590,616 @@ about the Linux gap being driver-specific.
 - This TODO supersedes R2 (H1) which is closed.
 - The H3 instrumentation is `Nx.Vulkan.Native.timing_reset/0` and `timing_get/0`,
   documented in `lib/nx_vulkan/native.ex`.
+
+---
+
+## R4 (2026-05-05) — GPU node Phase 0 cross-platform validation
+
+The Phase 0 pieces of `PLAN_GPU_NODE.md` landed today on
+`nx_vulkan@feat/gpu-node` and `pymc@feat/gpu-node`. Six workstreams
+shipped from scaffold to deliverable in one session on the Linux
+side; the cross-platform validation lives with you.
+
+You have ssh to mac-247, so this whole matrix can run from
+mac-248 — drive 247 over ssh as a second worker, report back as
+one set of numbers.
+
+### Pull both branches
+
+```sh
+# on mac-248 (and via ssh on mac-247)
+cd ~/projects/learn_erl/nx_vulkan
+git fetch nas && git checkout feat/gpu-node && git pull --rebase nas feat/gpu-node
+
+cd ~/projects/learn_erl/pymc
+git fetch origin && git checkout feat/gpu-node && git pull --rebase origin feat/gpu-node
+
+cd ~/projects/learn_erl/nx_vulkan && mix deps.get && mix compile
+cd ~/projects/learn_erl/pymc/exmc && mix deps.get && mix compile
+```
+
+`feat/gpu-node` is forked off `feat/dsl-shader-codegen` and
+includes everything in R1/R2/R3 plus the new gpu_node infrastructure.
+
+### The R4 matrix
+
+For each of three platforms — your existing Linux RTX 3060 Ti R3
+numbers (already in `bench/fair_race_results_linux.md`), mac-248's
+FreeBSD GT 750M, mac-247's macOS GT 650M (MoltenVK→Metal) — run
+each of the four measurements:
+
+| | W2 validator | W4 warmup | W5 pipeline cache (when spike lands) | W6 chaos |
+|---|---|---|---|---|
+| Linux RTX 3060 Ti | green (auto-skip 6 known-failures) | done | pending | done (3 tests) |
+| **mac-248 FreeBSD GT 750M** | **R4 ask 1** | **R4 ask 2** | (Phase 2) | **R4 ask 3** |
+| **mac-247 macOS GT 650M** | **R4 ask 4** | **R4 ask 5** | (Phase 2) | **R4 ask 6** |
+
+W5 is research-only on Linux right now (no spike code yet), so
+nothing to test cross-platform until that lands. The other three
+are testable today.
+
+### R4 ask 1 + 4 — W2 validator on each Mac
+
+```sh
+# from each Mac:
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan
+```
+
+What we want: do the same 6 chain shaders that pass on Linux also
+pass on the Mac platform? The validator's auto-skip table tags 4 of
+the 6 as `vulkan_known_failure` on Linux (Exponential, HalfNormal,
+Weibull, Cauchy — Stage 1.5.4 chain-integrator drift, pre-existing).
+Normal and StudentT pass cleanly with KS D=0.
+
+If the same 4 fail on both Macs with similar fingerprints: the bug
+is platform-agnostic, lives in shader logic.
+
+If only some of those 4 fail on one platform: the bug is
+driver/shader-compiler specific. MoltenVK → Metal transpiles SPIR-V
+to MSL with its own quirks; mesa-radv on FreeBSD is yet another path.
+
+If MORE than 4 fail (or different ones): a real platform-specific
+break — escalate.
+
+Calibration table you'll want to compare against:
+`pymc/exmc/research/gpu_node/validation_calibration.md`.
+
+### R4 ask 2 + 5 — W4 warmup characterization
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/warmup_characterization.exs
+```
+
+Produces:
+- `bench/warmup_curves/{family}.csv` — per-window timing for
+  Normal, Exponential, StudentT, HalfNormal, Weibull (Cauchy not
+  in the cell list yet — known TODO).
+- `../../nx_vulkan/research/gpu_node/warmup_summary.md` — overwrites
+  the Linux summary if you run the script. Don't push that
+  overwrite directly; instead copy your numbers into a new section
+  of the same file under `## FreeBSD GT 750M (mac-248)` and
+  `## macOS GT 650M (mac-247)`.
+
+Linux R4 baseline (from yesterday's run, RTX 3060 Ti):
+- Normal: cold 254 ms, warm@20, p99/p50 = 2.04
+- Exponential: cold 916 ms, warm@38, p99/p50 = 1.65
+- StudentT: cold 414 ms, warm@20, p99/p50 = 1.69
+- HalfNormal: cold 596 ms, warm@20, p99/p50 = 1.49
+- Weibull: cold 553 ms, warm@50 (never settled)
+
+Hypothesis: mesa-radv on FreeBSD has lower per-fence latency (~150 µs
+vs ~1.13 ms on NVIDIA Linux), so cold/warm ratios will be tighter
+and the warm point will land earlier. MoltenVK on macOS sits over
+Metal which has its own pipeline-state-object cache; Metal's first
+pipeline create can be slow but subsequent ones are very fast.
+Both Macs likely settle faster than Linux NVIDIA.
+
+If a Mac shows a wildly different curve shape — e.g. cold/warm ratio
+of 50× — flag it, that's likely a driver issue we need to know about.
+
+### R4 ask 3 + 6 — W6 chaos test
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/bulkhead_test.exs --include vulkan
+```
+
+3 cases: timeout fires, dead server returns expected error, sampler
+falls back to EXLA when GPU node times out. All 3 pass on Linux
+RTX 3060 Ti.
+
+This is mostly a portability check (does the bulkhead path crash on
+a different OS?), not a driver-recovery test — Phase 1 W6 will add
+the deliberately-bad-shader chaos test.
+
+### Reporting back
+
+Best path: a single new commit on `nx_vulkan/feat/gpu-node` named
+`R4: cross-platform results — FreeBSD GT 750M + macOS GT 650M`,
+appending to `research/gpu_node/warmup_summary.md` and a new
+`research/gpu_node/validation_calibration_macs.md`. Push to NAS.
+
+If anything on either Mac fails outright (build error, NIF crash,
+test pathology), flag it inline in the commit message and I'll
+investigate from the Linux side.
+
+### What R4 explicitly does NOT ask
+
+- No W1 work — the codegen substrate decision (substrate (a),
+  templated GLSL) is settled.
+- No W3 work — the GenServer is platform-agnostic Elixir.
+- No W5 work yet — the spike hasn't landed; will be R5.
+- No new shaders — the existing 6 are still the universe.
+
+---
+
+## R5 (2026-05-06) — Phase 1 synthesis cross-platform + Beta W2 validation
+
+Phase 1 of `PLAN_GPU_NODE.md` shipped today. The first synthesized
+chain shader (Beta(α, β) on logit-unconstrained space) renders →
+compiles → dispatches end-to-end on Linux RTX 3060 Ti in ~200 ms
+cold path. Now needs cross-platform validation.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix deps.get && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix deps.get && mix compile
+```
+
+New on `nx_vulkan@feat/gpu-node`:
+- `67fa832` — `leapfrog_chain_synth` generic NIF (raw push-data, max 128 bytes)
+
+New on `pymc@feat/gpu-node`:
+- `521550173` — `ShaderTemplate`, `ShaderSpecs.beta`, `Synthesis` (renders + glslangValidator + cache)
+
+### R5 ask 1 + 2 — Synthesis works on FreeBSD GT 750M and GT 650M
+
+`glslangValidator` is a build-time dependency. Verify it's installed:
+
+```sh
+which glslangValidator || pkg install vulkan-tools  # mac-248 (FreeBSD)
+which glslangValidator || brew install glslang      # mac-247 (driven via ssh)
+```
+
+Quick sanity script (run on each Mac):
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+cat > /tmp/r5_synth_smoke.exs <<'EOF'
+{:ok, _} = Application.ensure_all_started(:nx_vulkan)
+Nx.Vulkan.Native.init()
+
+t0 = System.monotonic_time(:millisecond)
+spec = Exmc.GPUNode.ShaderSpecs.beta()
+{:ok, spv_path} = Exmc.GPUNode.Synthesis.compile(spec)
+t1 = System.monotonic_time(:millisecond)
+IO.puts("synth+compile: #{t1 - t0}ms")
+
+n = 1; k = 32
+{:ok, q_ref} = Nx.Vulkan.upload_binary(<<0.0::little-float-32>>)
+{:ok, p_ref} = Nx.Vulkan.upload_binary(<<0.5::little-float-32>>)
+{:ok, m_ref} = Nx.Vulkan.upload_binary(<<1.0::little-float-32>>)
+push = Exmc.GPUNode.ShaderSpecs.beta_push(n, k, 0.1, 2.0, 5.0)
+
+t2 = System.monotonic_time(:microsecond)
+{:ok, {_q, _p, _g, logp}} =
+  Nx.Vulkan.Native.leapfrog_chain_synth(q_ref, p_ref, m_ref, push, k, spv_path)
+t3 = System.monotonic_time(:microsecond)
+IO.puts("first dispatch: #{t3 - t2}us")
+
+{:ok, logp_bin} = Nx.Vulkan.Native.download_binary(logp, k * 4)
+[first | _] = for <<v::little-float-32 <- logp_bin>>, do: Float.round(v, 4)
+IO.puts("first logp: #{first}  (analytic ≈ -1.520)")
+EOF
+mix run /tmp/r5_synth_smoke.exs
+```
+
+Linux baseline: synth+compile 157 ms cold / 8 ms cached, first dispatch 39 ms,
+first logp -1.5162.
+
+What we want from each Mac:
+1. **synth+compile time** — does `glslangValidator` complete in <200 ms?
+   On FreeBSD with the system pkg version, expect similar order of magnitude.
+2. **first dispatch time** — pipeline-create cost. On mesa-radv expect
+   <20 ms (mesa's pipeline creation is faster than NVIDIA Linux).
+3. **first logp value** — should match -1.5162 within f32 precision
+   (≈ ±0.001). If it differs by more than a percent, something is
+   off (push-constant layout, byte order, GLSL semantics).
+
+### R5 ask 3 + 4 — Re-run the W2 validator post-Phase-1
+
+Same as R4 ask 1 + 4 but on the new branch. Should still be
+13 tests, 0 failures, 4 excluded (Exponential/HalfNormal/Weibull/Cauchy
+known-failures). Confirms Phase 1 didn't regress anything.
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan
+```
+
+### R5 ask 5 + 6 — Re-run W4 warmup characterization post-Phase-1
+
+Same as R4 ask 2 + 5. The synthesis path doesn't touch the existing
+6 hand-written shaders, so warmup curves should be unchanged. If
+they ARE significantly different on either Mac, the GenServer
+routing or batched-IO might be interacting differently with the
+mesa/MoltenVK paths.
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/warmup_characterization.exs
+```
+
+(Don't overwrite `warmup_summary.md` this time — append a new section
+"## R5 — Post-Phase-1 numbers" with the per-Mac tables, like the R4
+table format from `r4_cross_platform_results.md`.)
+
+### R5 ask 7 + 8 — Re-run W6 chaos tests
+
+Same as R4 ask 3 + 6. The `:gpu_dispatch_timeout` calibration
+issue from R4 (1 ms timeout too generous on FreeBSD) is still
+present — that test will fail on mac-248 again. Acceptable for
+now; will be fixed once Phase 1 W6 lands the proper chaos test
+(deliberately bad shader instead of artificial timeout).
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/bulkhead_test.exs --include vulkan
+```
+
+### R5 ask 9 — NEW: extend Beta with the W2 validator
+
+The W2 validator harness can hit a Beta model now that we have a
+synthesized shader. Want this to be part of the cross-platform
+matrix because if Beta passes on Linux but fails the same checks on
+a Mac, that's our first cross-platform shader bug — and the
+synthesized path is where future bugs will most often live.
+
+The wiring needed:
+- A Beta IR fixture in `Exmc.Builder` if not already present.
+- A `Beta` distribution module in `Exmc.Dist` that the EXLA path
+  can use as the reference.
+- A new vulkan_meta tag `{:beta, alpha, beta}` recognized by
+  `tree.ex`'s `do_dispatch` clauses.
+- Test case in `validator_test.exs`:
+
+```elixir
+test "Beta(2, 5) synthesized shader matches EXLA reference" do
+  {:ok, _path} = Exmc.GPUNode.Synthesis.compile(Exmc.GPUNode.ShaderSpecs.beta())
+  ir = Builder.new_ir() |> Builder.rv("x", Dist.Beta, %{alpha: Nx.tensor(2.0), beta: Nx.tensor(5.0)})
+  Process.put(:fused_leapfrog_meta, {:beta, 2.0, 5.0})
+  assert :ok = Validator.validate(ir, {:beta, 2.0, 5.0})
+end
+```
+
+This test will likely take some Linux-side wiring before it runs.
+**Skip ask 9 until we ship the Beta IR + Dist + tree.ex hookup.**
+For now, focus on asks 1-8 (synth smoke + replay R4 matrix).
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R5` section and
+push as a single new commit on `feat/gpu-node`.
+
+If `glslangValidator` is missing on either Mac and not in the
+default package repo, flag it inline — we may need to vendor a
+prebuilt SPIR-V cache for distribution rather than requiring the
+compiler at runtime.
+
+---
+
+## R6 (2026-05-06) — Phase 1 fully wired: 10-cell race + 3 new validator cases
+
+Phase 1 of `PLAN_GPU_NODE.md` now wires synthesized chain shaders all
+the way from IR → meta → synthesis → dispatch → statistical validation.
+Three new distributions hit the Vulkan path: Beta, Gamma, Lognormal.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+New on `pymc@feat/gpu-node`:
+- `2927bdf80` — wire Beta/Gamma/Lognormal into NUTS dispatch + W2 validator
+- `0779c7e34` — add Beta/Gamma/Lognormal cells to bench/fair_race.exs
+- `ace199603` — Gamma + Lognormal specs (Beta was earlier in `521550173`)
+
+No `nx_vulkan` changes since R5 — the same `leapfrog_chain_synth` NIF
+serves all three new families; only Elixir-side wiring changed.
+
+### What's different in this race
+
+`bench/fair_race.exs` now has **10 cells** instead of 7. The 3 new cells
+exercise the runtime-synthesis path you smoke-tested in R5 — but driven
+by real NUTS sampling instead of a single-dispatch fixture.
+
+### R6 ask 1 + 2 — Re-run the 10-cell fair race
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/fair_race.exs    # full 1000/1000 if you have time
+# OR
+RACE_QUICK=1 mix run bench/fair_race.exs    # 100/100 quick mode
+```
+
+### Linux RTX 3060 Ti baseline (RACE_QUICK 100/100, post-Phase-1)
+
+Three new rows at the bottom:
+
+| Cell             |  d | EXLA wall (ms) | Vulkan wall (ms) | EXLA ESS/s | Vulkan ESS/s |  ratio |
+|------------------|----|----------------|------------------|------------|--------------|--------|
+| Normal d=1       |  1 |          873   |          1,500   |       24.2 |         14.1 |   0.58 |
+| Normal d=8       |  8 |        1,960   |          1,544   |       33.7 |         42.8 | **1.27** |
+| Normal d=50      | 50 |        3,623   |          1,744   |        6.3 |         23.1 | **3.67** |
+| Exponential      |  1 |        1,663   |          1,951   |       25.9 |         22.1 |   0.85 |
+| StudentT df=3    |  1 |        1,700   |          1,412   |       35.7 |         36.1 |   1.01 |
+| HalfNormal       |  1 |        1,693   |          2,043   |       28.5 |         13.8 |   0.48 (✗ pre-existing) |
+| Weibull k=2      |  1 |        1,599   |          1,835   |       27.3 |         24.2 |   0.89 |
+| **Beta synth**   |  1 |        1,671   |       **43,094** |       24.7 |      **1.0** |   0.04 |
+| **Gamma synth**  |  1 |        1,550   |       **14,475** |       40.2 |      **4.3** |   0.11 |
+| **Lognormal synth**| 1 |       1,675   |          1,760   |       25.4 |         24.2 |   0.95 |
+
+### IMPORTANT — Beta and Gamma look bad. They're not a driver bug.
+
+The agreement check (mean / variance / KS test) **passes** for both
+Beta and Gamma — the synthesized shaders produce statistically correct
+posteriors. But the **mixing is terrible** (ESS = 1.0 and 4.3 out of
+100 samples). The chain is technically valid but barely moves between
+samples.
+
+Root cause is **NUTS adaptation (step size + mass matrix + tree depth)
+is tuned for Normal-shape gradients**, and the new families have
+gradient profiles that adaptation hasn't been calibrated for:
+
+- **Gamma**'s gradient `α - β·exp(q_uc)` explodes exponentially as
+  q_uc grows on log-uc space. NUTS responds by setting tiny ε,
+  producing depth-10 trees (~1000 leapfrogs per iter).
+- **Beta**'s gradient is bounded by sigmoid, but warmup on a logit-uc
+  posterior with α=2, β=3 takes a long time to settle if initial
+  step size overshoots.
+
+This is documented as Phase 1's known limitation. Performance fix
+needs per-family adaptation heuristics or longer warmup — both
+**Linux-side** work, not platform-specific.
+
+What we expect to see on FreeBSD:
+
+- **Lognormal synth**: should be in the same relative position as
+  Normal (well-behaved). Probably 10× faster wall than Linux due to
+  the same per-fence latency advantage measured in R3-R5.
+- **Beta synth + Gamma synth**: will ALSO be slow on FreeBSD, but
+  not 30× slow — the per-iter cost is dominated by the leapfrog
+  step count, and FreeBSD's lower per-fence latency means each
+  leapfrog is cheaper. Probably ~3-5× the Lognormal wall on FreeBSD
+  vs ~25× on Linux. **Confirms the slowness is adaptation, not
+  driver.**
+
+### R6 ask 3 + 4 — Run the validator with the 3 new Phase 1 tests
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan --include requires_vulkan --exclude vulkan_known_failure
+```
+
+Linux baseline: 12 of 16 tests pass. The 4 failures are the
+pre-existing `:vulkan_known_failure` shaders (Exp/Cauchy/HalfNormal/
+Weibull — Stage 1.5.4 chain-integrator drift). The 3 new Phase 1
+tests (Beta(2,3), Gamma(2,1), Lognormal(0,1)) all pass.
+
+What we want to confirm on each Mac:
+- Same 12/16 pass rate (or better).
+- The 3 Phase 1 synthesized tests pass with `:ok`.
+- If any of the Phase 1 tests fail with `{:error, %{check: :ks, ...}}`
+  or similar, that's a real cross-platform bug in the synthesized
+  shader path — escalate.
+
+### What R6 explicitly does NOT ask
+
+- **Don't try to fix Beta/Gamma slowness.** Adaptation tuning is a
+  Linux-side Phase 2 task.
+- **No new shaders** — the catalog is Beta + Gamma + Lognormal for
+  Phase 1.
+- **No W4 re-run unless you want to** — warmup curves haven't
+  changed since R5 (the new shaders weren't measured by W4, but
+  they could be added to a Phase 2 W4 run).
+
+### Reporting back
+
+Append to `research/gpu_node/r4_cross_platform_results.md` with a
+new `## R6 — Phase 1 wired` section, same shape as R5. Push as a
+single new commit.
+
+If Beta/Gamma's wall on FreeBSD is **<5× the Lognormal wall**, that
+confirms our hypothesis (slowness is adaptation, not driver). If
+it's **20×+ like on Linux**, something else is going on and we'll
+investigate.
+
+---
+
+## R8 (2026-05-06) — W7 Stage 1 cross-platform verification
+
+W7 Stage 1 added `precise float` qualifiers to the loop-carried
+accumulators (qi, pi, p_half) and gradient intermediates in the 4
+chain shaders that exhibit Linux NVIDIA fp32 drift (Exponential,
+Cauchy, HalfNormal, Weibull). Compiles to SPIR-V emit
+`OpDecorate ... NoContraction`, telling drivers not to fuse the
+multiply-add into FMA.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+New on `nx_vulkan@feat/gpu-node`:
+- `29dd09b` — vendored 4 W7 Stage 1 SPVs from `spirit@704dd2df`
+
+If you have a sibling spirit checkout at `~/projects/learn_erl/spirit/`,
+`SPIRIT_DIR=~/projects/learn_erl/spirit mix compile` will copy the
+fresh SPVs over the vendored ones automatically.
+
+### Linux RTX 3060 Ti result (post-Stage-1)
+
+W2 validator: 13/16 (was 12/16).
+
+| Shader | Pre-Stage-1 | Post-Stage-1 | Delta |
+|---|---|---|---|
+| Exponential | drift | drift | unchanged |
+| Cauchy | drift (IQR 1.76 vs 8.83) | drift | unchanged |
+| HalfNormal | drift | drift (mean 0.582 vs 0.896) | unchanged |
+| **Weibull** | **drift (mean ~0.98 vs 0.886)** | **PASS** | FIXED |
+
+H7.1 (FMA fusion) is the right hypothesis for Weibull. The other 3
+have a different / additional cause — Stage 2 (denormal handling)
+and Stage 3 (NVK driver comparison) are next.
+
+### R8 ask 1 + 2 — Re-run W2 validator on both Macs
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/nuts/vulkan/validator_test.exs --include vulkan --include requires_vulkan
+```
+
+**Hypothesis:** mesa-radv on FreeBSD doesn't fuse multiply-add as
+aggressively as NVIDIA Linux. Adding `precise` should be a **no-op**
+on FreeBSD — the bytes already produced the right answer. So we
+expect the FreeBSD validator to remain **16/16 on both Macs**.
+
+What we want to confirm:
+1. **No regression.** All 16 still pass on FreeBSD GT 750M and GT 650M.
+2. **`precise` doesn't introduce a new failure.** If a previously-
+   passing shader now drifts, our fix is wrong.
+
+### R8 ask 3 + 4 — Spot-check Weibull wall time on FreeBSD
+
+`precise` can disable fast paths in the shader compiler. NVIDIA's
+docs explicitly warn that overuse can slow shaders by 10-30%. Most
+compute kernels don't notice (they're memory-bound), but the chain
+shader is arithmetic-bound by design.
+
+Run the fair race (RACE_QUICK is enough):
+
+```sh
+RACE_QUICK=1 mix run bench/fair_race.exs
+```
+
+Compare Weibull cell wall to your R5/R6 numbers. If Weibull's
+wall increases by more than ~20%, `precise` cost is significant;
+we may want to scope `precise` to just qi/pi (loop-carried) and
+not the per-step intermediates. If the wall is unchanged, we ship
+Stage 1 as-is.
+
+### What R8 explicitly does NOT ask
+
+- **Don't try to fix Cauchy/Exp/HalfNormal.** Those need Stage 2
+  (denormal clamping) or Stage 3 (NVK), both Linux-side
+  investigations.
+- **No NVK install on FreeBSD.** NVK is mesa's NVIDIA driver — only
+  applicable to Linux.
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R8` section, same
+table format. Push as a single commit on `feat/gpu-node`.
+
+If R8 confirms 16/16 on both Macs and Weibull wall is unchanged,
+W7 Stage 1 lands as a real fix (one shader recovered) and we move
+to Stage 2 for the others.
+
+---
+
+## R9 (2026-05-06) — W7 closure + matched-precision validator
+
+W7 closes with three real fixes plus a clean diagnosis of what's
+left:
+
+- W7 Stage 1 (`spirit@704dd2df` + `nx_vulkan@29dd09b`): `precise float`
+  on chain shader loop accumulators. **Fixed Weibull's Linux NVIDIA
+  fp32 drift** — real driver-level FMA fusion bug, fix is portable.
+- W7 Stage 2.5 (`pymc@83f7464cf`): matched-precision validator. Adds
+  `precision: :f32 | :f64` opt to `Validator.validate/3`. Untangles
+  shader-correctness from f32-vs-f64 precision-gap artifacts.
+- W7 Stage 2.5 follow-up (`pymc@65cf9e486`): re-tag the 3 historical
+  failures by their actual diagnosis + fix HalfNormal's transform.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+### What changed for the 4 historical "vulkan_known_failure" tests
+
+| Shader | Pre-W7 status | New status | Tag |
+|---|---|---|---|
+| Weibull | red on Linux | **green on all platforms** (W7 Stage 1) | none |
+| Exponential | red on Linux | **green at matched-precision** (test now uses `precision: :f32`) | none |
+| HalfNormal | red on Linux | **green at matched-precision** (transform changed `:softplus` → `:log`) | none |
+| Cauchy | red on Linux | green-by-skip (auto-excluded) | `:f32_precision_limited` |
+
+The `Exmc.Dist.HalfNormal.transform/1` change from `:softplus` to
+`:log` is a behavior change for non-shader users too. The
+mathematical posterior is unchanged (both transforms are valid
+bijections), but the unconstrained space (and therefore mass-matrix
+adaptation, ESS, etc.) shifts.
+
+### R9 ask 1 + 2 — Re-run validator + W6 + fair race on both Macs
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/nuts/vulkan/         # validator + server + bulkhead
+RACE_QUICK=1 mix run bench/fair_race.exs                      # full 10-cell race
+```
+
+### Linux RTX 3060 Ti baseline (post-W7-2.5 follow-up)
+
+```
+test/exmc/nuts/vulkan/  →  22 tests, 0 failures, 1 excluded
+test/exmc_test.exs      →  11 doctests, 18 tests, 0 failures
+```
+
+The 1 excluded is Cauchy (`:f32_precision_limited`). It auto-skips
+under `EXMC_COMPILER=vulkan` because f32 chain shaders structurally
+cannot reproduce f64 reference IQRs for fat-tailed posteriors.
+
+### What we want to confirm on FreeBSD
+
+Both Macs were already 16/16 on the validator under the old
+f64-EXLA-vs-f32-Vulkan default. With the new tests using
+`precision: :f32`, the validator becomes a stricter shader-
+correctness check (smaller tolerances at matched precision).
+Expectation: still 16/16 (or 22 since the suite grew slightly).
+If anything goes red, that's a real shader bug we need to know
+about on FreeBSD.
+
+The HalfNormal Dist transform change is the riskier one. If your
+FreeBSD samples for HalfNormal posteriors look wildly different
+from before (e.g., ESS or wall_ms shifts by >2×), that's the
+transform change biting.
+
+### R9 ask 3 — Spot-check HalfNormal sampler stability on FreeBSD
+
+If you have a HalfNormal-using model in any of your existing
+benchmarks or tests, re-run it with the new transform and compare
+the posterior. Should be statistically equivalent (both transforms
+sample the same posterior) but mass-matrix adaptation may settle
+differently.
+
+If the existing tests don't exercise HalfNormal, just running
+`mix test` (full suite) covers the basic regression check.
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R9` section,
+single new commit on `feat/gpu-node`. Should be the last pre-merge
+mac-248 ask before this branch lands on `pymc/main`.
+
+If R9 is clean (no regressions on either Mac), W7 is closed and
+`feat/gpu-node` is ready to merge.

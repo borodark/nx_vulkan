@@ -8,10 +8,12 @@
 
 #include "nx_vulkan_shim.h"
 #include <engine/Backend_par_vulkan.hpp>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -164,6 +166,63 @@ const char* nxv_device_name(void) {
 
 int nxv_has_f64(void) {
     return g_vk_ctx.has_float64 ? 1 : 0;
+}
+
+int nxv_pipeline_cache_load(const char* path) {
+    if (!path) return -1;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;  // missing file is OK — start with empty cache
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) { fclose(f); return -2; }
+
+    std::vector<uint8_t> buf((size_t) sz);
+    size_t got = fread(buf.data(), 1, (size_t) sz, f);
+    fclose(f);
+    if (got != (size_t) sz) return -3;
+
+    return Engine::Backend::vulkan::pipeline_cache_create(buf.data(), buf.size());
+}
+
+int nxv_pipeline_cache_persist(const char* path) {
+    if (!path) return -1;
+
+    size_t sz = 0;
+    int rc = Engine::Backend::vulkan::pipeline_cache_get_data(nullptr, &sz);
+    if (rc != 0) return -2;
+    if (sz == 0) return 0;  // nothing to persist
+
+    std::vector<uint8_t> buf(sz);
+    rc = Engine::Backend::vulkan::pipeline_cache_get_data(buf.data(), &sz);
+    if (rc != 0) return -3;
+
+    // Atomic write: temp file in same dir then rename.
+    std::string tmp(path);
+    tmp += ".tmp.";
+    tmp += std::to_string((unsigned long) getpid());
+
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return -4;
+    size_t wrote = fwrite(buf.data(), 1, sz, f);
+    if (wrote != sz) { fclose(f); std::remove(tmp.c_str()); return -5; }
+    fflush(f);
+    fclose(f);
+
+    if (std::rename(tmp.c_str(), path) != 0) {
+        std::remove(tmp.c_str());
+        return -6;
+    }
+    return 0;
+}
+
+int nxv_device_uuid(unsigned char out[16]) {
+    if (!out) return -1;
+    auto& props = Engine::Backend::vulkan::g_vk_ctx.device_props;
+    if (!Engine::Backend::vulkan::g_vk_ctx.device) return -2;
+    memcpy(out, props.pipelineCacheUUID, 16);
+    return 0;
 }
 
 void nxv_timing_reset(void) {
@@ -821,6 +880,27 @@ int nxv_leapfrog_chain_normal_f64(void* q_chain, void* p_chain,
     push.n = n; push.K = K; push.eps = eps; push.mu = mu; push.sigma = sigma;
 
     return dispatch(pipe, bufs, 7, 1, sizeof(push), &push);
+}
+
+int nxv_leapfrog_chain_synth(void* q_chain, void* p_chain,
+                              void* grad_chain, void* logp_chain,
+                              void* q_init, void* p_init, void* inv_mass,
+                              const void* push_data, unsigned int push_size,
+                              const char* spv_path) {
+    if (!q_chain || !p_chain || !grad_chain || !logp_chain ||
+        !q_init || !p_init || !inv_mass || !push_data || !spv_path) return -1;
+    if (push_size == 0 || push_size > 128) return -3;
+
+    VkPipe* pipe = get_or_create_pipe(std::string(spv_path), 0, 7);
+    if (!pipe) return -2;
+
+    VkBuffer bufs[7] = {
+        ((VkBuf*) q_init)->buffer, ((VkBuf*) p_init)->buffer, ((VkBuf*) inv_mass)->buffer,
+        ((VkBuf*) q_chain)->buffer, ((VkBuf*) p_chain)->buffer,
+        ((VkBuf*) grad_chain)->buffer, ((VkBuf*) logp_chain)->buffer
+    };
+
+    return dispatch(pipe, bufs, 7, 1, push_size, push_data);
 }
 
 int nxv_leapfrog_chain_normal(void* q_chain, void* p_chain,
