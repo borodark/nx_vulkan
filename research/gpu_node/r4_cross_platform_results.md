@@ -175,3 +175,30 @@ Required fix: test file `validator_test.exs` had stale alias
 `Exmc.GPUNode.Validator` → updated to `Exmc.NUTS.Vulkan.Validator`.
 Mac-247 also needed full nx_vulkan pull to get `39fec0e` (Phase 2
 module extraction) before synth tests could pass.
+
+## R8 — W7 Stage 1 (precise-float) Cross-Platform Verification
+
+W7 Stage 1 added `precise` float qualifiers to 4 chain shaders
+(Exponential, HalfNormal, Weibull, Cauchy) to fix Linux NVIDIA
+fp32 drift. FreeBSD validation confirms the fix ships cleanly.
+
+### Validator (precise-float shaders)
+
+| Platform | Tests | Pass | Fail | Notes |
+|----------|-------|------|------|-------|
+| **FreeBSD GT 750M** | 16 | **16** | **0** | precise is no-op on FreeBSD NVIDIA |
+| **FreeBSD GT 650M** | 16 | **16** | **0** | precise is no-op on FreeBSD NVIDIA |
+
+Hypothesis confirmed: `precise` qualifier doesn't affect FreeBSD's
+NVIDIA driver — same 16/0 as pre-precise.
+
+### Weibull wall spot-check (100/100, 3 seeds)
+
+| Platform | seed=42 | seed=137 | seed=271 | Median |
+|----------|---------|----------|----------|--------|
+| **GT 750M** | 677ms | 399ms | 341ms | **399ms** |
+| **GT 650M** | 654ms | 553ms | 498ms | **553ms** |
+
+No precision penalty from `precise`. Weibull runs at normal speed
+on both GPUs. The `:vulkan_known_failure` tag can come off for
+Weibull on FreeBSD.
