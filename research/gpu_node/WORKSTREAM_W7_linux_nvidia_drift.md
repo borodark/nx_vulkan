@@ -72,11 +72,99 @@ The pattern: passing shaders have either no transform (Normal, StudentT real-val
 
 ## Investigation plan
 
-**Phase 1** (1-2 hours): test H7.1 only. Add `precise` qualifiers to the 4 failing shaders, recompile, re-run W2. This is the highest-leverage cheap test.
+The plan is staged so each cheap test runs independently and produces a clear isolation signal before the next one starts. Same shape as the H1-H5 hypothesis arc — minimum work to falsify, walk down the list until something fits.
 
-**Phase 2** (2-4 hours, only if H7.1 doesn't fix it): test H7.3 (denormal clamping). Then H7.5 (NVK). H7.2 only if those don't isolate it.
+### Stage 1 — H7.1 (FMA fusion via `precise float`)
 
-**Phase 3** (broader): if none of H7.1-H7.5 narrows it, escalate. File a Khronos / NVIDIA driver bug report with a minimal reproducer extracted from one failing shader.
+**Branch:** `nx_vulkan@feat/w7-precise-float`
+
+**Steps:**
+
+1. Add `precise` qualifier to the loop-carried accumulators in each of the 4 failing shaders:
+   ```glsl
+   precise float qi = in_bounds ? q_init[i] : 0.0;
+   precise float pi = in_bounds ? p_init[i] : 0.0;
+   ```
+   And to the per-step intermediates that feed back into `qi` / `pi`:
+   ```glsl
+   precise float p_half = pi + 0.5 * pc.eps * grad_q;
+   ```
+   This emits `OpDecorate ... NoContraction` in the SPIR-V output. The driver's optimizer must treat the decorated ops as un-fusable.
+
+2. Recompile via `glslangValidator -V` per existing build.
+
+3. Vendor the new SPVs via `c_src/spirit/VENDOR.md` procedure.
+
+4. Run `mix test test/exmc/gpu_node/validator_test.exs --include vulkan --include requires_vulkan` on Linux RTX 3060 Ti. Compare the 4 known-failure cases.
+
+5. If green → land the qualifier change to main. Update WORKSTREAM_W2_validation.md calibration table. Remove `:vulkan_known_failure` tag from the 4 tests.
+
+6. If red → annotate WORKSTREAM_W7 notes with the persistent error magnitudes and proceed to Stage 2.
+
+**Expected wall:** 1-2 hours. Most of it is mechanically adding `precise` to ~10 lines per shader and rebuilding.
+
+**Cost of being wrong:** if `precise` adds noticeable shader runtime, the fix isn't free. Measure: re-run the fair race for the affected cells with and without `precise`. Acceptable if <5% slowdown — the chain shaders are submission-bound, not arithmetic-bound, on Linux NVIDIA.
+
+### Stage 2 — H7.3 (denormal handling)
+
+**Branch:** `nx_vulkan@feat/w7-denormal-clamp`
+
+**Only if Stage 1 fails to fix all 4 shaders.**
+
+Pick the easiest failing shader (Cauchy is suspected because of its `1 / (1 + (q-loc)²/scale²)` denominator) and clamp:
+
+```glsl
+float denom = 1.0 + z2;
+denom = max(denom, 1e-30);  // avoid denormal at large z
+```
+
+Recompile, re-run W2. If Cauchy goes green, denormal handling is the issue and similar clamps probably need to land in the other failing shaders.
+
+**Expected wall:** 1 hour for one shader. If it works, ~3 hours total to backport the pattern to the other 3 shaders.
+
+### Stage 3 — H7.5 (NVK comparison)
+
+**Branch:** none — system change.
+
+Install NVK on super-io (mesa's open-source NVIDIA Vulkan driver, available since Mesa 24.x). Re-run W2 with NVK as the active Vulkan driver via `VK_LOADER_DRIVERS_SELECT=nvidia_*` or the equivalent ICD selector.
+
+If W2 is 16/16 under NVK on the same RTX 3060 Ti — confirms the issue is the proprietary NVIDIA driver's compiler stack, not the hardware. Provides a workaround (run on NVK in production) and an upstream bug filing target (NVIDIA's compiler team).
+
+**Expected wall:** 30 min to install NVK + run, more if NVK lacks features we depend on (some Vulkan extensions are unimplemented in NVK as of 2026). Worst case: NVK can't even initialize; we abandon this hypothesis.
+
+### Stage 4 — H7.2 (loop-carried reordering)
+
+**Branch:** `nx_vulkan@feat/w7-barrier-per-step`
+
+**Only if Stages 1+2+3 all fail.**
+
+Add a `barrier()` between each leapfrog step. This forces the optimizer to flush all in-flight work before the next iteration. Costs perf but should isolate whether intra-loop reordering is the issue.
+
+**Expected wall:** 30 min to edit + rebuild + re-run W2 on one shader. If green, we have the answer but the perf cost may make the workaround unacceptable; in that case the real fix is upstream-driver work.
+
+### Stage 5 — H7.4 (driver version)
+
+**Branch:** none.
+
+If we make it to Stage 5 without isolation, try a different NVIDIA driver version. Probably file an NVIDIA bug at this point — Stages 1-4 will have produced enough reproducer material.
+
+## Resource estimates
+
+- **If Stage 1 succeeds (most likely):** total wall ~2 hours, single commit, removes 4 `:vulkan_known_failure` tags, ships W7.
+- **If Stages 1-3 walk:** ~6-8 hours total. Some real perf testing. Worth the time.
+- **If Stages 1-4 all fail:** ~10 hours and we're filing bugs upstream. The 4 shaders stay tagged but at least we have a reproducer for NVIDIA.
+
+## Gating
+
+**Don't start W7 until Phase 2 W5 (pipeline cache persistence) lands.** The persistent-cache work could itself touch some of the same code paths and we want a clean baseline before changing shader semantics.
+
+## Reporting
+
+Every stage produces a commit on its own branch with the W2 numbers attached, even if the stage fails. Update WORKSTREAM_W7 notes/log with each result. Final outcome lands as a merge or as a "filed-upstream" doc if no in-tree fix exists.
+
+## Cross-platform check after a fix
+
+Once any stage produces a Linux-green W2, ask mac-248 to re-run W2 on FreeBSD GT 750M and GT 650M. The fix should not regress FreeBSD (which already passes). If FreeBSD goes red, the fix was wrong even though Linux turned green — back it out.
 
 ## What W7 explicitly does NOT do
 
