@@ -78,4 +78,73 @@ A test that:
 
 ## Notes / log
 
-(empty — workstream blocked until W3 lands GPUNode.Server)
+### Phase 0 W6 (2026-05-05) — minimal timeout + EXLA fallback
+
+Shipped on `pymc@feat/gpu-node`:
+
+- `Exmc.GPUNode.Server.chain_dispatch/9` now wraps `GenServer.call`
+  with a try/catch on `:exit`. Reads `Application.get_env(:exmc,
+  :gpu_node_timeout_ms, :infinity)`. Returns `{:error,
+  :gpu_dispatch_timeout}` on timeout, `{:error, :gpu_node_dead}`
+  on server-not-found.
+- `Exmc.NUTS.Tree.route_chain/12` accepts the full `spec_buf` as the
+  fallback handle. On error tuple from the GPU node, calls
+  `spec_buf.multi_step_fn.(q, p, grad, eps_t, inv_mass, n_t)` —
+  which is the existing EXLA path used by the catch-all dispatch
+  clause.
+- Test: `test/exmc/gpu_node/bulkhead_test.exs`:
+  - Timeout case: `:gpu_node_timeout_ms = 1` triggers the watchdog,
+    returns the error tuple.
+  - Dead-server case: server stopped → `{:error, :gpu_node_dead}`.
+  - End-to-end: with 1 ms timeout active, sampler completes 100 warmup
+    + 100 samples via the EXLA fallback. Posterior mean within ±0.5 of
+    target (Normal(0,1) → mean ≈ 0).
+
+3 tests, 0 failures, 13.8 s on RTX 3060 Ti.
+
+### What's NOT shipped yet (Phase 1 W6)
+
+- **Per-shader :suspect tracking + eviction.** Today every timeout
+  triggers a fallback but doesn't blacklist the shader. A genuinely
+  bad shader will time out forever, paying the timeout penalty
+  every dispatch. Phase 1: track consecutive timeouts per shader,
+  evict after N (e.g. 3) consecutive failures.
+- **GPU node suicide on M timeouts across shaders.** If the entire
+  driver is hosed, the right answer is restart, not per-shader
+  eviction. Need a cross-shader window counter.
+- **Chaos test.** No deliberately-bad-shader test yet. The Phase 0
+  test uses a 1 ms timeout on a healthy shader to simulate the
+  watchdog firing — sufficient to verify the fallback contract,
+  insufficient to verify driver recovery semantics under genuine
+  bad inputs.
+- **GenServer process unstuck after timeout.** Today, when the
+  watchdog fires, the GenServer is still blocked on the NIF call
+  until that actually returns. Subsequent calls queue behind it.
+  For Phase 1: Task.Supervisor.async_nolink + Task.shutdown(:brutal_kill)
+  to actually kill the in-flight dispatch — but this leaks the GPU
+  buffer state and may hang the driver. Investigation needed.
+- **Driver-level recovery** (`vkResetCommandPool`, `vkQueueWaitIdle`
+  cancellation). All Phase 2+.
+
+### Files
+
+- `pymc/exmc/lib/exmc/gpu_node/server.ex` — `chain_dispatch/9` with timeout.
+- `pymc/exmc/lib/exmc/nuts/tree.ex` — `route_chain/12` with fallback.
+- `pymc/exmc/test/exmc/gpu_node/bulkhead_test.exs` — 3 cases.
+
+### Refined client fallback contract
+
+Working contract from the test:
+
+```elixir
+case Exmc.GPUNode.Server.chain_dispatch(...) do
+  {:error, :gpu_dispatch_timeout} -> exla_fallback()
+  {:error, :gpu_node_dead}        -> exla_fallback()
+  {:error, _other}                 -> exla_fallback()
+  result                           -> result
+end
+```
+
+The fallback IS `spec_buf.multi_step_fn` — the same EXLA path the
+catch-all dispatch clause uses. No new fallback logic needed.
+
