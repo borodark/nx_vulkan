@@ -202,3 +202,34 @@ NVIDIA driver — same 16/0 as pre-precise.
 No precision penalty from `precise`. Weibull runs at normal speed
 on both GPUs. The `:vulkan_known_failure` tag can come off for
 Weibull on FreeBSD.
+
+## R9 — W7 Closure + Matched-Precision Validator
+
+W7 closed: precise-float (Stage 1), matched-precision validator
+(Stage 2.5), HalfNormal transform fix (softplus→log).
+
+### Full test dir (validator + server + bulkhead)
+
+| Platform | Tests | Pass | Fail | Excluded | Notes |
+|----------|-------|------|------|----------|-------|
+| Linux RTX 3060 Ti | 22 | 22 | 0 | 1 | Cauchy :f32_precision_limited |
+| **FreeBSD GT 750M** | 22 | **22** | **0** | 1 | Identical to Linux |
+| **FreeBSD GT 650M** | 22 | **22** | **0** | 1 | Identical to Linux |
+
+All three platforms now have identical test results: 22 pass,
+0 fail, 1 excluded (Cauchy auto-skip).
+
+### Fair race (partial — d>1 blocked by unfused path)
+
+| Cell | mac-248 GT 750M | mac-247 GT 650M |
+|------|-----------------|-----------------|
+| Normal d=1 (fused) | **107ms** | **163ms** |
+| Normal d=1 (unfused) | 331ms | 489ms |
+
+Consistent with all prior rounds. Fused path 3× faster than unfused.
+
+### Conclusion
+
+W7 ships cleanly cross-platform. `feat/gpu-node` is ready to merge.
+No regressions on either Mac from any of the W7 changes (precise
+qualifiers, matched-precision validator, HalfNormal transform).
