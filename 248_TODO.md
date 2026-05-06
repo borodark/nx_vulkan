@@ -590,3 +590,145 @@ about the Linux gap being driver-specific.
 - This TODO supersedes R2 (H1) which is closed.
 - The H3 instrumentation is `Nx.Vulkan.Native.timing_reset/0` and `timing_get/0`,
   documented in `lib/nx_vulkan/native.ex`.
+
+---
+
+## R4 (2026-05-05) — GPU node Phase 0 cross-platform validation
+
+The Phase 0 pieces of `PLAN_GPU_NODE.md` landed today on
+`nx_vulkan@feat/gpu-node` and `pymc@feat/gpu-node`. Six workstreams
+shipped from scaffold to deliverable in one session on the Linux
+side; the cross-platform validation lives with you.
+
+You have ssh to mac-247, so this whole matrix can run from
+mac-248 — drive 247 over ssh as a second worker, report back as
+one set of numbers.
+
+### Pull both branches
+
+```sh
+# on mac-248 (and via ssh on mac-247)
+cd ~/projects/learn_erl/nx_vulkan
+git fetch nas && git checkout feat/gpu-node && git pull --rebase nas feat/gpu-node
+
+cd ~/projects/learn_erl/pymc
+git fetch origin && git checkout feat/gpu-node && git pull --rebase origin feat/gpu-node
+
+cd ~/projects/learn_erl/nx_vulkan && mix deps.get && mix compile
+cd ~/projects/learn_erl/pymc/exmc && mix deps.get && mix compile
+```
+
+`feat/gpu-node` is forked off `feat/dsl-shader-codegen` and
+includes everything in R1/R2/R3 plus the new gpu_node infrastructure.
+
+### The R4 matrix
+
+For each of three platforms — your existing Linux RTX 3060 Ti R3
+numbers (already in `bench/fair_race_results_linux.md`), mac-248's
+FreeBSD GT 750M, mac-247's macOS GT 650M (MoltenVK→Metal) — run
+each of the four measurements:
+
+| | W2 validator | W4 warmup | W5 pipeline cache (when spike lands) | W6 chaos |
+|---|---|---|---|---|
+| Linux RTX 3060 Ti | green (auto-skip 6 known-failures) | done | pending | done (3 tests) |
+| **mac-248 FreeBSD GT 750M** | **R4 ask 1** | **R4 ask 2** | (Phase 2) | **R4 ask 3** |
+| **mac-247 macOS GT 650M** | **R4 ask 4** | **R4 ask 5** | (Phase 2) | **R4 ask 6** |
+
+W5 is research-only on Linux right now (no spike code yet), so
+nothing to test cross-platform until that lands. The other three
+are testable today.
+
+### R4 ask 1 + 4 — W2 validator on each Mac
+
+```sh
+# from each Mac:
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan
+```
+
+What we want: do the same 6 chain shaders that pass on Linux also
+pass on the Mac platform? The validator's auto-skip table tags 4 of
+the 6 as `vulkan_known_failure` on Linux (Exponential, HalfNormal,
+Weibull, Cauchy — Stage 1.5.4 chain-integrator drift, pre-existing).
+Normal and StudentT pass cleanly with KS D=0.
+
+If the same 4 fail on both Macs with similar fingerprints: the bug
+is platform-agnostic, lives in shader logic.
+
+If only some of those 4 fail on one platform: the bug is
+driver/shader-compiler specific. MoltenVK → Metal transpiles SPIR-V
+to MSL with its own quirks; mesa-radv on FreeBSD is yet another path.
+
+If MORE than 4 fail (or different ones): a real platform-specific
+break — escalate.
+
+Calibration table you'll want to compare against:
+`pymc/exmc/research/gpu_node/validation_calibration.md`.
+
+### R4 ask 2 + 5 — W4 warmup characterization
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/warmup_characterization.exs
+```
+
+Produces:
+- `bench/warmup_curves/{family}.csv` — per-window timing for
+  Normal, Exponential, StudentT, HalfNormal, Weibull (Cauchy not
+  in the cell list yet — known TODO).
+- `../../nx_vulkan/research/gpu_node/warmup_summary.md` — overwrites
+  the Linux summary if you run the script. Don't push that
+  overwrite directly; instead copy your numbers into a new section
+  of the same file under `## FreeBSD GT 750M (mac-248)` and
+  `## macOS GT 650M (mac-247)`.
+
+Linux R4 baseline (from yesterday's run, RTX 3060 Ti):
+- Normal: cold 254 ms, warm@20, p99/p50 = 2.04
+- Exponential: cold 916 ms, warm@38, p99/p50 = 1.65
+- StudentT: cold 414 ms, warm@20, p99/p50 = 1.69
+- HalfNormal: cold 596 ms, warm@20, p99/p50 = 1.49
+- Weibull: cold 553 ms, warm@50 (never settled)
+
+Hypothesis: mesa-radv on FreeBSD has lower per-fence latency (~150 µs
+vs ~1.13 ms on NVIDIA Linux), so cold/warm ratios will be tighter
+and the warm point will land earlier. MoltenVK on macOS sits over
+Metal which has its own pipeline-state-object cache; Metal's first
+pipeline create can be slow but subsequent ones are very fast.
+Both Macs likely settle faster than Linux NVIDIA.
+
+If a Mac shows a wildly different curve shape — e.g. cold/warm ratio
+of 50× — flag it, that's likely a driver issue we need to know about.
+
+### R4 ask 3 + 6 — W6 chaos test
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/bulkhead_test.exs --include vulkan
+```
+
+3 cases: timeout fires, dead server returns expected error, sampler
+falls back to EXLA when GPU node times out. All 3 pass on Linux
+RTX 3060 Ti.
+
+This is mostly a portability check (does the bulkhead path crash on
+a different OS?), not a driver-recovery test — Phase 1 W6 will add
+the deliberately-bad-shader chaos test.
+
+### Reporting back
+
+Best path: a single new commit on `nx_vulkan/feat/gpu-node` named
+`R4: cross-platform results — FreeBSD GT 750M + macOS GT 650M`,
+appending to `research/gpu_node/warmup_summary.md` and a new
+`research/gpu_node/validation_calibration_macs.md`. Push to NAS.
+
+If anything on either Mac fails outright (build error, NIF crash,
+test pathology), flag it inline in the commit message and I'll
+investigate from the Linux side.
+
+### What R4 explicitly does NOT ask
+
+- No W1 work — the codegen substrate decision (substrate (a),
+  templated GLSL) is settled.
+- No W3 work — the GenServer is platform-agnostic Elixir.
+- No W5 work yet — the spike hasn't landed; will be R5.
+- No new shaders — the existing 6 are still the universe.
