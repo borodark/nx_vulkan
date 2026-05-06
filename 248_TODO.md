@@ -1018,3 +1018,96 @@ If Beta/Gamma's wall on FreeBSD is **<5× the Lognormal wall**, that
 confirms our hypothesis (slowness is adaptation, not driver). If
 it's **20×+ like on Linux**, something else is going on and we'll
 investigate.
+
+---
+
+## R8 (2026-05-06) — W7 Stage 1 cross-platform verification
+
+W7 Stage 1 added `precise float` qualifiers to the loop-carried
+accumulators (qi, pi, p_half) and gradient intermediates in the 4
+chain shaders that exhibit Linux NVIDIA fp32 drift (Exponential,
+Cauchy, HalfNormal, Weibull). Compiles to SPIR-V emit
+`OpDecorate ... NoContraction`, telling drivers not to fuse the
+multiply-add into FMA.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+New on `nx_vulkan@feat/gpu-node`:
+- `29dd09b` — vendored 4 W7 Stage 1 SPVs from `spirit@704dd2df`
+
+If you have a sibling spirit checkout at `~/projects/learn_erl/spirit/`,
+`SPIRIT_DIR=~/projects/learn_erl/spirit mix compile` will copy the
+fresh SPVs over the vendored ones automatically.
+
+### Linux RTX 3060 Ti result (post-Stage-1)
+
+W2 validator: 13/16 (was 12/16).
+
+| Shader | Pre-Stage-1 | Post-Stage-1 | Delta |
+|---|---|---|---|
+| Exponential | drift | drift | unchanged |
+| Cauchy | drift (IQR 1.76 vs 8.83) | drift | unchanged |
+| HalfNormal | drift | drift (mean 0.582 vs 0.896) | unchanged |
+| **Weibull** | **drift (mean ~0.98 vs 0.886)** | **PASS** | FIXED |
+
+H7.1 (FMA fusion) is the right hypothesis for Weibull. The other 3
+have a different / additional cause — Stage 2 (denormal handling)
+and Stage 3 (NVK driver comparison) are next.
+
+### R8 ask 1 + 2 — Re-run W2 validator on both Macs
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/nuts/vulkan/validator_test.exs --include vulkan --include requires_vulkan
+```
+
+**Hypothesis:** mesa-radv on FreeBSD doesn't fuse multiply-add as
+aggressively as NVIDIA Linux. Adding `precise` should be a **no-op**
+on FreeBSD — the bytes already produced the right answer. So we
+expect the FreeBSD validator to remain **16/16 on both Macs**.
+
+What we want to confirm:
+1. **No regression.** All 16 still pass on FreeBSD GT 750M and GT 650M.
+2. **`precise` doesn't introduce a new failure.** If a previously-
+   passing shader now drifts, our fix is wrong.
+
+### R8 ask 3 + 4 — Spot-check Weibull wall time on FreeBSD
+
+`precise` can disable fast paths in the shader compiler. NVIDIA's
+docs explicitly warn that overuse can slow shaders by 10-30%. Most
+compute kernels don't notice (they're memory-bound), but the chain
+shader is arithmetic-bound by design.
+
+Run the fair race (RACE_QUICK is enough):
+
+```sh
+RACE_QUICK=1 mix run bench/fair_race.exs
+```
+
+Compare Weibull cell wall to your R5/R6 numbers. If Weibull's
+wall increases by more than ~20%, `precise` cost is significant;
+we may want to scope `precise` to just qi/pi (loop-carried) and
+not the per-step intermediates. If the wall is unchanged, we ship
+Stage 1 as-is.
+
+### What R8 explicitly does NOT ask
+
+- **Don't try to fix Cauchy/Exp/HalfNormal.** Those need Stage 2
+  (denormal clamping) or Stage 3 (NVK), both Linux-side
+  investigations.
+- **No NVK install on FreeBSD.** NVK is mesa's NVIDIA driver — only
+  applicable to Linux.
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R8` section, same
+table format. Push as a single commit on `feat/gpu-node`.
+
+If R8 confirms 16/16 on both Macs and Weibull wall is unchanged,
+W7 Stage 1 lands as a real fix (one shader recovered) and we move
+to Stage 2 for the others.
