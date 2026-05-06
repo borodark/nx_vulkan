@@ -1,88 +1,152 @@
 # Nx.Vulkan
 
-An [Nx](https://github.com/elixir-nx/nx) tensor backend on Vulkan
-compute. Wraps [Spirit](https://github.com/borodark/spirit)'s seven
-Vulkan shaders (elementwise, unary, reductions, matmul, random,
-broadcast) as an Elixir-side `Nx.Backend`.
+A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **anything with a Vulkan driver** — including FreeBSD, where CUDA and Metal don't exist.
 
-**Status:** v0.0.1 bootstrap. The plan is in [`PLAN.md`](PLAN.md);
-the compute substrate is the Spirit `feature/vulkan-backend` branch
-([47 tests + perf characterised on RTX 3060 Ti](https://github.com/borodark/spirit/blob/feature/vulkan-backend/RESULTS_RTX_3060_TI.md)).
+```
+✓ Linux + NVIDIA RTX 3060 Ti      (proprietary driver)
+✓ FreeBSD + NVIDIA GT 750M        (mesa-radv)
+✓ FreeBSD + NVIDIA GT 650M        (mesa-radv stack)
+```
 
-## Why this exists
+178 of 178 tests green on all three platforms. Identical posteriors. Shader synthesis end-to-end in under a second.
+
+## What you get
+
+**A long-lived GPU node.** `Nx.Vulkan.Node` is a named GenServer that owns the Vulkan pipeline cache, the persistent buffer registry, and a watchdog. Any client serializes work through it via `with_node/2`:
+
+```elixir
+{:ok, _} = Nx.Vulkan.Node.start_link()
+
+result =
+  Nx.Vulkan.Node.with_node(fn ->
+    # Any GPU work — runs on the node's process, shares pipeline cache.
+    Nx.Vulkan.Native.leapfrog_chain_synth(q, p, m, push, k, spv_path)
+  end)
+
+case result do
+  {:error, :node_timeout} -> exla_fallback()  # watchdog fired
+  ok_value                 -> ok_value
+end
+```
+
+**Runtime shader synthesis.** Want a chain shader for a distribution that doesn't exist in the catalog? Render a `FamilySpec`, hand it to `Synthesis.compile/1`, get a SPIR-V file back in ~150 ms cold (5 ms cache hit):
+
+```elixir
+spec = Nx.Vulkan.ChainShaderSpecs.beta()       # or your own %FamilySpec{}
+{:ok, spv_path} = Nx.Vulkan.Synthesis.compile(spec)
+
+# spv_path is content-addressed under ~/.exmc/gpu_node/spv/{sha256}.spv —
+# survives BEAM restarts.
+```
+
+The template engine handles the leapfrog skeleton. You provide three GLSL fragments per family: gradient at `qi`, gradient at `qi` after position update, log-density contribution. Ships with **9 chain shader families** out of the box:
+
+| Hand-written (vendored SPV) | Synthesized at runtime |
+|---|---|
+| Normal, Exponential, StudentT, Cauchy, HalfNormal, Weibull | Beta, Gamma, Lognormal |
+
+**Persistent pipeline cache.** `vkPipelineCache` blob serialized to disk, header-validated against the device UUID before re-load. **4× speedup** on cold start for synthesized shaders (`Gamma 23 ms → 5 ms`, `Lognormal 22 ms → 5 ms` first-dispatch wall on RTX 3060 Ti).
+
+```elixir
+# At app start
+:ok = Nx.Vulkan.PipelineCache.load()
+
+# At app shutdown (Nx.Vulkan.Node.terminate/2 already does this)
+:ok = Nx.Vulkan.PipelineCache.persist()
+```
+
+## Why FreeBSD matters
 
 Nx today has two GPU backends:
+- **EXLA** — XLA, requires CUDA or TPU. No FreeBSD support.
+- **EMLX** — Apple Metal. macOS only.
 
-  - **EXLA** — XLA, requires CUDA or TPU
-  - **EMLX** — Apple Metal
+If you have NVIDIA hardware on FreeBSD, neither works. Vulkan is the only path. mac-248 (FreeBSD 15 / GT 750M) and mac-247 (FreeBSD / GT 650M) are the canonical bring-up boxes; every commit gets verified there alongside Linux.
 
-On FreeBSD with NVIDIA hardware, neither works. Vulkan is the third
-backend, and the only one that runs on FreeBSD. The accompanying
-blog post is [*The GPU That Doesn't Need
-CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html); the
-follow-on [*A Walkable Path Under the Mountain*](http://www.dataalienist.com/blog-walkable-path.html)
-covers the eXMC + zed integration.
+The companion blog series:
+- [*The GPU That Doesn't Need CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html) — the FreeBSD Vulkan story
+- [*A Walkable Path Under the Mountain*](http://www.dataalienist.com/blog-walkable-path.html) — eXMC + zed integration
 
-**FreeBSD bring-up status:** the full pipeline (NIF, shaders, fused
-leapfrog chain) is verified on FreeBSD 15 with an NVIDIA GT 750M
-(2013 Mac Pro hardware). `pkg install vulkan-loader vulkan-headers
-vulkan-tools glslang shaderc`, then `mix compile && mix test` —
-clean. No special build flags required.
+## Quickstart
+
+```sh
+git clone https://github.com/borodark/nx_vulkan
+cd nx_vulkan
+mix deps.get && mix compile
+mix test                               # 152 + 26 = 178 tests
+mix run examples/gpu_node_demo.exs     # boot Node + synth Beta + dispatch + persist cache
+```
+
+The demo prints (on a warm cache):
+
+```
+device:  NVIDIA GeForce RTX 3060 Ti  (or GT 750M / GT 650M / etc.)
+synthesized Beta SPV in 5 ms
+first dispatch via with_node: 16410 µs
+logp[0]: -1.486   (analytic -1.4508, delta 0.035 ✓)
+pipeline cache persisted: 12432 bytes
+```
 
 ## Architecture
 
 ```
-Elixir application                  Rust NIF                  C++ Spirit Vulkan backend
-─────────────────                  ────────                  ─────────────────────────
-Nx.tensor(...)                      nx_vulkan_alloc    ─►    buf_alloc + upload
-defn function                       nx_vulkan_dispatch ─►    dispatch shader
-Nx.Defn.jit                         nx_vulkan_download ─►    download
-
-  Nx.Vulkan.Backend  (lib/)         ResourceArc<VkBuf>        VkBuf (lifetime tied
-                                    in lib/nx_vulkan/                  to ResourceArc)
-                                    native.ex (Rustler)
+                     ┌─────────────────────────────────────────────┐
+                     │  Nx.Vulkan.Node  (named GenServer)           │
+                     │  • with_node/2 — generic serialized dispatch │
+                     │  • watchdog timeout → {:error, :node_*}      │
+                     │  • lifecycle owns the pipeline cache         │
+                     └──────────────┬──────────────────────────────┘
+                                    │
+        ┌───────────────────────────┴───────────────────────────┐
+        │                                                       │
+┌───────▼──────────┐  ┌────────────────────┐  ┌─────────────────▼────┐
+│ Nx.Vulkan.       │  │ Nx.Vulkan.         │  │ Nx.Vulkan.            │
+│   PipelineCache  │  │   Synthesis +      │  │   ChainShaderSpecs    │
+│   (vkPipeline-   │  │   ShaderTemplate   │  │   (Beta/Gamma/        │
+│    Cache disk    │  │   (runtime GLSL +  │  │    Lognormal +        │
+│    persistence)  │  │    glslangValidator│  │    6 hand-written)    │
+└──────────────────┘  └────────────────────┘  └───────────────────────┘
+                                    │
+                              ┌─────▼──────┐
+                              │ Rust NIFs  │  (lib.rs, Rustler 0.36)
+                              └─────┬──────┘
+                              ┌─────▼──────┐
+                              │  C++ shim  │  (nx_vulkan_shim.{h,cpp})
+                              └─────┬──────┘
+                                    ▼
+                           spirit (vendored under c_src/spirit/)
 ```
 
-- **`lib/`** — Elixir; `Nx.Backend` impl, top-level API.
-- **`native/nx_vulkan_native/`** — Rust NIF crate (Rustler).
-- **`c_src/`** — `extern "C"` shim into Spirit's C++ backend
-  (`nx_vulkan_shim.{h,cpp}`).
+- **`lib/nx_vulkan/`** — Elixir API. `Node`, `PipelineCache`, `ShaderTemplate`, `Synthesis`, `ChainShaderSpecs`, plus the low-level `Native` NIF bindings.
+- **`native/nx_vulkan_native/`** — Rust NIF crate (Rustler). Wraps the C shim, exposes `leapfrog_chain_synth`, batched IO, pipeline cache load/persist.
+- **`c_src/nx_vulkan_shim.{h,cpp}`** — flat C ABI bridging Rust to Spirit's C++.
+- **`c_src/spirit/`** — vendored Spirit Vulkan backend (~800 LOC C++). See `c_src/spirit/VENDOR.md` for the pinned upstream commit.
+- **`priv/shaders/`** — 9 SPIR-V chain shaders (vendored from Spirit's `shaders/`).
 
-## Layout
+## Performance
 
-```
-nx_vulkan/
-  PLAN.md                      - milestones to v0.1
-  README.md                    - this file
-  mix.exs                      - elixir + rustler deps
-  lib/
-    nx_vulkan.ex               - top-level API
-    nx_vulkan/native.ex        - Rustler NIF binding
-  native/nx_vulkan_native/
-    Cargo.toml
-    build.rs                   - compiles Spirit's C++ via cc crate
-    src/lib.rs                 - rustler_export_nifs, ResourceArc lifetimes
-  c_src/
-    nx_vulkan_shim.h           - flat C ABI (extern "C")
-    nx_vulkan_shim.cpp         - delegates to spirit::Engine::Backend::vulkan
-```
+The chain-shader path's design target is **~1 ms per leapfrog step**. Linux NVIDIA Vulkan and FreeBSD mesa-radv both meet it, but with different constants:
+
+| Workload (Normal d=1, 1000W + 1000S, NUTS) | Wall (median, 5 seeds) |
+|---|---|
+| Linux RTX 3060 Ti, EXLA reference | 7,753 ms |
+| Linux RTX 3060 Ti, **Vulkan-fused** | **12,722 ms** (with `+sbt tnnps`) |
+| FreeBSD GT 750M, **Vulkan-fused** | **1,651 ms** (mesa wins on per-fence latency) |
+
+mesa-radv is **~7× faster than NVIDIA Linux's proprietary driver** on this workload because of per-fence-wait latency (~150 µs vs ~1.13 ms blocking floor). The hardware on the FreeBSD box is a 12-year-old laptop GPU; the Linux box is a modern RTX 3060 Ti. Driver quality, not silicon, dominates this regime.
+
+[Full investigation in `research/gpu_node/`](research/gpu_node/) — W4 warmup curves, W5 cache persistence, W7 FMA fusion drift.
 
 ## Building
 
 ### Prerequisites
 
-- Erlang/OTP 26+, Elixir 1.17+
-- Rust 1.78+ (see toolchain note below)
+- Erlang/OTP 27+, Elixir 1.18+
+- Rust 1.78+ (toolchain pinned via `rust-toolchain.toml`; see note below)
 - C++ compiler (clang or gcc, C++14)
-- Vulkan SDK
-  - Debian/Ubuntu: `apt install libvulkan-dev vulkan-tools`
+- Vulkan SDK + `glslangValidator`:
+  - Debian/Ubuntu: `apt install libvulkan-dev vulkan-tools glslang-tools`
   - FreeBSD: `pkg install vulkan-loader vulkan-headers vulkan-tools glslang shaderc`
-- Spirit's Vulkan backend is **vendored** under `c_src/spirit/`
-  (see [`c_src/spirit/VENDOR.md`](c_src/spirit/VENDOR.md) for the
-  pinned upstream commit). No external Spirit checkout required.
-  Set `SPIRIT_DIR=/path/to/spirit` only as a development override
-  to refresh `priv/shaders/*.spv` from a local Spirit checkout
-  on each build (mac-248's iteration workflow).
 
 ### Build
 
@@ -91,39 +155,33 @@ mix deps.get
 mix compile
 ```
 
-### Toolchain pin (April 2026)
+Spirit's Vulkan backend is **vendored** under `c_src/spirit/` — no external Spirit checkout required. Set `SPIRIT_DIR=/path/to/spirit` only as a development override to refresh `priv/shaders/*.spv` from a local Spirit checkout on each build (mac-248's iteration workflow).
 
-`rust-toolchain.toml` pins rustc to **1.85** because rustler 0.36's
-upstream `rustler-sys` macro generation produces a `&usize` where
-`usize` is wanted in `enif_term_type` against rustc 1.90's stricter
-borrow-checker. 1.85 accepts the older form. Bump the pin once
-upstream rustler emits a corrected signature.
+### Rust toolchain pin
 
-## Usage (target — v0.1)
+`rust-toolchain.toml` pins rustc to **1.85** because rustler 0.36's upstream `rustler-sys` macro generation produces a `&usize` where `usize` is wanted in `enif_term_type` against rustc 1.90's stricter borrow-checker. 1.85 accepts the older form. Bump the pin once upstream rustler emits a corrected signature.
 
-```elixir
-iex> Nx.Vulkan.init()
-:ok
+## Status
 
-iex> Nx.Vulkan.device_name()
-"NVIDIA GeForce RTX 3060 Ti"
+**Phase 2 shipped** (May 2026): GPU node + persistent pipeline cache + runtime shader synthesis.
 
-iex> Nx.Vulkan.has_f64?()
-true
+| Feature | Status |
+|---|---|
+| Vulkan context + buffer alloc/upload/download | ✓ |
+| Hand-written chain shaders (6 families) | ✓ |
+| Runtime shader synthesis (Beta/Gamma/Lognormal) | ✓ |
+| `Nx.Vulkan.Node` GenServer + `with_node/2` watchdog | ✓ |
+| Persistent vkPipelineCache | ✓ |
+| Cross-platform validation (Linux + 2× FreeBSD) | ✓ |
+| Per-shader suspect tracking + EXLA fallback (in `exmc`) | ✓ Phase 1 |
+| In-flight dispatch cancellation (`vk_synchronization2`) | Phase 2 work |
+| Multi-client mDNS discovery | Phase 3 work |
 
-iex> Nx.tensor([1.0, 2.0, 3.0], backend: Nx.Vulkan.Backend) |> Nx.exp()
-#Nx.Tensor<
-  f32[3]
-  Nx.Vulkan.Backend
-  [2.7182, 7.3890, 20.0855]
->
-```
+Plan history is in [`PLAN_GPU_NODE.md`](PLAN_GPU_NODE.md). Per-workstream notes in [`research/gpu_node/`](research/gpu_node/).
 
-Today (v0.0.1): only `init/0`, `device_name/0`, `has_f64?/0` are
-wired. End-to-end smoke verified on RTX 3060 Ti — the Elixir call
-reaches Spirit's `vk_init` and reports the device. Tensor
-operations land in v0.0.2 once the resource lifetime plumbing is
-verified.
+## Sibling: zed
+
+[`zed`](../zed/) is the declarative ZFS + Elixir deploy tool that orchestrates BEAM nodes. `nx_vulkan` is consumed *inside* deployed BEAM nodes — not as a zed dependency. See `specs/nx-vulkan-execution.md` in the zed repo for the integration story.
 
 ## License
 
