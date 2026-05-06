@@ -888,3 +888,133 @@ If `glslangValidator` is missing on either Mac and not in the
 default package repo, flag it inline — we may need to vendor a
 prebuilt SPIR-V cache for distribution rather than requiring the
 compiler at runtime.
+
+---
+
+## R6 (2026-05-06) — Phase 1 fully wired: 10-cell race + 3 new validator cases
+
+Phase 1 of `PLAN_GPU_NODE.md` now wires synthesized chain shaders all
+the way from IR → meta → synthesis → dispatch → statistical validation.
+Three new distributions hit the Vulkan path: Beta, Gamma, Lognormal.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix compile
+```
+
+New on `pymc@feat/gpu-node`:
+- `2927bdf80` — wire Beta/Gamma/Lognormal into NUTS dispatch + W2 validator
+- `0779c7e34` — add Beta/Gamma/Lognormal cells to bench/fair_race.exs
+- `ace199603` — Gamma + Lognormal specs (Beta was earlier in `521550173`)
+
+No `nx_vulkan` changes since R5 — the same `leapfrog_chain_synth` NIF
+serves all three new families; only Elixir-side wiring changed.
+
+### What's different in this race
+
+`bench/fair_race.exs` now has **10 cells** instead of 7. The 3 new cells
+exercise the runtime-synthesis path you smoke-tested in R5 — but driven
+by real NUTS sampling instead of a single-dispatch fixture.
+
+### R6 ask 1 + 2 — Re-run the 10-cell fair race
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/fair_race.exs    # full 1000/1000 if you have time
+# OR
+RACE_QUICK=1 mix run bench/fair_race.exs    # 100/100 quick mode
+```
+
+### Linux RTX 3060 Ti baseline (RACE_QUICK 100/100, post-Phase-1)
+
+Three new rows at the bottom:
+
+| Cell             |  d | EXLA wall (ms) | Vulkan wall (ms) | EXLA ESS/s | Vulkan ESS/s |  ratio |
+|------------------|----|----------------|------------------|------------|--------------|--------|
+| Normal d=1       |  1 |          873   |          1,500   |       24.2 |         14.1 |   0.58 |
+| Normal d=8       |  8 |        1,960   |          1,544   |       33.7 |         42.8 | **1.27** |
+| Normal d=50      | 50 |        3,623   |          1,744   |        6.3 |         23.1 | **3.67** |
+| Exponential      |  1 |        1,663   |          1,951   |       25.9 |         22.1 |   0.85 |
+| StudentT df=3    |  1 |        1,700   |          1,412   |       35.7 |         36.1 |   1.01 |
+| HalfNormal       |  1 |        1,693   |          2,043   |       28.5 |         13.8 |   0.48 (✗ pre-existing) |
+| Weibull k=2      |  1 |        1,599   |          1,835   |       27.3 |         24.2 |   0.89 |
+| **Beta synth**   |  1 |        1,671   |       **43,094** |       24.7 |      **1.0** |   0.04 |
+| **Gamma synth**  |  1 |        1,550   |       **14,475** |       40.2 |      **4.3** |   0.11 |
+| **Lognormal synth**| 1 |       1,675   |          1,760   |       25.4 |         24.2 |   0.95 |
+
+### IMPORTANT — Beta and Gamma look bad. They're not a driver bug.
+
+The agreement check (mean / variance / KS test) **passes** for both
+Beta and Gamma — the synthesized shaders produce statistically correct
+posteriors. But the **mixing is terrible** (ESS = 1.0 and 4.3 out of
+100 samples). The chain is technically valid but barely moves between
+samples.
+
+Root cause is **NUTS adaptation (step size + mass matrix + tree depth)
+is tuned for Normal-shape gradients**, and the new families have
+gradient profiles that adaptation hasn't been calibrated for:
+
+- **Gamma**'s gradient `α - β·exp(q_uc)` explodes exponentially as
+  q_uc grows on log-uc space. NUTS responds by setting tiny ε,
+  producing depth-10 trees (~1000 leapfrogs per iter).
+- **Beta**'s gradient is bounded by sigmoid, but warmup on a logit-uc
+  posterior with α=2, β=3 takes a long time to settle if initial
+  step size overshoots.
+
+This is documented as Phase 1's known limitation. Performance fix
+needs per-family adaptation heuristics or longer warmup — both
+**Linux-side** work, not platform-specific.
+
+What we expect to see on FreeBSD:
+
+- **Lognormal synth**: should be in the same relative position as
+  Normal (well-behaved). Probably 10× faster wall than Linux due to
+  the same per-fence latency advantage measured in R3-R5.
+- **Beta synth + Gamma synth**: will ALSO be slow on FreeBSD, but
+  not 30× slow — the per-iter cost is dominated by the leapfrog
+  step count, and FreeBSD's lower per-fence latency means each
+  leapfrog is cheaper. Probably ~3-5× the Lognormal wall on FreeBSD
+  vs ~25× on Linux. **Confirms the slowness is adaptation, not
+  driver.**
+
+### R6 ask 3 + 4 — Run the validator with the 3 new Phase 1 tests
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan --include requires_vulkan --exclude vulkan_known_failure
+```
+
+Linux baseline: 12 of 16 tests pass. The 4 failures are the
+pre-existing `:vulkan_known_failure` shaders (Exp/Cauchy/HalfNormal/
+Weibull — Stage 1.5.4 chain-integrator drift). The 3 new Phase 1
+tests (Beta(2,3), Gamma(2,1), Lognormal(0,1)) all pass.
+
+What we want to confirm on each Mac:
+- Same 12/16 pass rate (or better).
+- The 3 Phase 1 synthesized tests pass with `:ok`.
+- If any of the Phase 1 tests fail with `{:error, %{check: :ks, ...}}`
+  or similar, that's a real cross-platform bug in the synthesized
+  shader path — escalate.
+
+### What R6 explicitly does NOT ask
+
+- **Don't try to fix Beta/Gamma slowness.** Adaptation tuning is a
+  Linux-side Phase 2 task.
+- **No new shaders** — the catalog is Beta + Gamma + Lognormal for
+  Phase 1.
+- **No W4 re-run unless you want to** — warmup curves haven't
+  changed since R5 (the new shaders weren't measured by W4, but
+  they could be added to a Phase 2 W4 run).
+
+### Reporting back
+
+Append to `research/gpu_node/r4_cross_platform_results.md` with a
+new `## R6 — Phase 1 wired` section, same shape as R5. Push as a
+single new commit.
+
+If Beta/Gamma's wall on FreeBSD is **<5× the Lognormal wall**, that
+confirms our hypothesis (slowness is adaptation, not driver). If
+it's **20×+ like on Linux**, something else is going on and we'll
+investigate.
