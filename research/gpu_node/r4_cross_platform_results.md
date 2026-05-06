@@ -233,3 +233,34 @@ Consistent with all prior rounds. Fused path 3× faster than unfused.
 W7 ships cleanly cross-platform. `feat/gpu-node` is ready to merge.
 No regressions on either Mac from any of the W7 changes (precise
 qualifiers, matched-precision validator, HalfNormal transform).
+
+## R10 — nx_vulkan Standalone Tests + Demo (Post-Merge)
+
+feat/gpu-node merged to main. nx_vulkan now stands alone with
+Phase 2 GPU node API, shader synthesis, pipeline cache.
+
+### Standalone tests (test/nx_vulkan/)
+
+| Platform | Tests | Pass | Fail | Wall |
+|----------|-------|------|------|------|
+| Linux RTX 3060 Ti | 26 | 26 | 0 | 1.9s |
+| **FreeBSD GT 750M** | 178 | **178** | **0** | 2.2s |
+| **FreeBSD GT 650M** | 178 | **178** | **0** | 2.8s |
+
+Note: 178 = full suite (152 original + 26 new Phase 2 tests).
+
+### Demo (examples/gpu_node_demo.exs)
+
+| Metric | Linux RTX 3060 Ti | FreeBSD GT 750M | FreeBSD GT 650M |
+|--------|-------------------|-----------------|-----------------|
+| synth+compile | 149ms cold / 5ms cached | **156ms** | **205ms** |
+| first dispatch | 16,410 µs | **14,449 µs** | **4,389 µs** |
+| logp[0] | -1.486 | **-1.486** | **-1.486** |
+| delta | 0.035 ✓ | **0.035 ✓** | **0.035 ✓** |
+| pipeline cache | 12,432 bytes | **4,343 bytes** | **8,145 bytes** |
+
+Identical logp and delta across all three platforms. Demo runs to
+completion on both Macs. Pipeline cache persists correctly.
+
+GT 650M first dispatch (4.4ms) is faster than GT 750M (14.4ms) —
+likely pipeline cache was warm from the test run.
