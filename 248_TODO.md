@@ -1203,3 +1203,95 @@ mac-248 ask before this branch lands on `pymc/main`.
 
 If R9 is clean (no regressions on either Mac), W7 is closed and
 `feat/gpu-node` is ready to merge.
+
+---
+
+## R10 (2026-05-06) — nx_vulkan-side tests + demo portability
+
+Phase 2 closed the architectural gap from the Exmc.GPUNode →
+Nx.Vulkan.* extraction by adding standalone tests + a demo that
+exercise the new modules without any exmc dependency. R10 is the
+cross-platform check: the demo is the README's promise that
+nx_vulkan can stand on its own — confirm it does.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --ff-only nas main && mix compile
+```
+
+`feat/gpu-node` is now merged to `main` (`0ea8adb`). New on top:
+- `168084a` — standalone tests + demo for Phase 2 GPU node API.
+
+### R10 ask 1 + 2 — Run the new nx_vulkan-side tests on both Macs
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan
+mix test test/nx_vulkan/
+```
+
+Linux RTX 3060 Ti baseline: **26 tests, 0 failures, ~1.9 s wall**.
+
+Tests cover:
+- `Nx.Vulkan.Node` lifecycle + `with_node/2` (12 tests).
+- `Nx.Vulkan.PipelineCache` load/persist round-trip (5 tests,
+  one of which actually compiles + dispatches a Beta shader to
+  produce a non-trivial cache blob).
+- `Nx.Vulkan.ShaderTemplate` GLSL render (4 tests).
+- `Nx.Vulkan.Synthesis` glslangValidator compile + cache hit + a
+  deliberate failure case (5 tests).
+
+Most tests are platform-agnostic (text rendering, file I/O). The
+ones that touch Vulkan + glslangValidator are the new portability
+check.
+
+Hypotheses to confirm:
+- All 26 pass on FreeBSD GT 750M.
+- All 26 pass on FreeBSD GT 650M.
+- The Synthesis cache-hit test (`< 50 ms` for a warm cache) holds
+  on both Macs. If FreeBSD's filesystem has slower stat() this could
+  trip; happy to relax the threshold if needed.
+- The PipelineCache test that builds a real Beta shader compiles
+  cleanly via `glslangValidator` (mac-248 already has it from R5).
+
+### R10 ask 3 + 4 — Run the demo on both Macs
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan
+mix run examples/gpu_node_demo.exs
+```
+
+Linux baseline (warm cache):
+```
+synthesized Beta SPV in 5 ms (cached) / 149 ms (cold)
+first dispatch via with_node: 16410 µs
+logp[0]: -1.486 (analytic -1.4508, delta 0.035 ✓)
+pipeline cache persisted: 12432 bytes
+```
+
+What we want from each Mac:
+1. The demo runs to completion without crashing.
+2. `delta after 1 leapfrog < 0.1` (the ✓ check).
+3. The pipeline cache file is non-trivially sized (>0 bytes).
+4. The first-dispatch wall is consistent with R5/R8 — somewhere in
+   the 100-1000 µs range on FreeBSD (mesa-radv's per-fence latency
+   is much lower than Linux NVIDIA's).
+
+If the demo's first-dispatch timing on FreeBSD GT 750M is way
+above the R5 baseline (e.g. > 5 ms), something regressed in the
+Phase 2 plumbing. If it's around 100-300 µs as expected, R10
+confirms the Phase 2 architectural split shipped cleanly across
+all three platforms.
+
+### What R10 explicitly does NOT ask
+
+- No new shaders. The Phase 1 catalog (Beta/Gamma/Lognormal) is
+  still the universe.
+- No regression check on the exmc side — that's covered by R9.
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R10` section,
+single new commit on `main`. With R10 in the bag, the GPU node
+work is fully verified and we can move to the next workstream
+(Beta/Gamma adaptation tuning, or Phase 3 multi-client).
