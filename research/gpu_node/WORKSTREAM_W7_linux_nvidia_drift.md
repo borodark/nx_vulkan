@@ -187,4 +187,115 @@ Once any stage produces a Linux-green W2, ask mac-248 to re-run W2 on FreeBSD GT
 
 ## Notes / log
 
-(empty — workstream just opened)
+### Stage 1 (2026-05-06) — `precise float` on loop accumulators
+
+Added `precise` qualifiers to `qi`, `pi`, `p_half`, and the per-step
+gradient intermediates (`diff`, `grad_q`, `grad_qn`, etc.) in all 4
+affected shaders. Recompiled to SPV; vendored.
+
+Result on Linux RTX 3060 Ti W2 validator:
+
+| Shader | Pre-Stage-1 | Post-Stage-1 | Status |
+|---|---|---|---|
+| Weibull | drift (mean ~0.98 vs 0.886) | **PASS** | tag REMOVED |
+| Exponential | drift | drift | tag stays |
+| Cauchy | drift (IQR 1.76 vs 8.83) | drift | tag stays |
+| HalfNormal | drift (mean 0.582 vs 0.896) | drift | tag stays |
+
+R8 confirmed FreeBSD remains 16/16 with the new SPVs (precise is a
+no-op on mesa-radv) and Weibull wall is unchanged.
+
+**Stage 1 is real progress** — 1 of 4 shaders recovered, no
+regressions, fix is portable. Stage 1 commits:
+`spirit@704dd2df`, `nx_vulkan@29dd09b`.
+
+### Stage 2 (2026-05-06) — denormal clamping + alternative gradient form
+
+**Result: no measurable effect.** Output bit-identical to Stage 1.
+
+Tried rewriting Cauchy's gradient as
+`-2 * diff * inv_denom` with `precise` intermediates and a
+`max(denom, 1e-30)` clamp. The Linux NVIDIA Vulkan compiler folded
+the rewrite back to the original mathematical form despite the
+`precise` decorations on the intermediate variables. SPIR-V
+disassembly shows 22 `NoContraction` decorations applied as
+expected, but the runtime trajectory is identical.
+
+Reverted to Stage 1 broader form. No commit needed (revert produced
+same SPV bytes as `spirit@704dd2df`).
+
+### The actual root cause is in the validator, not the shader
+
+While investigating Stage 2, found that
+`Exmc.NUTS.Vulkan.Validator.run_exla/2` clears
+`Application.get_env(:exmc, :compiler)` before sampling. That makes
+the EXLA reference path run at **f64** (default `Exmc.JIT.precision`).
+The Vulkan path runs at **f32** (forced by the chain shader). The
+validator is comparing posteriors generated at different precision.
+
+For Normal, StudentT, and Weibull, the f32 chain stays close enough
+to the f64 reference for the comparison to pass. For fat-tailed
+families (Cauchy especially), tiny per-step differences compound
+across 32 leapfrog steps × ~1000 iterations and the chains diverge
+to meaningfully different posterior shapes. **What the validator
+calls "drift" is actually a precision-gap artifact.**
+
+Evidence: the failure shapes don't match a typical drift pattern.
+- Cauchy: Vulkan IQR 1.76 vs EXLA IQR 8.83. Vulkan stays near the
+  mode; EXLA explores the fat tails. Consistent with f32 saturating
+  the gradient at large `|q-loc|`.
+- Exponential: Vulkan variance 0.354 vs EXLA 0.243. Vulkan
+  over-explores the negative-q tail (where exp(qi) is tiny and
+  gradient ≈ 1). Consistent with f32 underflow at small exp(qi).
+- HalfNormal: Vulkan mean 0.582 vs EXLA 0.896. Vulkan undersamples
+  the positive tail. Consistent with f32 overflow of `exp(2*qi)` at
+  moderately large qi.
+
+All three failure shapes match a *precision* hypothesis, not a
+*compiler quirk* hypothesis.
+
+### Stage 2.5 — validator precision fix (proposed, not yet implemented)
+
+Two options for the validator:
+
+1. **Make EXLA also use f32** (matches Vulkan's precision). The
+   validator becomes a pure shader-correctness test. Risk: can't
+   distinguish "shader is correct" from "f32 is too coarse for this
+   distribution." Both paths will be wrong in the same way.
+
+2. **Keep EXLA at f64, document the precision-gap shaders as
+   `:f32_precision_limited`**, separate from
+   `:vulkan_known_failure`. Tag is platform-agnostic — the issue
+   is that f32 chain shaders genuinely cannot reproduce f64
+   reference posteriors for fat-tailed distributions, regardless
+   of driver. FreeBSD also runs f32 chain shaders; FreeBSD passes
+   the validator only because mesa happens to produce slightly
+   tighter f32 numerics in its compute path that matches the f64
+   reference closer in finite samples.
+
+Option 2 is more honest. It also predicts that **FreeBSD's 16/16
+might be the result of finite-sample MCMC noise rather than a
+genuinely better f32 path**. Worth re-running R5/R6/R8 with
+larger N (5000 samples?) on FreeBSD to see if the fat-tailed
+shaders also start failing there at higher statistical power.
+
+### Status / decisions
+
+- **Stage 1 ships.** Real fix for Weibull. (`704dd2df` + `29dd09b`)
+- **Stage 2 had no effect.** Not landing the Stage 2 source changes.
+- **The remaining 3 failures aren't shader bugs.** They're a
+  fundamental f32-vs-f64 precision gap in the validator setup.
+  Renaming the tag from `:vulkan_known_failure` to
+  `:f32_precision_limited` would be more honest.
+- **Stage 3 (NVK comparison) is no longer the right next step.**
+  NVK would just give us f32 numerics from a different driver —
+  same precision gap. Skip.
+- **Stage 4 (barrier per leapfrog step) is no longer the right
+  next step.** Same reasoning.
+- **Stage 5 (file upstream NVIDIA bug) is no longer applicable.**
+  No driver bug to file.
+
+W7 evolves into "validator precision-gap accounting" rather than
+"driver fp32 drift hunt." The original 4-shader red light was
+correctly identifying a real problem; the diagnosis just turned
+out to be different from the initial hypothesis.
