@@ -732,3 +732,159 @@ investigate from the Linux side.
 - No W3 work — the GenServer is platform-agnostic Elixir.
 - No W5 work yet — the spike hasn't landed; will be R5.
 - No new shaders — the existing 6 are still the universe.
+
+---
+
+## R5 (2026-05-06) — Phase 1 synthesis cross-platform + Beta W2 validation
+
+Phase 1 of `PLAN_GPU_NODE.md` shipped today. The first synthesized
+chain shader (Beta(α, β) on logit-unconstrained space) renders →
+compiles → dispatches end-to-end on Linux RTX 3060 Ti in ~200 ms
+cold path. Now needs cross-platform validation.
+
+### Pull
+
+```sh
+cd ~/projects/learn_erl/nx_vulkan && git fetch nas && git pull --rebase nas feat/gpu-node && mix deps.get && mix compile
+cd ~/projects/learn_erl/pymc && git fetch origin && git pull --rebase origin feat/gpu-node && cd exmc && mix deps.get && mix compile
+```
+
+New on `nx_vulkan@feat/gpu-node`:
+- `67fa832` — `leapfrog_chain_synth` generic NIF (raw push-data, max 128 bytes)
+
+New on `pymc@feat/gpu-node`:
+- `521550173` — `ShaderTemplate`, `ShaderSpecs.beta`, `Synthesis` (renders + glslangValidator + cache)
+
+### R5 ask 1 + 2 — Synthesis works on FreeBSD GT 750M and GT 650M
+
+`glslangValidator` is a build-time dependency. Verify it's installed:
+
+```sh
+which glslangValidator || pkg install vulkan-tools  # mac-248 (FreeBSD)
+which glslangValidator || brew install glslang      # mac-247 (driven via ssh)
+```
+
+Quick sanity script (run on each Mac):
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+cat > /tmp/r5_synth_smoke.exs <<'EOF'
+{:ok, _} = Application.ensure_all_started(:nx_vulkan)
+Nx.Vulkan.Native.init()
+
+t0 = System.monotonic_time(:millisecond)
+spec = Exmc.GPUNode.ShaderSpecs.beta()
+{:ok, spv_path} = Exmc.GPUNode.Synthesis.compile(spec)
+t1 = System.monotonic_time(:millisecond)
+IO.puts("synth+compile: #{t1 - t0}ms")
+
+n = 1; k = 32
+{:ok, q_ref} = Nx.Vulkan.upload_binary(<<0.0::little-float-32>>)
+{:ok, p_ref} = Nx.Vulkan.upload_binary(<<0.5::little-float-32>>)
+{:ok, m_ref} = Nx.Vulkan.upload_binary(<<1.0::little-float-32>>)
+push = Exmc.GPUNode.ShaderSpecs.beta_push(n, k, 0.1, 2.0, 5.0)
+
+t2 = System.monotonic_time(:microsecond)
+{:ok, {_q, _p, _g, logp}} =
+  Nx.Vulkan.Native.leapfrog_chain_synth(q_ref, p_ref, m_ref, push, k, spv_path)
+t3 = System.monotonic_time(:microsecond)
+IO.puts("first dispatch: #{t3 - t2}us")
+
+{:ok, logp_bin} = Nx.Vulkan.Native.download_binary(logp, k * 4)
+[first | _] = for <<v::little-float-32 <- logp_bin>>, do: Float.round(v, 4)
+IO.puts("first logp: #{first}  (analytic ≈ -1.520)")
+EOF
+mix run /tmp/r5_synth_smoke.exs
+```
+
+Linux baseline: synth+compile 157 ms cold / 8 ms cached, first dispatch 39 ms,
+first logp -1.5162.
+
+What we want from each Mac:
+1. **synth+compile time** — does `glslangValidator` complete in <200 ms?
+   On FreeBSD with the system pkg version, expect similar order of magnitude.
+2. **first dispatch time** — pipeline-create cost. On mesa-radv expect
+   <20 ms (mesa's pipeline creation is faster than NVIDIA Linux).
+3. **first logp value** — should match -1.5162 within f32 precision
+   (≈ ±0.001). If it differs by more than a percent, something is
+   off (push-constant layout, byte order, GLSL semantics).
+
+### R5 ask 3 + 4 — Re-run the W2 validator post-Phase-1
+
+Same as R4 ask 1 + 4 but on the new branch. Should still be
+13 tests, 0 failures, 4 excluded (Exponential/HalfNormal/Weibull/Cauchy
+known-failures). Confirms Phase 1 didn't regress anything.
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/validator_test.exs --include vulkan
+```
+
+### R5 ask 5 + 6 — Re-run W4 warmup characterization post-Phase-1
+
+Same as R4 ask 2 + 5. The synthesis path doesn't touch the existing
+6 hand-written shaders, so warmup curves should be unchanged. If
+they ARE significantly different on either Mac, the GenServer
+routing or batched-IO might be interacting differently with the
+mesa/MoltenVK paths.
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+mix run bench/warmup_characterization.exs
+```
+
+(Don't overwrite `warmup_summary.md` this time — append a new section
+"## R5 — Post-Phase-1 numbers" with the per-Mac tables, like the R4
+table format from `r4_cross_platform_results.md`.)
+
+### R5 ask 7 + 8 — Re-run W6 chaos tests
+
+Same as R4 ask 3 + 6. The `:gpu_dispatch_timeout` calibration
+issue from R4 (1 ms timeout too generous on FreeBSD) is still
+present — that test will fail on mac-248 again. Acceptable for
+now; will be fixed once Phase 1 W6 lands the proper chaos test
+(deliberately bad shader instead of artificial timeout).
+
+```sh
+cd ~/projects/learn_erl/pymc/exmc
+EXMC_COMPILER=vulkan mix test test/exmc/gpu_node/bulkhead_test.exs --include vulkan
+```
+
+### R5 ask 9 — NEW: extend Beta with the W2 validator
+
+The W2 validator harness can hit a Beta model now that we have a
+synthesized shader. Want this to be part of the cross-platform
+matrix because if Beta passes on Linux but fails the same checks on
+a Mac, that's our first cross-platform shader bug — and the
+synthesized path is where future bugs will most often live.
+
+The wiring needed:
+- A Beta IR fixture in `Exmc.Builder` if not already present.
+- A `Beta` distribution module in `Exmc.Dist` that the EXLA path
+  can use as the reference.
+- A new vulkan_meta tag `{:beta, alpha, beta}` recognized by
+  `tree.ex`'s `do_dispatch` clauses.
+- Test case in `validator_test.exs`:
+
+```elixir
+test "Beta(2, 5) synthesized shader matches EXLA reference" do
+  {:ok, _path} = Exmc.GPUNode.Synthesis.compile(Exmc.GPUNode.ShaderSpecs.beta())
+  ir = Builder.new_ir() |> Builder.rv("x", Dist.Beta, %{alpha: Nx.tensor(2.0), beta: Nx.tensor(5.0)})
+  Process.put(:fused_leapfrog_meta, {:beta, 2.0, 5.0})
+  assert :ok = Validator.validate(ir, {:beta, 2.0, 5.0})
+end
+```
+
+This test will likely take some Linux-side wiring before it runs.
+**Skip ask 9 until we ship the Beta IR + Dist + tree.ex hookup.**
+For now, focus on asks 1-8 (synth smoke + replay R4 matrix).
+
+### Reporting back
+
+Append to `r4_cross_platform_results.md` with a `## R5` section and
+push as a single new commit on `feat/gpu-node`.
+
+If `glslangValidator` is missing on either Mac and not in the
+default package repo, flag it inline — we may need to vendor a
+prebuilt SPIR-V cache for distribution rather than requiring the
+compiler at runtime.
