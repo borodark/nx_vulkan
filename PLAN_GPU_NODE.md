@@ -160,6 +160,16 @@ What does a watchdog timeout look like in practice? How long does the NVIDIA dri
 
 Spike with deliberately bad shaders (infinite loops via push-constant inputs the shader trusts). Find the failure modes before production does. Confirm clients fall back to EXLA cleanly.
 
+### W7 — Linux NVIDIA chain-shader fp32 drift (added post-R6, 2026-05-06)
+
+R6 cross-platform validation revealed the 4 chain shaders we'd been calling "broken" (Exponential, Cauchy, HalfNormal, Weibull) **pass cleanly on FreeBSD NVIDIA driver** with the same SPIR-V binaries. The drift is Linux-NVIDIA-specific.
+
+Most likely culprit: NVIDIA's GLSL→SPIR-V→PTX pipeline aggressively fuses `a*b + c` into FMA, changing rounding semantics for the loop-carried leapfrog accumulators. Cheapest test: add `precise float` qualifiers to the 4 affected shaders, recompile, re-run W2. If green, FMA fusion confirmed.
+
+Doesn't block Phase 2 — the Phase 1 synthesized shaders (Beta/Gamma/Lognormal) pass on Linux already. W7 is about getting the 4 hand-written shaders unblocked on Linux too.
+
+Full hypothesis tree (H7.1 FMA fusion / H7.2 loop-carried reordering / H7.3 denormal handling / H7.4 driver version / H7.5 NVK comparison) + investigation plan in `research/gpu_node/WORKSTREAM_W7_linux_nvidia_drift.md`.
+
 ---
 
 ## Phased prototyping plan

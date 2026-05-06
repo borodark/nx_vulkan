@@ -12,6 +12,7 @@ Each WORKSTREAM_*.md is a living document for one of the six parallel workstream
 | WORKSTREAM_W4_warmup.md | Warmup curve characterization | open | scaffold |
 | WORKSTREAM_W5_persistence.md | vkPipelineCache + SPIR-V CAS | open | scaffold |
 | WORKSTREAM_W6_bulkheads.md | Watchdog + bad-shader recovery | open | blocked on W3 |
+| WORKSTREAM_W7_linux_nvidia_drift.md | Linux NVIDIA chain-shader fp32 drift (added post-R6) | open | scaffold |
 
 W2/W3 live under `pymc/exmc/research/gpu_node/` because they touch sampler/test code.
 W1/W4/W5/W6 live here under `nx_vulkan/research/gpu_node/` because they touch the GPU layer.
