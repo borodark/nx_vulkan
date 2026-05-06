@@ -424,4 +424,84 @@ Elixir-side codegen (W1) calls `spv_load` first, falls through to `glslc + spv_s
 
 ## Notes / log
 
-(empty)
+### Phase 2 W5 implementation (2026-05-06)
+
+Shipped on `feat/gpu-node`:
+
+- `nx_vulkan@ccdd145` — vkPipelineCache wired into spirit. Created
+  in vk_init, passed to every vkCreateComputePipelines, destroyed
+  in vk_destroy. In-process effect only; same-VM repeats now hit.
+- `nx_vulkan@f4808b2` — disk persistence shim:
+  `nxv_pipeline_cache_load`, `nxv_pipeline_cache_persist`,
+  `nxv_device_uuid`. Header sniff in `pipeline_cache_create`;
+  atomic write-temp-rename in persist.
+- `pymc@36f28daed` — `Exmc.GPUNode.PipelineCache` Elixir wrapper.
+  `load/0` + `persist/0` + `default_path/0` + `device_uuid_hex/0`.
+
+### Cold-start measurement on RTX 3060 Ti
+
+Two separate BEAM sessions, first dispatch per Phase 1 synthesized
+shader. Session 1 starts with empty cache + persists at end.
+Session 2 loads the persisted cache.
+
+| Family | Cold first dispatch | Warm first dispatch | Speedup |
+|--------|--------------------|--------------------|---------|
+| Beta | 42,932 µs | 21,131 µs | 2.0× |
+| Gamma | 23,372 µs | 5,473 µs | **4.3×** |
+| Lognormal | 22,283 µs | 5,399 µs | **4.1×** |
+
+Cache file size after persisting three shaders: 36 KB.
+
+### Observations
+
+1. **Gamma + Lognormal hit the design target.** Pipeline-create cost
+   on cold = ~17 ms, drops to <500 µs after cache load. That's the
+   `vkCreateComputePipelines` cost being amortized as expected.
+
+2. **Beta only got 2×.** Most of Beta's cold-start cost is *not*
+   pipeline create. Likely candidates: descriptor-set alloc (which
+   the cache doesn't help with — that's a separate object lifecycle),
+   or first-call SUBMIT_LOCK contention with the cache file write.
+   Worth a follow-up profile but not blocking — still a meaningful
+   win.
+
+3. **Cache rebuild on UUID mismatch is silent except for stderr.**
+   When the on-disk cache header doesn't match the running device,
+   spirit prints `pipeline cache header mismatch (vendor=... device=...)`
+   to stderr and creates a fresh empty cache. The Elixir layer sees
+   `:ok` either way — we trust the driver's "if I can't use it, I'll
+   ignore it" semantics.
+
+4. **No automatic persist hook yet.** Phase 2 ships the API; the
+   user (or a future supervisor shutdown handler) is responsible for
+   calling `persist/0` at the right time. A reasonable place would
+   be a `terminate/2` callback on `Exmc.GPUNode.Server` once the
+   GenServer becomes the persistent state holder.
+
+### What's next on W5
+
+- Periodic persist (e.g., every 60 dispatches or every N seconds)
+  so a hard crash doesn't lose the cache. Trade-off: write cost on
+  the hot path. The vkGetPipelineCacheData call serializes ~36 KB
+  for our current workload — fast but not free.
+
+- W5 ask for mac-248: validate the cache file format is
+  cross-platform-friendly (it shouldn't be — different drivers
+  produce different UUIDs — but we should confirm the header sniff
+  catches mac-248's GT 750M vs GT 650M correctly when files are
+  cross-pollinated).
+
+- Telemetry via `VK_EXT_pipeline_creation_cache_control` to log
+  hit/miss per pipeline create. Documented in the design above; not
+  implemented yet.
+
+### Files
+
+- `nx_vulkan/c_src/spirit/include/engine/Backend_par_vulkan.hpp` —
+  `pipeline_cache_create`, `_get_data`, `_destroy` declarations.
+- `nx_vulkan/c_src/spirit/src/engine/Backend_par_vulkan.cpp` —
+  implementations + header sniff.
+- `nx_vulkan/c_src/nx_vulkan_shim.{h,cpp}` — load/persist/uuid shim.
+- `nx_vulkan/native/nx_vulkan_native/src/lib.rs` — Rust NIFs.
+- `nx_vulkan/lib/nx_vulkan/native.ex` — bindings.
+- `pymc/exmc/lib/exmc/gpu_node/pipeline_cache.ex` — high-level wrapper.
