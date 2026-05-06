@@ -148,3 +148,30 @@ with the per-fence latency advantage measured throughout R3-R5.
 Race cells d>1 blocked: unfused Vulkan at d=8+ is too slow on FreeBSD
 (same issue as R1). Would need either EXLA CPU baseline or a fused-only
 race to complete the 10-cell matrix.
+
+## R7 — Phase 2 Refactor Validation
+
+Phase 2 refactored Exmc.GPUNode.* → Exmc.NUTS.Vulkan.* and extracted
+shader synthesis into Nx.Vulkan namespace. Pipeline cache persistence
+added (W5).
+
+### Validator (Phase 2 module paths)
+
+| Platform | Tests | Pass | Fail | Notes |
+|----------|-------|------|------|-------|
+| FreeBSD GT 750M (mac-248) | 16 | **16** | **0** | All pass incl. synth |
+| FreeBSD GT 650M (mac-247) | 16 | **16** | **0** | All pass incl. synth |
+
+### Bulkhead (Phase 2)
+
+| Platform | Tests | Pass | Fail |
+|----------|-------|------|------|
+| FreeBSD GT 750M | 3 | **3** | **0** |
+| FreeBSD GT 650M | 3 | **3** | **0** |
+
+### Build note
+
+Required fix: test file `validator_test.exs` had stale alias
+`Exmc.GPUNode.Validator` → updated to `Exmc.NUTS.Vulkan.Validator`.
+Mac-247 also needed full nx_vulkan pull to get `39fec0e` (Phase 2
+module extraction) before synth tests could pass.
