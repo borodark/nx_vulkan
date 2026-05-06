@@ -58,6 +58,24 @@ int nxv_buf_upload_batch(void** dsts, const void** data,
 int nxv_buf_download_batch(void** srcs, void** out_data,
                            const unsigned long* sizes, unsigned int n_buffers);
 
+/* Generic K-step leapfrog chain dispatch for synthesized shaders.
+ *
+ * Identical buffer binding order to all the family-specific
+ * nxv_leapfrog_chain_* entries (q_init, p_init, inv_mass, q_chain,
+ * p_chain, grad_chain, logp_chain at bindings 0-6).
+ *
+ * The push-constants block layout is OPAQUE to this shim — `push_data`
+ * is a raw `push_size`-byte blob assembled by the caller (Elixir-side
+ * codegen knows the per-shader layout). Maximum 128 bytes (Vulkan
+ * minimum guaranteed push-constants size).
+ *
+ * Returns 0 on success, negative on error. */
+int nxv_leapfrog_chain_synth(void* q_chain, void* p_chain,
+                              void* grad_chain, void* logp_chain,
+                              void* q_init, void* p_init, void* inv_mass,
+                              const void* push_data, unsigned int push_size,
+                              const char* spv_path);
+
 /* Tensor primitives (v0.0.2) ------------------------------------------ */
 /* Stubs placed here so Rust can declare them; implementations land in
  * the next iteration once the resource type lifetime is in place. */

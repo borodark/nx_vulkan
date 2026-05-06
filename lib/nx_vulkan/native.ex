@@ -122,6 +122,15 @@ defmodule Nx.Vulkan.Native do
   def leapfrog_normal(_q, _p, _inv_mass, _eps, _mu, _sigma, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Generic K-step leapfrog chain for synthesized shaders.
+
+  `push` is a raw binary assembled by the Elixir-side codegen (max 128 bytes).
+  Returns `{:ok, {q_chain, p_chain, grad_chain, logp_chain}}`.
+  """
+  def leapfrog_chain_synth(_q, _p, _inv_mass, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @doc false
   def leapfrog_chain_normal(_q, _p, _inv_mass, _k, _eps, _mu, _sigma, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
