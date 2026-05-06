@@ -38,9 +38,32 @@ install_pkg vulkan-tools
 # Shader compiler
 install_pkg glslang
 
-# Erlang + Elixir
+# Erlang + Elixir (OTP 27 required for NIF ABI compatibility)
 install_pkg erlang
+install_pkg erlang-runtime27
 install_pkg elixir
+
+# Build Elixir 1.18 against OTP 27 if not already done
+if [ ! -f /tmp/elixir-1.18.4/bin/elixir ]; then
+    echo "[build] Building Elixir 1.18.4 against OTP 27..."
+    cd /tmp
+    wget -q https://github.com/elixir-lang/elixir/archive/refs/tags/v1.18.4.tar.gz 2>/dev/null
+    tar xf v1.18.4.tar.gz 2>/dev/null
+    cd elixir-1.18.4
+    PATH=/usr/local/lib/erlang27/bin:$PATH gmake clean compile 2>/dev/null
+    echo "[ok] Elixir 1.18.4 built at /tmp/elixir-1.18.4/bin/"
+else
+    echo "[ok] Elixir 1.18.4 already built"
+fi
+
+# Set PATH for OTP 27 + Elixir 1.18
+export PATH=/tmp/elixir-1.18.4/bin:/usr/local/lib/erlang27/bin:$PATH
+
+# Persist in shell profile
+if ! grep -q "erlang27" ~/.profile 2>/dev/null; then
+    echo 'export PATH=/tmp/elixir-1.18.4/bin:/usr/local/lib/erlang27/bin:$PATH' >> ~/.profile
+    echo "[ok] PATH added to ~/.profile"
+fi
 
 # Rust (for Rustler NIF compilation)
 install_pkg rust
