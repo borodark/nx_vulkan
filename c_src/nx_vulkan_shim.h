@@ -58,6 +58,28 @@ int nxv_buf_upload_batch(void** dsts, const void** data,
 int nxv_buf_download_batch(void** srcs, void** out_data,
                            const unsigned long* sizes, unsigned int n_buffers);
 
+/* Phase 2 W5 — pipeline cache disk persistence.
+ *
+ * Loads the on-disk blob at `path` (if it exists) and rebuilds the
+ * spirit pipeline cache from it. Header sniff happens inside spirit;
+ * mismatched UUID is silently discarded with a stderr warning.
+ *
+ * Returns 0 on success (including the "no file" + "header mismatch"
+ * cases — both produce a fresh empty cache). Returns negative if the
+ * file exists but cannot be read. */
+int nxv_pipeline_cache_load(const char* path);
+
+/* Persists the current pipeline cache to `path` via write-temp-then-
+ * rename (atomic on same FS). Caller is responsible for ensuring the
+ * parent directory exists.
+ *
+ * Returns 0 on success, negative on I/O error. */
+int nxv_pipeline_cache_persist(const char* path);
+
+/* Reads the current device's pipelineCacheUUID into out[16].
+ * Returns 0 on success, negative if the device isn't initialized. */
+int nxv_device_uuid(unsigned char out[16]);
+
 /* Generic K-step leapfrog chain dispatch for synthesized shaders.
  *
  * Identical buffer binding order to all the family-specific

@@ -23,6 +23,9 @@ mod atoms {
         size_mismatch,
         dispatch_failed,
         bad_op,
+        load_failed,
+        persist_failed,
+        not_initialized,
     }
 }
 
@@ -67,6 +70,10 @@ unsafe extern "C" {
         push_size: u32,
         spv_path: *const c_char,
     ) -> i32;
+
+    fn nxv_pipeline_cache_load(path: *const c_char) -> i32;
+    fn nxv_pipeline_cache_persist(path: *const c_char) -> i32;
+    fn nxv_device_uuid(out: *mut u8) -> i32;
 
     fn nxv_buf_alloc(n_bytes: u64) -> *mut c_void;
     fn nxv_buf_free(handle: *mut c_void);
@@ -422,6 +429,47 @@ fn has_f64<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 fn timing_reset<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     unsafe { nxv_timing_reset() };
     Ok(rustler::types::atom::ok().encode(env))
+}
+
+/// W5 — load the on-disk pipeline cache blob at `path`. Missing file is
+/// OK (creates a fresh empty cache). Header mismatch is OK (silently
+/// discarded). Returns `:ok` or `{:error, :load_failed}` on read error.
+#[rustler::nif]
+fn pipeline_cache_load<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
+    let cstr = std::ffi::CString::new(path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_pipeline_cache_load(cstr.as_ptr()) };
+    if rc == 0 {
+        Ok(rustler::types::atom::ok().encode(env))
+    } else {
+        Ok((atoms::error(), atoms::load_failed()).encode(env))
+    }
+}
+
+/// W5 — persist the current pipeline cache to `path` (atomic
+/// write-temp-rename). Returns `:ok`, `:empty`, or
+/// `{:error, :persist_failed}`.
+#[rustler::nif]
+fn pipeline_cache_persist<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
+    let cstr = std::ffi::CString::new(path).map_err(|_| Error::BadArg)?;
+    let rc = unsafe { nxv_pipeline_cache_persist(cstr.as_ptr()) };
+    if rc == 0 {
+        Ok(rustler::types::atom::ok().encode(env))
+    } else {
+        Ok((atoms::error(), atoms::persist_failed()).encode(env))
+    }
+}
+
+/// W5 — read the current device's pipelineCacheUUID as a 16-byte binary.
+#[rustler::nif]
+fn device_uuid<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    let mut buf = [0u8; 16];
+    let rc = unsafe { nxv_device_uuid(buf.as_mut_ptr()) };
+    if rc != 0 {
+        return Ok((atoms::error(), atoms::not_initialized()).encode(env));
+    }
+    let mut out = OwnedBinary::new(16).ok_or_else(|| Error::Term(Box::new("alloc")))?;
+    out.as_mut_slice().copy_from_slice(&buf);
+    Ok((atoms::ok(), out.release(env).encode(env)).encode(env))
 }
 
 /// H3 dispatch timing — read current accumulator values.

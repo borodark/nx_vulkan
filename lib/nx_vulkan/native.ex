@@ -28,6 +28,15 @@ defmodule Nx.Vulkan.Native do
   @doc "H3 dispatch timing — read {count, dispatch_ns, submit_ns, wait_ns, record_ns}."
   def timing_get(), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Phase 2 W5 — load on-disk pipeline cache blob into the spirit context."
+  def pipeline_cache_load(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Phase 2 W5 — atomically write spirit's current pipeline cache to disk."
+  def pipeline_cache_persist(_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Phase 2 W5 — read the device's pipelineCacheUUID as a 16-byte binary."
+  def device_uuid(), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc false
   def upload_binary(_data), do: :erlang.nif_error(:nif_not_loaded)
 
