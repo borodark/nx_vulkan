@@ -34,7 +34,7 @@
 
 1. Spike: at GPU node startup, read `~/.exmc/gpu_node/pipeline_cache/{uuid}.bin` if present, pass to `vkCreatePipelineCache(pInitialData)`.
 2. At shutdown (or per-N-shader-loads), call `vkGetPipelineCacheData`, write blob to disk.
-3. Measure: cold-start wall (`mix run -e "Exmc.GPUNode.Server.start_link(); :ok"` time-to-ready) with and without the cache.
+3. Measure: cold-start wall (`mix run -e "Nx.Vulkan.Node.start_link(); :ok"` time-to-ready) with and without the cache.
 4. Stress-test: corrupt the cache file by 1 byte, verify graceful fallback (driver detects corruption, returns VK_ERROR_INITIALIZATION_FAILED, we discard and re-compile).
 
 ## Open questions
@@ -435,7 +435,7 @@ Shipped on `feat/gpu-node`:
   `nxv_pipeline_cache_load`, `nxv_pipeline_cache_persist`,
   `nxv_device_uuid`. Header sniff in `pipeline_cache_create`;
   atomic write-temp-rename in persist.
-- `pymc@36f28daed` — `Exmc.GPUNode.PipelineCache` Elixir wrapper.
+- `pymc@36f28daed` — `Nx.Vulkan.PipelineCache` Elixir wrapper.
   `load/0` + `persist/0` + `default_path/0` + `device_uuid_hex/0`.
 
 ### Cold-start measurement on RTX 3060 Ti
@@ -475,7 +475,7 @@ Cache file size after persisting three shaders: 36 KB.
 4. **No automatic persist hook yet.** Phase 2 ships the API; the
    user (or a future supervisor shutdown handler) is responsible for
    calling `persist/0` at the right time. A reasonable place would
-   be a `terminate/2` callback on `Exmc.GPUNode.Server` once the
+   be a `terminate/2` callback on `Nx.Vulkan.Node` once the
    GenServer becomes the persistent state holder.
 
 ### What's next on W5

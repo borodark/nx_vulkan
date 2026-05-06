@@ -82,7 +82,7 @@ A test that:
 
 Shipped on `pymc@feat/gpu-node`:
 
-- `Exmc.GPUNode.Server.chain_dispatch/9` now wraps `GenServer.call`
+- `Nx.Vulkan.Node.chain_dispatch/9` now wraps `GenServer.call`
   with a try/catch on `:exit`. Reads `Application.get_env(:exmc,
   :gpu_node_timeout_ms, :infinity)`. Returns `{:error,
   :gpu_dispatch_timeout}` on timeout, `{:error, :gpu_node_dead}`
@@ -137,7 +137,7 @@ Shipped on `pymc@feat/gpu-node`:
 Working contract from the test:
 
 ```elixir
-case Exmc.GPUNode.Server.chain_dispatch(...) do
+case Nx.Vulkan.Node.chain_dispatch(...) do
   {:error, :gpu_dispatch_timeout} -> exla_fallback()
   {:error, :gpu_node_dead}        -> exla_fallback()
   {:error, _other}                 -> exla_fallback()
