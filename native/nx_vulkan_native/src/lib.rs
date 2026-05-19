@@ -1466,7 +1466,12 @@ fn leapfrog_chain_synth<'a>(
     k: u32,
     spv_path: String,
 ) -> NifResult<Term<'a>> {
-    if q_init.n_bytes != p_init.n_bytes || q_init.n_bytes != inv_mass.n_bytes {
+    // R2.2.3 repack: the inv_mass slot at binding 2 may carry
+    // obs[0..n_obs-1] followed by inv_mass[0..d-1] (total
+    // (n_obs+d)*4 bytes), so it need not match q_init/p_init's
+    // d*4 byte size. Only q_init and p_init must agree — chain_bytes
+    // is computed from q_init.n_bytes regardless.
+    if q_init.n_bytes != p_init.n_bytes {
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
     }
     if k == 0 {
