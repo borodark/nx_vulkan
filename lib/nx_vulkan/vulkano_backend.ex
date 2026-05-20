@@ -344,6 +344,52 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # ---------------------------------------------------------------- linalg
+
+  @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
+
+  # Dot product (matmul) — Nx callback signature for rank-2 × rank-2:
+  #   dot(out, a, contracting_axes_a, batched_axes_a, b, contracting_axes_b, batched_axes_b)
+  # For now: support only rank-2 × rank-2 with contracting last axis of a
+  # and first axis of b (standard matmul). Higher-rank / batched dot
+  # falls back to BinaryBackend.
+  @impl true
+  def dot(
+        %T{shape: out_shape, type: type} = out,
+        %T{shape: a_shape, data: %__MODULE__{ref: a_ref}},
+        [1],
+        [],
+        %T{shape: b_shape, data: %__MODULE__{ref: b_ref}},
+        [0],
+        []
+      )
+      when tuple_size(a_shape) == 2 and tuple_size(b_shape) == 2 do
+    m = elem(a_shape, 0)
+    k_a = elem(a_shape, 1)
+    k_b = elem(b_shape, 0)
+    n = elem(b_shape, 1)
+
+    if k_a != k_b do
+      raise "matmul shape mismatch: a=#{inspect(a_shape)}, b=#{inspect(b_shape)}"
+    end
+
+    out_bytes = m * n * element_bytes(type)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.matmul(
+        out_ref,
+        a_ref,
+        b_ref,
+        m,
+        n,
+        k_a,
+        @matmul_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp byte_size_of(shape) when is_tuple(shape) do

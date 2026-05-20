@@ -116,4 +116,12 @@ defmodule Nx.Vulkan.NativeV do
   """
   def transpose_2d(_out, _a, _m, _n, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  2D matmul. C = A · B where A is M×K row-major, B is K×N row-major,
+  C is M×N row-major. All f32. Buffers: a (m*k*4), b (k*n*4), out
+  (m*n*4).
+  """
+  def matmul(_out, _a, _b, _m, _n, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
