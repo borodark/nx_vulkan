@@ -1,0 +1,20 @@
+[package]
+name = "nx_vulkan_vulkano"
+version = "0.0.1"
+authors = ["Igor Ostaptchenko <igor@octanix.com>"]
+edition = "2021"
+description = "Pure-Rust Rustler NIF for synthesised Vulkan chain shader dispatch via vulkano. Sibling of nx_vulkan_native — no C++ shim, no spirit backend; Arc<Buffer> resource lifetimes."
+
+[lib]
+name = "nx_vulkan_vulkano"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.36"
+vulkano = "0.34"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
