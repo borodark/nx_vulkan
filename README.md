@@ -10,7 +10,7 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 
 Two backends live in this repo:
 
-- **`Nx.Vulkan.VulkanoBackend`** — pure-Rust, [vulkano](https://github.com/vulkano-rs/vulkano)-backed, current primary. 24 ops native + host-fallback for the long tail. Validated on Axon training (forward + autograd + SGD) and on the eXMC regime-model log-posterior at f64 precision.
+- **`Nx.Vulkan.VulkanoBackend`** — pure-Rust, [vulkano](https://github.com/vulkano-rs/vulkano)-backed, current primary. 24 ops native + host-fallback for the long tail. Validated on Axon training (forward + autograd + SGD), the eXMC regime-model log-posterior at f64 precision, and Scholar linear regression (coefficients match to 2e-6).
 - **`Nx.Vulkan.Backend`** — C++ spirit-backed, predecessor. Chain-shader synthesis pipeline (`Synthesis`, `ShaderTemplate`, `ChainShaderSpecs`) still ships here and produces SPV blobs that either backend can dispatch.
 
 ## What works today
@@ -28,6 +28,7 @@ Two backends live in this repo:
 | `Nx.Defn.grad` (autograd) | works automatically | works automatically |
 | Axon training step | **✓ validated** (1e-8 grad match vs BinaryBackend) | partial |
 | eXMC NUTS sampler integration | **✓ regime log_p byte-identical** | ✓ chain-shader path |
+| Scholar linear regression | **✓ coefficients match to 2e-6** (SVD via host-fallback) | partial |
 | Long-running workloads (5000+ dispatches) | **✓ pipeline cache** | ✗ stale-buffer crash class |
 
 The chain-shader dispatch path (`leapfrog_chain_synth`) is shared between both backends — same SPV cache, same content-addressing, same runtime synthesis pipeline. The difference is the backend that handles general Nx tensor ops outside that dispatch.
@@ -91,7 +92,7 @@ That means **VulkanoBackend supports gradients for any function expressible in i
 
 **f64 matmul.** `matmul.spv` is f32-only. f64 dot products fall back to host, which is slow for large tensors. **2 weeks** to add the f64 variant.
 
-**Scholar parity.** Not yet smoke-tested. Likely needs a few more callback patterns (general slice, `Nx.LinAlg.solve` host-route already works for normal-equation linear regression). **One day** to validate.
+**Scholar — linalg fast paths.** Linear regression (normal equation + SVD) now smoke-tests cleanly via a host-fallback `block/4` callback that routes `Nx.Block.LinAlg.SVD`/`QR`/`solve`/`cholesky` through `BinaryBackend`. Coefficients match to 2e-6. The fallback works for any Scholar algorithm whose linalg uses `Nx.Block`; native SVD/QR shaders would speed things up but aren't blocking correctness. **2-4 weeks** to add the most-used linalg shaders natively.
 
 ## Quickstart
 
@@ -246,7 +247,8 @@ Vulkano compiles in ~30s on Linux, ~3:18 on FreeBSD 15.0 (mostly dependency comp
 | Autograd via `Nx.Defn.grad` | ✓ |
 | Persistent buffer pool | mid-2026 |
 | f64 matmul | mid-2026 |
-| Scholar smoke test | mid-2026 |
+| Scholar linear regression (coefs match to 2e-6) | ✓ |
+| Scholar native linalg shaders (SVD/QR/cholesky/solve) | mid-2026 |
 | Custom `Nx.Defn` compiler | 2026 H2 |
 | Conv / FFT / sort / scatter | 2026 H2–Q4 |
 
