@@ -38,3 +38,6 @@ Cargo.lock
 # priv/shaders is now vendored from Spirit (see c_src/spirit/VENDOR.md);
 # previous build.rs copy-step made it transient, but the hex-publish
 # vendoring made it canonical content tracked in git.
+
+# Cached SPV blobs compiled by Nx.Vulkan.Synthesis at runtime
+/priv/shader_cache/

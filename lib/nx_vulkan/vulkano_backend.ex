@@ -161,6 +161,52 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # ---------------------------------------------------------------- elementwise unary
+
+  # Op codes match `priv/shaders/elementwise_unary.spv` spec constant ID 0:
+  #   0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu
+  #   8=ceil  9=floor  10=sign  11=reciprocal  12=square
+  @unary_ops [
+    exp: 0,
+    log: 1,
+    sqrt: 2,
+    abs: 3,
+    negate: 4,
+    sigmoid: 5,
+    tanh: 6,
+    floor: 9,
+    ceil: 8,
+    sign: 10
+  ]
+
+  @elementwise_unary_spv Path.expand(
+                           "../../priv/shaders/elementwise_unary.spv",
+                           __DIR__
+                         )
+
+  for {op, code} <- @unary_ops do
+    @impl true
+    def unquote(op)(
+          %T{shape: shape, type: type} = out,
+          %T{data: %__MODULE__{ref: a_ref}}
+        ) do
+      n = byte_size_of(shape)
+      n_bytes = n * element_bytes(type)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+
+      :ok =
+        Nx.Vulkan.NativeV.apply_unary(
+          out_ref,
+          a_ref,
+          n,
+          unquote(code),
+          @elementwise_unary_spv
+        )
+
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+    end
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp byte_size_of(shape) when is_tuple(shape) do

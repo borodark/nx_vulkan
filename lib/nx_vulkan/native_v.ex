@@ -84,4 +84,15 @@ defmodule Nx.Vulkan.NativeV do
   """
   def apply_binary(_out, _a, _b, _n, _op_code, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Elementwise unary op. `op_code` selects:
+
+      0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu
+      8=ceil  9=floor  10=sign  11=reciprocal  12=square
+
+  Buffers must be the same byte size.
+  """
+  def apply_unary(_out, _a, _n, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
