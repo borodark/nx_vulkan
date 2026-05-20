@@ -22,7 +22,7 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use rustler::{Binary, Encoder, Env, NewBinary, NifResult, Term};
+use rustler::{Binary, Encoder, Env, NewBinary, NifResult, ResourceArc, Term};
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
@@ -55,7 +55,19 @@ mod atoms {
         spv_read_failed,
         vulkan_init_failed,
         dispatch_failed,
+        upload_failed,
+        download_failed,
     }
+}
+
+/// NIF resource: a Vulkan-backed buffer whose lifetime is owned by Rust.
+/// When the Elixir-side reference is GC'd, Rustler runs the Drop, which
+/// in turn drops the inner Subbuffer. The Subbuffer holds an Arc to the
+/// underlying allocation; once all references go, vkDestroyBuffer +
+/// vkFreeMemory run via vulkano's Drop chain. No raw VkBuf* escapes.
+pub struct VulkanoTensor {
+    buf: Subbuffer<[u8]>,
+    n_bytes: u64,
 }
 
 /// Lazy-init Vulkan context: instance, device, queue, allocators.
@@ -406,4 +418,113 @@ fn bytes_to_nif_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
     bin.into()
 }
 
-rustler::init!("Elixir.Nx.Vulkan.NativeV");
+// -- Buffer lifecycle NIFs ------------------------------------------------
+//
+// Sibling of the C++ shim's nxv_buf_* family, but every buffer is held
+// behind a Rust Arc<Buffer> wrapped in a Subbuffer<[u8]> + ResourceArc.
+// The stale-handle bug class is structurally absent: a Subbuffer cannot
+// outlive its underlying Buffer because vulkano enforces it at the type
+// level, and Rustler's ResourceArc Drop runs vulkano's Drop before any
+// Elixir reference becomes dangling.
+
+/// Allocate + upload a host binary into a fresh device buffer.
+/// Returns `{:ok, resource}`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_upload<'a>(env: Env<'a>, data: Binary<'a>) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let buf = match upload_buffer(
+        context.mem_allocator.clone(),
+        data.as_slice(),
+        BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+    ) {
+        Ok(b) => b,
+        Err(e) => return Ok((atoms::error(), atoms::upload_failed(), e).encode(env)),
+    };
+
+    let tensor = VulkanoTensor {
+        buf,
+        n_bytes: data.len() as u64,
+    };
+    Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
+}
+
+/// Allocate a zero-initialised device buffer of `n_bytes`.
+/// Returns `{:ok, resource}`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_alloc<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let buf = match alloc_buffer(
+        context.mem_allocator.clone(),
+        n_bytes as usize,
+        BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+    ) {
+        Ok(b) => b,
+        Err(e) => return Ok((atoms::error(), atoms::upload_failed(), e).encode(env)),
+    };
+
+    let tensor = VulkanoTensor { buf, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
+}
+
+/// Download `tensor.n_bytes` bytes from a device buffer to the BEAM.
+/// Returns `{:ok, binary}`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_download<'a>(env: Env<'a>, tensor: ResourceArc<VulkanoTensor>) -> NifResult<Term<'a>> {
+    let bytes = match tensor.buf.read() {
+        Ok(guard) => guard.to_vec(),
+        Err(_) => return Ok((atoms::error(), atoms::download_failed()).encode(env)),
+    };
+    let bin = bytes_to_nif_binary(env, &bytes);
+    Ok((atoms::ok(), bin).encode(env))
+}
+
+/// Tensor's buffer size in bytes.
+#[rustler::nif]
+fn buf_byte_size(tensor: ResourceArc<VulkanoTensor>) -> u64 {
+    tensor.n_bytes
+}
+
+/// Overwrite an existing device buffer with new host data.
+/// Returns `:ok` or `{:error, :size_mismatch}` when `data.len() != tensor.n_bytes`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_upload_into<'a>(
+    env: Env<'a>,
+    tensor: ResourceArc<VulkanoTensor>,
+    data: Binary<'a>,
+) -> NifResult<Term<'a>> {
+    if data.len() as u64 != tensor.n_bytes {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    let mut guard = match tensor.buf.write() {
+        Ok(g) => g,
+        Err(_) => return Ok((atoms::error(), atoms::upload_failed()).encode(env)),
+    };
+    guard.copy_from_slice(data.as_slice());
+    Ok(rustler::types::atom::ok().encode(env))
+}
+
+fn load(env: rustler::Env, _info: rustler::Term) -> bool {
+    rustler::resource!(VulkanoTensor, env);
+    true
+}
+
+rustler::init!(
+    "Elixir.Nx.Vulkan.NativeV",
+    [
+        leapfrog_chain_synth,
+        buf_upload,
+        buf_alloc,
+        buf_download,
+        buf_byte_size,
+        buf_upload_into,
+    ],
+    load = load
+);

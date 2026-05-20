@@ -45,4 +45,29 @@ defmodule Nx.Vulkan.NativeV do
   """
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # -- Buffer lifecycle ---------------------------------------------------
+
+  @doc """
+  Allocate a device buffer + upload `data` to it. Returns
+  `{:ok, ref}`. The ref is a Rustler resource that owns the
+  underlying `Arc<Buffer>` — when the BEAM GCs it, vulkano's Drop
+  runs and the GPU memory is freed.
+  """
+  def buf_upload(_data), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Allocate a zero-initialised device buffer of `n_bytes`. Returns `{:ok, ref}`."
+  def buf_alloc(_n_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Read a device buffer back to a host binary. Returns `{:ok, binary}`."
+  def buf_download(_ref), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Buffer size in bytes (returns integer, never crashes on a valid resource)."
+  def buf_byte_size(_ref), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Overwrite an existing device buffer with new host data.
+  Returns `:ok` or `{:error, :size_mismatch}` when sizes disagree.
+  """
+  def buf_upload_into(_ref, _data), do: :erlang.nif_error(:nif_not_loaded)
 end
