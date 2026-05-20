@@ -1,0 +1,18 @@
+[package]
+name = "vulkano_synth"
+version = "0.1.0"
+edition = "2021"
+authors = ["Igor Ostaptchenko <igor@octanix.com>"]
+description = "Mission II R5+ spike: pure-Rust vulkano dispatcher for the synthesised chain shader. Loads a content-addressed SPV from disk and runs K-step leapfrog against 7 SSBOs + push block. Validates against the C++/spirit path's output on the regime-model regime model."
+
+[[bin]]
+name = "vulkano_synth_dispatch"
+path = "src/main.rs"
+
+[dependencies]
+vulkano = "0.34"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
