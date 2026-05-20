@@ -408,6 +408,87 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # Comparison ops — host-fallback. The elementwise_binary.spv catalog
+  # has op codes 7/8/9 (equal/less/greater) but its output is f32, not
+  # u8 (the type Nx expects from a comparison). Routing through
+  # BinaryBackend keeps the Nx type contract correct. Scholar uses
+  # comparison + select heavily; this unblocks the classical-ML target.
+  for op <- [:equal, :not_equal, :less, :less_equal, :greater, :greater_equal] do
+    @impl true
+    def unquote(op)(out, a, b) do
+      a_v = ensure_on_backend(a)
+      b_v = ensure_on_backend(b)
+      a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+      b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+      result = apply(Nx, unquote(op), [a_bin, b_bin])
+      from_binary(out, Nx.to_binary(result), [])
+    end
+  end
+
+  # select(cond, on_true, on_false) — host-fallback.
+  @impl true
+  def select(out, pred, on_true, on_false) do
+    pred_bin = Nx.backend_transfer(ensure_on_backend(pred), Nx.BinaryBackend)
+    t_bin = Nx.backend_transfer(ensure_on_backend(on_true), Nx.BinaryBackend)
+    f_bin = Nx.backend_transfer(ensure_on_backend(on_false), Nx.BinaryBackend)
+    result = Nx.select(pred_bin, t_bin, f_bin)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # all/3, any/3 — boolean reductions, host-fallback.
+  for op <- [:all, :any] do
+    @impl true
+    def unquote(op)(out, tensor, opts) do
+      bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+      result = apply(Nx, unquote(op), [bin, opts])
+      from_binary(out, Nx.to_binary(result), [])
+    end
+  end
+
+  # block/4 — Nx's "block" callback dispatches Nx.Block-derived structs
+  # (SVD, QR, LU, etc.). Host-fallback: transfer every tensor in the
+  # input tuple to BinaryBackend, evaluate via its block impl, then
+  # transfer outputs back. Scholar's linear regression uses
+  # Nx.Block.LinAlg.SVD internally; this unblocks it.
+  @impl true
+  def block(out, block_def, inputs, opts) do
+    transfer_to_bin = fn t ->
+      if is_struct(t, Nx.Tensor) and match?(%__MODULE__{}, t.data) do
+        Nx.backend_transfer(t, Nx.BinaryBackend)
+      else
+        t
+      end
+    end
+
+    inputs_bin =
+      cond do
+        is_list(inputs) -> Enum.map(inputs, transfer_to_bin)
+        is_tuple(inputs) -> inputs |> Tuple.to_list() |> Enum.map(transfer_to_bin) |> List.to_tuple()
+        true -> transfer_to_bin.(inputs)
+      end
+
+    result = Nx.BinaryBackend.block(out, block_def, inputs_bin, opts)
+
+    # `result` may be a single tensor or a tuple of tensors. Walk and
+    # transfer each tensor leaf back to VulkanoBackend.
+    transfer_back = fn t ->
+      if is_struct(t, Nx.Tensor) do
+        Nx.backend_transfer(t, __MODULE__)
+      else
+        t
+      end
+    end
+
+    case result do
+      %Nx.Tensor{} = t -> transfer_back.(t)
+      tuple when is_tuple(tuple) ->
+        tuple
+        |> Tuple.to_list()
+        |> Enum.map(transfer_back)
+        |> List.to_tuple()
+    end
+  end
+
   # ---------------------------------------------------------------- slice (host fallback)
 
   # Slice is host-routed: download the source tensor to BinaryBackend,
