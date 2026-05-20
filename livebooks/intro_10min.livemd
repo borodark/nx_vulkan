@@ -2,7 +2,8 @@
 
 ```elixir
 Mix.install([
-  {:nx_vulkan, github: "borodark/nx_vulkan"},
+  {:nx_vulkan,  path: Path.expand("../", __DIR__)},
+
   {:axon, "~> 0.7"}
 ])
 ```
@@ -172,7 +173,7 @@ gradients they could conceivably need.
 target = Nx.tensor([[1.0, -1.0]], type: :f32, backend: Nx.Vulkan.VulkanoBackend)
 
 loss_fn = fn params, x_in, y_in ->
-  out = predict_fn.(params, %{"x" => x_in}).prediction
+  out = predict_fn.(params, %{"x" => x_in})
   diff = Nx.subtract(out, y_in)
   Nx.divide(Nx.sum(Nx.multiply(diff, diff)), Nx.tensor(elem(Nx.shape(y_in), 0) * 1.0))
 end

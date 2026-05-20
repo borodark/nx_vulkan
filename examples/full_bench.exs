@@ -1,28 +1,30 @@
-# Comprehensive bench: per-op + end-to-end + robustness across all
-# available Nx backends. Designed to run from any project that has
-# the dependencies it needs (Axon, EXLA where applicable, nx_vulkan).
-#
-# Invoke from exmc/ on super-io (has EXLA available) or from
-# nx_vulkan/ on mac-247 (no EXLA on FreeBSD).
-#
-# Usage:
-#   cd ~/projects/learn_erl/pymc/exmc && mix run /tmp/full_bench.exs
-#   cd ~/exmc-r22/exmc          && mix run /tmp/full_bench.exs
+# Multi-backend bench: per-op + end-to-end + robustness. Iteration
+# counts and sizes are PER-BACKEND-PER-WORKLOAD so BinaryBackend
+# doesn't eat hours of wall clock on a 1024×1024 matmul.
 
 defmodule FullBench do
   @hosts_with_exla ["super-io"]
 
+  # Per-backend matmul scaling: (size, reps).
+  # BinaryBackend caps at 256 because larger is hours of CPU.
+  # GPU backends go up to 1024 with low rep counts at the top.
+  @matmul_sched %{
+    "BinaryBackend" => [{16, 100}, {64, 50}, {128, 20}, {256, 8}],
+    "VulkanoBackend" => [{16, 200}, {64, 200}, {256, 100}, {1024, 30}],
+    "spirit" => [{16, 200}, {64, 200}, {256, 100}, {1024, 30}],
+    "EXLA" => [{16, 200}, {64, 200}, {256, 100}, {1024, 50}]
+  }
+
   def main do
     {hostname, 0} = System.cmd("hostname", ["-s"])
     host = String.trim(hostname)
-
     IO.puts("\n========================================")
     IO.puts("HOST: #{host}")
     IO.puts("DATE: #{DateTime.utc_now() |> DateTime.to_iso8601()}")
     IO.puts("========================================\n")
 
     backends = available_backends(host)
-    IO.puts("backends available: #{inspect(backends)}\n")
+    IO.puts("backends: #{Enum.map(backends, &elem(&1, 0)) |> Enum.join(", ")}\n")
 
     bench_a(backends)
     bench_b(backends)
@@ -36,7 +38,7 @@ defmodule FullBench do
     ]
 
     base =
-      if Code.ensure_loaded?(Nx.Vulkan.Backend) and host in ["super-io", "mac"] do
+      if Code.ensure_loaded?(Nx.Vulkan.Backend) do
         base ++ [{"spirit", Nx.Vulkan.Backend}]
       else
         base
@@ -52,63 +54,56 @@ defmodule FullBench do
   # ---- Bench A: per-op latency curves ----
 
   defp bench_a(backends) do
-    IO.puts("=== BENCH A: per-op latency curves ===\n")
+    IO.puts("=== BENCH A: per-op latency ===")
 
-    matmul_sizes = [16, 64, 256, 1024]
-    matmul_reps = [200, 200, 100, 30]
+    for {name, mod} <- backends do
+      IO.puts("\n[#{name}]")
 
-    for backend <- backends do
-      IO.puts("backend: #{elem(backend, 0)}")
+      sched = Map.get(@matmul_sched, name, [{16, 100}])
 
-      for {m, reps} <- Enum.zip(matmul_sizes, matmul_reps) do
-        time_op("  matmul #{m}×#{m}", reps, fn ->
-          a = make_tensor({m, m}, elem(backend, 1))
-          b = make_tensor({m, m}, elem(backend, 1))
+      for {m, reps} <- sched do
+        time_op("matmul #{m}", reps, fn ->
+          a = make_tensor({m, m}, mod)
+          b = make_tensor({m, m}, mod)
           Nx.dot(a, b)
         end)
       end
 
-      time_op("  add 16k", 500, fn ->
-        a = make_tensor({16384}, elem(backend, 1))
-        b = make_tensor({16384}, elem(backend, 1))
+      add_size = if name == "BinaryBackend", do: 4096, else: 16384
+      time_op("add #{add_size}", 100, fn ->
+        a = make_tensor({add_size}, mod)
+        b = make_tensor({add_size}, mod)
         Nx.add(a, b)
       end)
 
-      time_op("  sigmoid 16k", 500, fn ->
-        a = make_tensor({16384}, elem(backend, 1))
+      sig_size = if name == "BinaryBackend", do: 4096, else: 16384
+      time_op("sigmoid #{sig_size}", 100, fn ->
+        a = make_tensor({sig_size}, mod)
         Nx.sigmoid(a)
       end)
 
-      time_op("  sum 1024×1024", 200, fn ->
-        a = make_tensor({1024, 1024}, elem(backend, 1))
+      sum_size = if name == "BinaryBackend", do: 256, else: 1024
+      time_op("sum #{sum_size}×#{sum_size}", 50, fn ->
+        a = make_tensor({sum_size, sum_size}, mod)
         Nx.sum(a)
       end)
-
-      IO.puts("")
     end
   end
 
   # ---- Bench B: end-to-end workloads ----
 
   defp bench_b(backends) do
-    IO.puts("=== BENCH B: end-to-end workloads ===\n")
+    IO.puts("\n\n=== BENCH B: end-to-end ===")
 
-    for backend <- backends do
-      {name, mod} = backend
-      IO.puts("backend: #{name}")
-
+    for {name, mod} <- backends do
+      IO.puts("\n[#{name}]")
       bench_axon_training_step(mod)
-      bench_regime_log_p(mod)
-
-      IO.puts("")
+      bench_regime_log_p(mod, name)
     end
   end
 
   defp bench_axon_training_step(backend_mod) do
-    unless Code.ensure_loaded?(Axon) do
-      IO.puts("  (Axon not loaded — skip training step)")
-      :ok
-    else
+    if Code.ensure_loaded?(Axon) do
       model =
         Axon.input("x", shape: {nil, 8})
         |> Axon.dense(16, activation: :sigmoid)
@@ -116,10 +111,10 @@ defmodule FullBench do
 
       {init_fn, predict_fn} = Axon.build(model, mode: :train)
       params = init_fn.(%{"x" => Nx.template({32, 8}, :f32)}, Axon.ModelState.empty())
+      params = transfer_state(params, backend_mod)
 
       x = make_tensor({32, 8}, backend_mod)
       y = make_tensor({32, 2}, backend_mod)
-      params = transfer_state(params, backend_mod)
 
       grad_fn = fn p, x_in, y_in ->
         Nx.Defn.value_and_grad(p, fn pp ->
@@ -129,64 +124,57 @@ defmodule FullBench do
         end)
       end
 
-      time_op("  Axon training step", 100, fn ->
+      time_op("Axon training step", 30, fn ->
         Nx.Defn.jit_apply(grad_fn, [params, x, y], compiler: Nx.Defn.Evaluator)
       end)
     end
   end
 
-  defp bench_regime_log_p(backend_mod) do
-    unless Code.ensure_loaded?(Exmc.Trading.RegimeModel) do
-      IO.puts("  (Exmc not loaded — skip regime)")
-      :ok
-    else
+  defp bench_regime_log_p(backend_mod, _name) do
+    if Code.ensure_loaded?(Exmc.Trading.RegimeModel) do
       returns = for _ <- 1..200, do: :rand.uniform() * 0.02 - 0.01
       {ir, _} = Exmc.Trading.RegimeModel.build(returns, num_samples: 1, num_warmup: 1, ncp: false)
       {:ok, comps} = Exmc.NUTS.CustomSynth.extract_components(ir)
       fun = Exmc.NUTS.CustomSynth.MultiRvCustomSpec.compose_logp_defn(comps)
 
-      q_list = [0.01, 0.05, 0.02, 0.05, 0.02, 0.05, 0.05, 0.05]
-      q = Nx.tensor(q_list, type: :f32, backend: backend_mod)
+      q = Nx.tensor([0.01, 0.05, 0.02, 0.05, 0.02, 0.05, 0.05, 0.05], type: :f32, backend: backend_mod)
       obs = Nx.tensor(returns, type: :f32, backend: backend_mod)
 
-      time_op("  exmc regime log_p", 50, fn ->
+      time_op("exmc regime log_p", 20, fn ->
         Nx.Defn.jit_apply(fun, [q, obs], compiler: Nx.Defn.Evaluator)
       end)
     end
   end
 
-  # ---- Bench C: 10k-iteration robustness ----
+  # ---- Bench C: robustness ----
 
   defp bench_c(backends) do
-    IO.puts("=== BENCH C: robustness (5000 mixed dispatches) ===\n")
+    IO.puts("\n\n=== BENCH C: robustness (5000 mixed dispatches) ===")
 
     for {name, mod} <- backends do
-      IO.puts("backend: #{name}")
-      run_robustness(mod)
-      IO.puts("")
-    end
-  end
+      IO.puts("\n[#{name}]")
 
-  defp run_robustness(backend_mod) do
-    n = 5000
-    a = make_tensor({128, 128}, backend_mod)
+      # BinaryBackend would take forever for 128×128 matmul; size down.
+      size = if name == "BinaryBackend", do: 32, else: 128
+      n = if name == "BinaryBackend", do: 500, else: 5000
 
-    try do
-      {micros, _} =
-        :timer.tc(fn ->
-          Enum.reduce(1..n, a, fn _, acc ->
-            Nx.dot(acc, a) |> Nx.sigmoid() |> Nx.divide(Nx.tensor(2.0))
+      a = make_tensor({size, size}, mod)
+
+      try do
+        {micros, _} =
+          :timer.tc(fn ->
+            Enum.reduce(1..n, a, fn _, acc ->
+              Nx.dot(acc, a) |> Nx.sigmoid() |> Nx.divide(Nx.tensor(2.0))
+            end)
           end)
-        end)
 
-      per_iter = micros / n / 1000.0
-      IO.puts("  #{n} iter: #{Float.round(micros / 1_000_000, 1)}s total, #{Float.round(per_iter, 3)} ms/iter")
-    rescue
-      e ->
-        IO.puts("  CRASHED at some iteration: #{Exception.message(e)}")
-    catch
-      kind, reason ->
-        IO.puts("  CAUGHT #{kind}: #{inspect(reason)}")
+        per = micros / n / 1000.0
+        IO.puts("#{n} iter, size #{size}×#{size}: #{Float.round(micros / 1_000_000, 1)}s total, #{Float.round(per, 3)} ms/iter — OK")
+      rescue
+        e -> IO.puts("CRASHED: #{Exception.message(e)}")
+      catch
+        k, r -> IO.puts("CAUGHT #{k}: #{inspect(r)}")
+      end
     end
   end
 
@@ -214,10 +202,9 @@ defmodule FullBench do
   defp time_op(label, n_iter, fun) do
     fun.()
     fun.()
-
     {micros, _} = :timer.tc(fn -> for _ <- 1..n_iter, do: fun.() end)
-    per_iter = micros / n_iter / 1000.0
-    IO.puts("#{label}: #{Float.round(per_iter, 3)} ms/iter (n=#{n_iter})")
+    per = micros / n_iter / 1000.0
+    IO.puts("  #{label}: #{Float.round(per, 3)} ms/iter")
   end
 end
 
