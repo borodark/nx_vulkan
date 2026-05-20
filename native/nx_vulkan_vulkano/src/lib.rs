@@ -103,6 +103,12 @@ fn get_or_create_pipeline(
         }
     }
 
+    eprintln!(
+        "[nx_vulkan_vulkano] cache MISS: {} (op={})",
+        spv_path,
+        op_code.map_or("none".to_string(), |o| o.to_string())
+    );
+
     let context = ctx()?;
     let spv_bytes = fs::read(spv_path).map_err(|e| format!("read spv: {e}"))?;
     let spv_words = bytes_to_u32_words(&spv_bytes)?;
@@ -228,16 +234,13 @@ fn ctx() -> Result<&'static VkContext, String> {
         device.clone(),
         StandardCommandBufferAllocatorCreateInfo::default(),
     ));
-    // Bigger pool than the default 32-slot. Even with the pipeline cache
-    // making layouts stable, very long-running workloads (Axon training,
-    // MCMC chains running for minutes) burn through allocations fast. 1024
-    // gives ~30s of headroom at 30 dispatches/sec before pool rotation.
+    // Default 32-slot pool is fine *if* layouts are stable (which the
+    // pipeline cache ensures). Bumping set_count regressed RTX 3060 Ti
+    // perf 6× on small-matmul without helping FreeBSD's failure mode —
+    // see r1 of the race bench (May 20 2026).
     let set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
         device.clone(),
-        vulkano::descriptor_set::allocator::StandardDescriptorSetAllocatorCreateInfo {
-            set_count: 1024,
-            ..Default::default()
-        },
+        Default::default(),
     ));
 
     let ctx = VkContext {
