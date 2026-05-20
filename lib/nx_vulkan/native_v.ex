@@ -70,4 +70,18 @@ defmodule Nx.Vulkan.NativeV do
   Returns `:ok` or `{:error, :size_mismatch}` when sizes disagree.
   """
   def buf_upload_into(_ref, _data), do: :erlang.nif_error(:nif_not_loaded)
+
+  # -- Compute ops ---------------------------------------------------------
+
+  @doc """
+  Elementwise binary op. `op_code` selects which operation the
+  shader executes via a specialisation constant:
+
+      0=add  1=mul  2=sub  3=div  4=pow  5=max  6=min
+
+  Buffers must all be the same byte size. Returns `:ok` or
+  `{:error, :size_mismatch}` / `{:error, :dispatch_failed, msg}`.
+  """
+  def apply_binary(_out, _a, _b, _n, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

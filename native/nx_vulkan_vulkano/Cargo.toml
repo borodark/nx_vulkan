@@ -13,6 +13,11 @@ crate-type = ["cdylib"]
 [dependencies]
 rustler = "0.36"
 vulkano = "0.34"
+# Vulkano 0.34 uses ahash::HashMap throughout its public API
+# (e.g. shader.specialize takes HashMap<u32, _, ahash::RandomState>).
+# We match the version vulkano pulls in transitively to share the
+# same RandomState type.
+ahash = "0.8"
 
 [profile.release]
 opt-level = 3

@@ -117,6 +117,50 @@ defmodule Nx.Vulkan.VulkanoBackend do
     from_binary(out, Nx.to_binary(eye_t), [])
   end
 
+  # ---------------------------------------------------------------- elementwise binary
+
+  # Op codes match `priv/shaders/elementwise_binary.spv` spec constant ID 0:
+  #   0=add  1=mul  2=sub  3=div  4=pow  5=max  6=min
+  @binary_ops [
+    add: 0,
+    multiply: 1,
+    subtract: 2,
+    divide: 3,
+    pow: 4,
+    max: 5,
+    min: 6
+  ]
+
+  @elementwise_binary_spv Path.expand(
+                            "../../priv/shaders/elementwise_binary.spv",
+                            __DIR__
+                          )
+
+  for {op, code} <- @binary_ops do
+    @impl true
+    def unquote(op)(
+          %T{shape: shape, type: type} = out,
+          %T{data: %__MODULE__{ref: a_ref}},
+          %T{data: %__MODULE__{ref: b_ref}}
+        ) do
+      n = byte_size_of(shape)
+      n_bytes = n * element_bytes(type)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+
+      :ok =
+        Nx.Vulkan.NativeV.apply_binary(
+          out_ref,
+          a_ref,
+          b_ref,
+          n,
+          unquote(code),
+          @elementwise_binary_spv
+        )
+
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+    end
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp byte_size_of(shape) when is_tuple(shape) do
