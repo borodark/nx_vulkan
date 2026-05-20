@@ -427,46 +427,43 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
 
-  # Dot product (matmul) — Nx callback signature for rank-2 × rank-2:
-  #   dot(out, a, contracting_axes_a, batched_axes_a, b, contracting_axes_b, batched_axes_b)
-  # For now: support only rank-2 × rank-2 with contracting last axis of a
-  # and first axis of b (standard matmul). Higher-rank / batched dot
-  # falls back to BinaryBackend.
+  # Dot product (matmul) — Nx callback signature:
+  #   dot(out, a, contracting_axes_a, batched_axes_a,
+  #            b, contracting_axes_b, batched_axes_b)
+  #
+  # Fast path: rank-2 × rank-2, contracting [1] of a vs [0] of b
+  # (standard matmul A·B). f32 only — matmul.spv has no f64 variant
+  # in priv/shaders/ yet. Everything else routes through BinaryBackend.
   @impl true
-  def dot(
-        %T{shape: out_shape, type: type} = out,
-        %T{shape: a_shape, data: %__MODULE__{ref: a_ref}},
-        [1],
-        [],
-        %T{shape: b_shape, data: %__MODULE__{ref: b_ref}},
-        [0],
-        []
-      )
-      when tuple_size(a_shape) == 2 and tuple_size(b_shape) == 2 do
-    m = elem(a_shape, 0)
-    k_a = elem(a_shape, 1)
-    k_b = elem(b_shape, 0)
-    n = elem(b_shape, 1)
+  def dot(%T{shape: out_shape, type: type} = out, a, axes_a, batched_a, b, axes_b, batched_b) do
+    a_v = ensure_on_backend(a)
+    b_v = ensure_on_backend(b)
 
-    if k_a != k_b do
-      raise "matmul shape mismatch: a=#{inspect(a_shape)}, b=#{inspect(b_shape)}"
+    fast_path =
+      type == {:f, 32} and a_v.type == {:f, 32} and b_v.type == {:f, 32} and
+        tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
+        axes_a == [1] and axes_b == [0] and
+        batched_a == [] and batched_b == []
+
+    if fast_path do
+      %T{data: %__MODULE__{ref: a_ref}, shape: a_shape} = a_v
+      %T{data: %__MODULE__{ref: b_ref}, shape: b_shape} = b_v
+      m = elem(a_shape, 0)
+      k_a = elem(a_shape, 1)
+      n = elem(b_shape, 1)
+
+      out_bytes = m * n * element_bytes(type)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, @matmul_spv)
+
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+    else
+      a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+      b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+      result = Nx.dot(a_bin, axes_a, batched_a, b_bin, axes_b, batched_b)
+      from_binary(out, Nx.to_binary(result), [])
     end
-
-    out_bytes = m * n * element_bytes(type)
-    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
-
-    :ok =
-      Nx.Vulkan.NativeV.matmul(
-        out_ref,
-        a_ref,
-        b_ref,
-        m,
-        n,
-        k_a,
-        @matmul_spv
-      )
-
-    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   # ---------------------------------------------------------------- helpers
