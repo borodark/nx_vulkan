@@ -292,6 +292,58 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # ---------------------------------------------------------------- shape / movement
+
+  @transpose_spv Path.expand("../../priv/shaders/transpose.spv", __DIR__)
+
+  # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
+  # The buffer might be physically larger than the new shape implies
+  # if it came from an operation that allocated extra slack — that's
+  # fine, the metadata determines what bytes get read out.
+
+  @impl true
+  def reshape(%T{shape: new_shape, type: type} = out, %T{data: %__MODULE__{ref: ref}}) do
+    put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
+  end
+
+  @impl true
+  def squeeze(%T{shape: new_shape, type: type} = out, %T{data: %__MODULE__{ref: ref}}, _axes) do
+    put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
+  end
+
+  # 2D transpose. Higher-rank transposes (axis permutations) fall back
+  # to BinaryBackend until we wire a general-rank shader.
+  @impl true
+  def transpose(
+        %T{shape: out_shape, type: type} = out,
+        %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+        axes
+      ) do
+    rank = tuple_size(in_shape)
+
+    case {rank, axes} do
+      {2, [1, 0]} ->
+        m = elem(in_shape, 0)
+        n = elem(in_shape, 1)
+        n_bytes = m * n * element_bytes(type)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+
+        :ok =
+          Nx.Vulkan.NativeV.transpose_2d(
+            out_ref,
+            a_ref,
+            m,
+            n,
+            @transpose_spv
+          )
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      _ ->
+        raise "transpose rank=#{rank} axes=#{inspect(axes)}: only 2D [1,0] supported in stage 4"
+    end
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp byte_size_of(shape) when is_tuple(shape) do

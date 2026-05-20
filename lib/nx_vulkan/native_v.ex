@@ -109,4 +109,11 @@ defmodule Nx.Vulkan.NativeV do
   """
   def reduce_axis(_out, _a, _outer, _reduce_size, _inner, _op_code, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  2D transpose. Input A is M×N row-major; output is N×M row-major.
+  Buffers: a (`m*n*4` bytes), out (`m*n*4` bytes).
+  """
+  def transpose_2d(_out, _a, _m, _n, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
