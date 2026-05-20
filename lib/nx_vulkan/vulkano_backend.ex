@@ -135,14 +135,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
                             "../../priv/shaders/elementwise_binary.spv",
                             __DIR__
                           )
+  @elementwise_binary_f64_spv Path.expand(
+                                "../../priv/shaders/elementwise_binary_f64.spv",
+                                __DIR__
+                              )
+
+  defp binary_spv({:f, 32}), do: @elementwise_binary_spv
+  defp binary_spv({:f, 64}), do: @elementwise_binary_f64_spv
+  defp binary_spv(_), do: nil
 
   for {op, code} <- @binary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a, b) do
       a_v = ensure_on_backend(a)
       b_v = ensure_on_backend(b)
+      spv = binary_spv(type)
 
-      if a_v.shape == b_v.shape and a_v.shape == shape and a_v.type == b_v.type and a_v.type == type and type == {:f, 32} do
+      shape_match =
+        a_v.shape == b_v.shape and a_v.shape == shape and a_v.type == b_v.type and
+          a_v.type == type
+
+      if spv != nil and shape_match do
         %T{data: %__MODULE__{ref: a_ref}} = a_v
         %T{data: %__MODULE__{ref: b_ref}} = b_v
         n = byte_size_of(shape)
@@ -150,14 +163,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
         {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
 
         :ok =
-          Nx.Vulkan.NativeV.apply_binary(
-            out_ref,
-            a_ref,
-            b_ref,
-            n,
-            unquote(code),
-            @elementwise_binary_spv
-          )
+          Nx.Vulkan.NativeV.apply_binary(out_ref, a_ref, b_ref, n, unquote(code), spv)
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
       else
@@ -195,26 +201,28 @@ defmodule Nx.Vulkan.VulkanoBackend do
                            "../../priv/shaders/elementwise_unary.spv",
                            __DIR__
                          )
+  @elementwise_unary_f64_spv Path.expand(
+                               "../../priv/shaders/elementwise_unary_f64.spv",
+                               __DIR__
+                             )
+
+  defp unary_spv({:f, 32}), do: @elementwise_unary_spv
+  defp unary_spv({:f, 64}), do: @elementwise_unary_f64_spv
+  defp unary_spv(_), do: nil
 
   for {op, code} <- @unary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a) do
       a_v = ensure_on_backend(a)
+      spv = unary_spv(type)
 
-      if type == {:f, 32} and a_v.type == {:f, 32} do
+      if spv != nil and a_v.type == type do
         %T{data: %__MODULE__{ref: a_ref}} = a_v
         n = byte_size_of(shape)
         n_bytes = n * element_bytes(type)
         {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
 
-        :ok =
-          Nx.Vulkan.NativeV.apply_unary(
-            out_ref,
-            a_ref,
-            n,
-            unquote(code),
-            @elementwise_unary_spv
-          )
+        :ok = Nx.Vulkan.NativeV.apply_unary(out_ref, a_ref, n, unquote(code), spv)
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
       else
@@ -232,6 +240,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- reductions
 
   @reduce_axis_spv Path.expand("../../priv/shaders/reduce_axis.spv", __DIR__)
+  @reduce_axis_f64_spv Path.expand("../../priv/shaders/reduce_axis_f64.spv", __DIR__)
+
+  defp reduce_spv({:f, 32}), do: @reduce_axis_spv
+  defp reduce_spv({:f, 64}), do: @reduce_axis_f64_spv
+  defp reduce_spv(_), do: nil
 
   @impl true
   def sum(out, t, opts), do: do_reduce(out, t, opts, 0)
@@ -254,8 +267,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
        ) do
     axes = Keyword.get(opts, :axes) || all_axes(in_shape)
 
+    spv = reduce_spv(type)
+
     fast_path =
-      type == {:f, 32} and tensor.type == {:f, 32} and
+      spv != nil and tensor.type == type and
         match?(%__MODULE__{}, tensor.data) and
         match?({:ok, _}, classify_reduce_axes(in_shape, axes))
 
@@ -267,15 +282,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
       :ok =
-        Nx.Vulkan.NativeV.reduce_axis(
-          out_ref,
-          a_ref,
-          outer,
-          reduce_size,
-          inner,
-          op_code,
-          @reduce_axis_spv
-        )
+        Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else

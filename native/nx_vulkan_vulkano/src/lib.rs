@@ -209,6 +209,16 @@ fn ctx() -> Result<&'static VkContext, String> {
         physical.properties().device_type
     );
 
+    // Enable shaderFloat64 if the device supports it; required by the
+    // _f64.spv shaders. Falls back gracefully on devices without it
+    // (those will keep using the f32 paths + host fallback for f64).
+    let supports_f64 = physical.supported_features().shader_float64;
+
+    let enabled_features = vulkano::device::Features {
+        shader_float64: supports_f64,
+        ..Default::default()
+    };
+
     let (device, mut queues) = Device::new(
         physical,
         DeviceCreateInfo {
@@ -216,6 +226,7 @@ fn ctx() -> Result<&'static VkContext, String> {
                 queue_family_index,
                 ..Default::default()
             }],
+            enabled_features,
             ..Default::default()
         },
     )
