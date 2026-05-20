@@ -207,6 +207,91 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # ---------------------------------------------------------------- reductions
+
+  @reduce_axis_spv Path.expand("../../priv/shaders/reduce_axis.spv", __DIR__)
+
+  @impl true
+  def sum(out, t, opts), do: do_reduce(out, t, opts, 0)
+
+  @impl true
+  def reduce_max(out, t, opts), do: do_reduce(out, t, opts, 1)
+
+  @impl true
+  def reduce_min(out, t, opts), do: do_reduce(out, t, opts, 2)
+
+  # Resolves the (outer, reduce_size, inner) virtual shape from
+  # `opts[:axes]`. Supports all-axes (collapse to scalar) and
+  # single-axis cases that map cleanly to contiguous slabs. More
+  # exotic patterns fall back to BinaryBackend transfer.
+  defp do_reduce(
+         %T{shape: out_shape, type: type} = out,
+         %T{data: %__MODULE__{ref: a_ref}, shape: in_shape} = _a,
+         opts,
+         op_code
+       ) do
+    axes = Keyword.get(opts, :axes) || all_axes(in_shape)
+
+    case classify_reduce_axes(in_shape, axes) do
+      {:ok, {outer, reduce_size, inner}} ->
+        n_out = byte_size_of(out_shape)
+        out_bytes = max(n_out, 1) * element_bytes(type)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+
+        :ok =
+          Nx.Vulkan.NativeV.reduce_axis(
+            out_ref,
+            a_ref,
+            outer,
+            reduce_size,
+            inner,
+            op_code,
+            @reduce_axis_spv
+          )
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      :fallback ->
+        raise "non-contiguous axes #{inspect(axes)} for shape #{inspect(in_shape)}: not yet supported"
+    end
+  end
+
+  defp all_axes(shape), do: Enum.to_list(0..(tuple_size(shape) - 1))
+
+  # Classify the reduction shape:
+  #   - All axes      → outer=1, reduce=product(shape), inner=1
+  #   - Leading axes  → outer=1, reduce=product(reduced), inner=product(remaining)
+  #   - Trailing axes → outer=product(remaining), reduce=product(reduced), inner=1
+  defp classify_reduce_axes(in_shape, axes) do
+    rank = tuple_size(in_shape)
+    sorted = Enum.sort(axes)
+    dims = Tuple.to_list(in_shape)
+
+    cond do
+      sorted == Enum.to_list(0..(rank - 1)) ->
+        {:ok, {1, Enum.reduce(dims, 1, &Kernel.*/2), 1}}
+
+      sorted == Enum.to_list(0..(length(sorted) - 1)) ->
+        reduced = Enum.take(dims, length(sorted))
+        remaining = Enum.drop(dims, length(sorted))
+        outer = 1
+        reduce_size = Enum.reduce(reduced, 1, &Kernel.*/2)
+        inner = Enum.reduce(remaining, 1, &Kernel.*/2)
+        {:ok, {outer, reduce_size, inner}}
+
+      sorted == Enum.to_list((rank - length(sorted))..(rank - 1)) ->
+        kept = Enum.take(dims, rank - length(sorted))
+        reduced = Enum.drop(dims, rank - length(sorted))
+        outer = Enum.reduce(kept, 1, &Kernel.*/2)
+        reduce_size = Enum.reduce(reduced, 1, &Kernel.*/2)
+        inner = 1
+        {:ok, {outer, reduce_size, inner}}
+
+      true ->
+        :fallback
+    end
+  end
+
   # ---------------------------------------------------------------- helpers
 
   defp byte_size_of(shape) when is_tuple(shape) do

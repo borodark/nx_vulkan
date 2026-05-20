@@ -95,4 +95,18 @@ defmodule Nx.Vulkan.NativeV do
   """
   def apply_unary(_out, _a, _n, _op_code, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Per-axis reduction. `op_code`: 0=sum, 1=max, 2=min.
+
+  Input shape is interpreted as a virtual (outer, reduce_size, inner)
+  tensor; output shape is (outer, inner) — i.e. the reduction
+  collapses the middle axis. For full reductions use
+  `outer=1, reduce_size=n, inner=1`.
+
+  Buffers: out has `outer * inner` elements; a has
+  `outer * reduce_size * inner` elements.
+  """
+  def reduce_axis(_out, _a, _outer, _reduce_size, _inner, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

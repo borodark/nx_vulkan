@@ -731,6 +731,118 @@ fn apply_unary<'a>(
     }
 }
 
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushReduceAxis {
+    outer: u32,
+    reduce_size: u32,
+    inner: u32,
+    op: u32,
+}
+
+/// Per-axis reduction. `op`: 0=sum, 1=max, 2=min.
+/// Bindings: a, out. Push: {outer, reduce_size, inner, op}.
+/// dispatch ceil(outer*inner/256) workgroups.
+#[rustler::nif(schedule = "DirtyIo")]
+fn reduce_axis<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    outer: u32,
+    reduce_size: u32,
+    inner: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let spv_bytes = fs::read(&spv_path).map_err(|e| format!("read spv: {e}"))?;
+        let spv_words = bytes_to_u32_words(&spv_bytes)?;
+
+        let shader = unsafe {
+            ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
+                .map_err(|e| format!("ShaderModule: {e}"))?
+        };
+
+        let entry = shader
+            .entry_point("main")
+            .ok_or_else(|| "no main entry point".to_string())?;
+
+        let stage = PipelineShaderStageCreateInfo::new(entry);
+
+        let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+            .into_pipeline_layout_create_info(context.device.clone())
+            .map_err(|e| format!("layout info: {e}"))?;
+        let layout = PipelineLayout::new(context.device.clone(), layout_info)
+            .map_err(|e| format!("PipelineLayout: {e}"))?;
+
+        let pipeline = ComputePipeline::new(
+            context.device.clone(),
+            None,
+            ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
+        )
+        .map_err(|e| format!("ComputePipeline: {e}"))?;
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let n_slots = outer * inner;
+        let groups = (n_slots + 255) / 256;
+
+        let mut cmd = AutoCommandBufferBuilder::primary(
+            &context.cmd_allocator,
+            context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .map_err(|e| format!("cmd builder: {e}"))?;
+
+        cmd.bind_pipeline_compute(pipeline.clone())
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(
+                layout.clone(),
+                0,
+                PushReduceAxis {
+                    outer,
+                    reduce_size,
+                    inner,
+                    op: op_code,
+                },
+            )
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch([groups, 1, 1])
+            .map_err(|e| format!("dispatch: {e}"))?;
+
+        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let future = sync::now(context.device.clone())
+            .then_execute(context.queue.clone(), cmd_buf)
+            .map_err(|e| format!("then_execute: {e}"))?
+            .then_signal_fence_and_flush()
+            .map_err(|e| format!("fence: {e}"))?;
+        future.wait(None).map_err(|e| format!("wait: {e}"))?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -747,6 +859,7 @@ rustler::init!(
         buf_upload_into,
         apply_binary,
         apply_unary,
+        reduce_axis,
     ],
     load = load
 );
