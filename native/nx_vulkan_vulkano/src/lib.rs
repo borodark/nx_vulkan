@@ -20,6 +20,7 @@
 
 use std::fs;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use rustler::{Binary, Encoder, Env, NewBinary, NifResult, ResourceArc, Term};
@@ -59,6 +60,97 @@ mod atoms {
         upload_failed,
         download_failed,
     }
+}
+
+// -- Pipeline cache --------------------------------------------------------
+//
+// vulkano's StandardDescriptorSetAllocator (allocator.rs:448) creates a fresh
+// DescriptorPool per unique layout identity. Per-call pipeline + layout
+// creation produces a fresh layout every dispatch, so the allocator never
+// recycles its 32-slot pool — it just keeps creating new pools, eventually
+// exhausting driver-side limits (observed: ~5000 iterations on FreeBSD
+// NVIDIA before `descriptor set: a non-validation error occurred`).
+//
+// Caching by (spv_path, op_code) means the same layout identity is used
+// across calls; vulkano's allocator recycles slots within a single pool.
+//
+// op_code = -1 sentinel means "shader has no spec constant" (reduce_axis,
+// transpose_2d, matmul, leapfrog_chain_synth).
+
+#[derive(Clone)]
+struct CachedPipeline {
+    layout: Arc<PipelineLayout>,
+    pipeline: Arc<ComputePipeline>,
+}
+
+static PIPELINE_CACHE: OnceLock<Mutex<std::collections::HashMap<(String, i32), CachedPipeline>>> =
+    OnceLock::new();
+
+fn pipeline_cache() -> &'static Mutex<std::collections::HashMap<(String, i32), CachedPipeline>> {
+    PIPELINE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn get_or_create_pipeline(
+    spv_path: &str,
+    op_code: Option<i32>,
+) -> Result<CachedPipeline, String> {
+    let key = (spv_path.to_string(), op_code.unwrap_or(-1));
+
+    {
+        let guard = pipeline_cache().lock().map_err(|_| "cache poisoned".to_string())?;
+        if let Some(cached) = guard.get(&key) {
+            return Ok(cached.clone());
+        }
+    }
+
+    let context = ctx()?;
+    let spv_bytes = fs::read(spv_path).map_err(|e| format!("read spv: {e}"))?;
+    let spv_words = bytes_to_u32_words(&spv_bytes)?;
+
+    let shader = unsafe {
+        ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
+            .map_err(|e| format!("ShaderModule: {e}"))?
+    };
+
+    let entry = match op_code {
+        Some(op) => {
+            let mut spec: ahash::HashMap<u32, SpecializationConstant> =
+                ahash::HashMap::default();
+            spec.insert(0, SpecializationConstant::I32(op));
+            let specialized = shader
+                .specialize(spec)
+                .map_err(|e| format!("specialize: {e}"))?;
+            specialized
+                .entry_point("main")
+                .ok_or_else(|| "no main entry point".to_string())?
+        }
+        None => shader
+            .entry_point("main")
+            .ok_or_else(|| "no main entry point".to_string())?,
+    };
+
+    let stage = PipelineShaderStageCreateInfo::new(entry);
+    let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+        .into_pipeline_layout_create_info(context.device.clone())
+        .map_err(|e| format!("layout info: {e}"))?;
+    let layout = PipelineLayout::new(context.device.clone(), layout_info)
+        .map_err(|e| format!("PipelineLayout: {e}"))?;
+
+    let pipeline = ComputePipeline::new(
+        context.device.clone(),
+        None,
+        ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
+    )
+    .map_err(|e| format!("ComputePipeline: {e}"))?;
+
+    let cached = CachedPipeline { layout, pipeline };
+
+    pipeline_cache()
+        .lock()
+        .map_err(|_| "cache poisoned".to_string())?
+        .insert(key, cached.clone());
+
+    Ok(cached)
 }
 
 /// NIF resource: a Vulkan-backed buffer whose lifetime is owned by Rust.
@@ -136,9 +228,16 @@ fn ctx() -> Result<&'static VkContext, String> {
         device.clone(),
         StandardCommandBufferAllocatorCreateInfo::default(),
     ));
+    // Bigger pool than the default 32-slot. Even with the pipeline cache
+    // making layouts stable, very long-running workloads (Axon training,
+    // MCMC chains running for minutes) burn through allocations fast. 1024
+    // gives ~30s of headroom at 30 dispatches/sec before pool rotation.
     let set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
         device.clone(),
-        Default::default(),
+        vulkano::descriptor_set::allocator::StandardDescriptorSetAllocatorCreateInfo {
+            set_count: 1024,
+            ..Default::default()
+        },
     ));
 
     let ctx = VkContext {
@@ -281,38 +380,10 @@ fn leapfrog_chain_synth<'a>(
         }
     };
 
-    let spv_bytes = match fs::read(&spv_path) {
-        Ok(b) => b,
-        Err(_) => return Ok((atoms::error(), atoms::spv_read_failed()).encode(env)),
-    };
-    let spv_words = match bytes_to_u32_words(&spv_bytes) {
-        Ok(w) => w,
-        Err(_) => return Ok((atoms::error(), atoms::bad_input()).encode(env)),
-    };
-
     let result = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
-        let shader = unsafe {
-            ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
-        };
-
-        let entry_point = shader
-            .entry_point("main")
-            .ok_or_else(|| "no main entry point".to_string())?;
-
-        let stage = PipelineShaderStageCreateInfo::new(entry_point);
-        let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(context.device.clone())
-            .map_err(|e| format!("layout info: {e}"))?;
-        let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
-
-        let pipeline = ComputePipeline::new(
-            context.device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
-        )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
 
         let q_buf = upload_buffer(
             context.mem_allocator.clone(),
@@ -544,41 +615,9 @@ fn apply_binary<'a>(
     };
 
     let result = (|| -> Result<(), String> {
-        let spv_bytes = fs::read(&spv_path).map_err(|e| format!("read spv: {e}"))?;
-        let spv_words = bytes_to_u32_words(&spv_bytes)?;
-
-        let shader = unsafe {
-            ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
-        };
-
-        // Specialize the shader module with op_code at constant ID 0.
-        // vulkano expects ahash::HashMap, not std::HashMap.
-        let mut spec_map: ahash::HashMap<u32, SpecializationConstant> =
-            ahash::HashMap::default();
-        spec_map.insert(0, SpecializationConstant::I32(op_code as i32));
-        let specialized = shader
-            .specialize(spec_map)
-            .map_err(|e| format!("specialize: {e}"))?;
-
-        let entry = specialized
-            .entry_point("main")
-            .ok_or_else(|| "no main entry point".to_string())?;
-
-        let stage = PipelineShaderStageCreateInfo::new(entry);
-
-        let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(context.device.clone())
-            .map_err(|e| format!("layout info: {e}"))?;
-        let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
-
-        let pipeline = ComputePipeline::new(
-            context.device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
-        )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -651,39 +690,9 @@ fn apply_unary<'a>(
     };
 
     let result = (|| -> Result<(), String> {
-        let spv_bytes = fs::read(&spv_path).map_err(|e| format!("read spv: {e}"))?;
-        let spv_words = bytes_to_u32_words(&spv_bytes)?;
-
-        let shader = unsafe {
-            ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
-        };
-
-        let mut spec_map: ahash::HashMap<u32, SpecializationConstant> =
-            ahash::HashMap::default();
-        spec_map.insert(0, SpecializationConstant::I32(op_code as i32));
-        let specialized = shader
-            .specialize(spec_map)
-            .map_err(|e| format!("specialize: {e}"))?;
-
-        let entry = specialized
-            .entry_point("main")
-            .ok_or_else(|| "no main entry point".to_string())?;
-
-        let stage = PipelineShaderStageCreateInfo::new(entry);
-
-        let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(context.device.clone())
-            .map_err(|e| format!("layout info: {e}"))?;
-        let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
-
-        let pipeline = ComputePipeline::new(
-            context.device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
-        )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -760,32 +769,9 @@ fn reduce_axis<'a>(
     };
 
     let result = (|| -> Result<(), String> {
-        let spv_bytes = fs::read(&spv_path).map_err(|e| format!("read spv: {e}"))?;
-        let spv_words = bytes_to_u32_words(&spv_bytes)?;
-
-        let shader = unsafe {
-            ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
-        };
-
-        let entry = shader
-            .entry_point("main")
-            .ok_or_else(|| "no main entry point".to_string())?;
-
-        let stage = PipelineShaderStageCreateInfo::new(entry);
-
-        let layout_info = PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(context.device.clone())
-            .map_err(|e| format!("layout info: {e}"))?;
-        let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
-
-        let pipeline = ComputePipeline::new(
-            context.device.clone(),
-            None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
-        )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
