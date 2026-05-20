@@ -103,12 +103,6 @@ fn get_or_create_pipeline(
         }
     }
 
-    eprintln!(
-        "[nx_vulkan_vulkano] cache MISS: {} (op={})",
-        spv_path,
-        op_code.map_or("none".to_string(), |o| o.to_string())
-    );
-
     let context = ctx()?;
     let spv_bytes = fs::read(spv_path).map_err(|e| format!("read spv: {e}"))?;
     let spv_words = bytes_to_u32_words(&spv_bytes)?;
