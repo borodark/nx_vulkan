@@ -1,7 +1,7 @@
 defmodule Nx.Vulkan.MixProject do
   use Mix.Project
 
-  @version "0.0.1"
+  @version "0.1.0"
   @source_url "https://github.com/borodark/nx_vulkan"
 
   def project do
@@ -12,9 +12,25 @@ defmodule Nx.Vulkan.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       dialyzer: [plt_add_apps: [:nx], ignore_warnings: ".dialyzer_ignore.exs"],
-      description: "Nx tensor backend on Vulkan compute. Works on FreeBSD where CUDA does not.",
+      description: description(),
       package: package(),
-      source_url: @source_url
+      source_url: @source_url,
+      docs: docs()
+    ]
+  end
+
+  defp description do
+    "GPU tensor backend for Nx via Vulkan compute. Pure-Rust path (vulkano) plus C++ spirit path. Validated on Axon training, Scholar linear regression, and the eXMC NUTS sampler. Works on Linux + FreeBSD NVIDIA where CUDA does not exist."
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "docs/VULKANO_BACKEND_ROADMAP.md"
+      ]
     ]
   end
 
@@ -39,8 +55,32 @@ defmodule Nx.Vulkan.MixProject do
   defp package do
     [
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => @source_url},
-      files: ~w(lib native c_src priv mix.exs README.md LICENSE .formatter.exs)
+      maintainers: ["Igor Ostaptchenko"],
+      links: %{
+        "GitHub" => @source_url,
+        "Blog: The Backend That Didn't Need to Know" =>
+          "http://www.dataalienist.com/blog-backend-didnt-need-to-know.html"
+      },
+      files:
+        ~w(
+          lib
+          native/nx_vulkan_native/Cargo.toml
+          native/nx_vulkan_native/Cargo.lock
+          native/nx_vulkan_native/src
+          native/nx_vulkan_native/build.rs
+          native/nx_vulkan_vulkano/Cargo.toml
+          native/nx_vulkan_vulkano/src
+          c_src
+          priv/shaders
+          docs
+          examples
+          livebooks
+          CHANGELOG.md
+          README.md
+          LICENSE
+          mix.exs
+          .formatter.exs
+        )
     ]
   end
 end
