@@ -138,27 +138,39 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   for {op, code} <- @binary_ops do
     @impl true
-    def unquote(op)(
-          %T{shape: shape, type: type} = out,
-          %T{data: %__MODULE__{ref: a_ref}},
-          %T{data: %__MODULE__{ref: b_ref}}
-        ) do
-      n = byte_size_of(shape)
-      n_bytes = n * element_bytes(type)
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+    def unquote(op)(%T{shape: shape, type: type} = out, a, b) do
+      a_v = ensure_on_backend(a)
+      b_v = ensure_on_backend(b)
 
-      :ok =
-        Nx.Vulkan.NativeV.apply_binary(
-          out_ref,
-          a_ref,
-          b_ref,
-          n,
-          unquote(code),
-          @elementwise_binary_spv
-        )
+      if a_v.shape == b_v.shape and a_v.shape == shape and a_v.type == b_v.type and a_v.type == type and type == {:f, 32} do
+        %T{data: %__MODULE__{ref: a_ref}} = a_v
+        %T{data: %__MODULE__{ref: b_ref}} = b_v
+        n = byte_size_of(shape)
+        n_bytes = n * element_bytes(type)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
 
-      put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+        :ok =
+          Nx.Vulkan.NativeV.apply_binary(
+            out_ref,
+            a_ref,
+            b_ref,
+            n,
+            unquote(code),
+            @elementwise_binary_spv
+          )
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+      else
+        binary_op_host_fallback(unquote(op), out, a_v, b_v)
+      end
     end
+  end
+
+  defp binary_op_host_fallback(op, out, a, b) do
+    a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
+    b_bin = Nx.backend_transfer(b, Nx.BinaryBackend)
+    result = apply(Nx, op, [a_bin, b_bin])
+    from_binary(out, Nx.to_binary(result), [])
   end
 
   # ---------------------------------------------------------------- elementwise unary
@@ -186,25 +198,35 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   for {op, code} <- @unary_ops do
     @impl true
-    def unquote(op)(
-          %T{shape: shape, type: type} = out,
-          %T{data: %__MODULE__{ref: a_ref}}
-        ) do
-      n = byte_size_of(shape)
-      n_bytes = n * element_bytes(type)
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+    def unquote(op)(%T{shape: shape, type: type} = out, a) do
+      a_v = ensure_on_backend(a)
 
-      :ok =
-        Nx.Vulkan.NativeV.apply_unary(
-          out_ref,
-          a_ref,
-          n,
-          unquote(code),
-          @elementwise_unary_spv
-        )
+      if type == {:f, 32} and a_v.type == {:f, 32} do
+        %T{data: %__MODULE__{ref: a_ref}} = a_v
+        n = byte_size_of(shape)
+        n_bytes = n * element_bytes(type)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
 
-      put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+        :ok =
+          Nx.Vulkan.NativeV.apply_unary(
+            out_ref,
+            a_ref,
+            n,
+            unquote(code),
+            @elementwise_unary_spv
+          )
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+      else
+        unary_op_host_fallback(unquote(op), out, a_v)
+      end
     end
+  end
+
+  defp unary_op_host_fallback(op, out, a) do
+    a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
+    result = apply(Nx, op, [a_bin])
+    from_binary(out, Nx.to_binary(result), [])
   end
 
   # ---------------------------------------------------------------- reductions
@@ -226,34 +248,53 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # exotic patterns fall back to BinaryBackend transfer.
   defp do_reduce(
          %T{shape: out_shape, type: type} = out,
-         %T{data: %__MODULE__{ref: a_ref}, shape: in_shape} = _a,
+         %T{shape: in_shape} = tensor,
          opts,
          op_code
        ) do
     axes = Keyword.get(opts, :axes) || all_axes(in_shape)
 
-    case classify_reduce_axes(in_shape, axes) do
-      {:ok, {outer, reduce_size, inner}} ->
-        n_out = byte_size_of(out_shape)
-        out_bytes = max(n_out, 1) * element_bytes(type)
-        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+    fast_path =
+      type == {:f, 32} and tensor.type == {:f, 32} and
+        match?(%__MODULE__{}, tensor.data) and
+        match?({:ok, _}, classify_reduce_axes(in_shape, axes))
 
-        :ok =
-          Nx.Vulkan.NativeV.reduce_axis(
-            out_ref,
-            a_ref,
-            outer,
-            reduce_size,
-            inner,
-            op_code,
-            @reduce_axis_spv
-          )
+    if fast_path do
+      %T{data: %__MODULE__{ref: a_ref}} = tensor
+      {:ok, {outer, reduce_size, inner}} = classify_reduce_axes(in_shape, axes)
+      n_out = max(byte_size_of(out_shape), 1)
+      out_bytes = n_out * element_bytes(type)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+      :ok =
+        Nx.Vulkan.NativeV.reduce_axis(
+          out_ref,
+          a_ref,
+          outer,
+          reduce_size,
+          inner,
+          op_code,
+          @reduce_axis_spv
+        )
 
-      :fallback ->
-        raise "non-contiguous axes #{inspect(axes)} for shape #{inspect(in_shape)}: not yet supported"
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+    else
+      reduce_op_host_fallback(op_code, out, tensor, opts)
     end
+  end
+
+  defp reduce_op_host_fallback(op_code, out, tensor, opts) do
+    bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+
+    op =
+      case op_code do
+        0 -> :sum
+        1 -> :reduce_max
+        2 -> :reduce_min
+      end
+
+    result = apply(Nx, op, [bin_in, opts])
+    from_binary(out, Nx.to_binary(result), [])
   end
 
   defp all_axes(shape), do: Enum.to_list(0..(tuple_size(shape) - 1))
@@ -344,6 +385,37 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # ---------------------------------------------------------------- host-fallback ops
+
+  # as_type — Nx-level cast via BinaryBackend. For f32↔f32 (no-op) we
+  # just rewrap. For real casts we round-trip through host.
+  @impl true
+  def as_type(%T{type: type} = out, %T{type: source_type, data: %__MODULE__{ref: ref}} = tensor) do
+    if type == source_type do
+      put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+    else
+      bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+      bin_cast = Nx.as_type(bin_in, type)
+      bin = Nx.to_binary(bin_cast)
+      from_binary(out, bin, [])
+    end
+  end
+
+  # ---------------------------------------------------------------- slice (host fallback)
+
+  # Slice is host-routed: download the source tensor to BinaryBackend,
+  # do the slice there, upload the slab back. A future stage adds a
+  # GPU-side slice shader for contiguous prefixes; until then this is
+  # correct but copies through host memory.
+  @impl true
+  def slice(out, tensor, start_indices, lengths, strides) do
+    # Delegate to Nx-level slice on BinaryBackend, then upload result.
+    bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    bin_result = Nx.slice(bin_in, start_indices, lengths, strides: strides)
+    bin = Nx.to_binary(bin_result)
+    from_binary(out, bin, [])
+  end
+
   # ---------------------------------------------------------------- linalg
 
   @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
@@ -391,6 +463,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # ---------------------------------------------------------------- helpers
+
+  # Tolerate inputs from other backends — Nx.Defn.Evaluator may hand us
+  # tensors that haven't been transferred yet (e.g. an Nx.constant
+  # produced on BinaryBackend before the op dispatches here).
+  defp ensure_on_backend(%T{data: %__MODULE__{}} = t), do: t
+
+  defp ensure_on_backend(%T{} = t) do
+    Nx.backend_transfer(t, __MODULE__)
+  end
 
   defp byte_size_of(shape) when is_tuple(shape) do
     shape |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
