@@ -504,6 +504,20 @@ defmodule Nx.Vulkan.VulkanoBackend do
     from_binary(out, bin, [])
   end
 
+  # ---------------------------------------------------------------- pad (host fallback)
+
+  # Nx.Backend.pad/4 callback. The Nx sampler uses pad to extend tensors
+  # along arbitrary axes (NUTS leapfrog scratch buffers, batched chain
+  # padding, etc.). No GPU pad shader yet — round-trip through
+  # BinaryBackend. Pad value comes in as a tensor; transfer it too.
+  @impl true
+  def pad(out, tensor, pad_value, padding_config) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    pv_bin = Nx.backend_transfer(ensure_on_backend(pad_value), Nx.BinaryBackend)
+    result = Nx.pad(t_bin, pv_bin, padding_config)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
   # ---------------------------------------------------------------- linalg
 
   @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
