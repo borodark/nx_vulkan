@@ -504,7 +504,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     from_binary(out, bin, [])
   end
 
-  # ---------------------------------------------------------------- pad (host fallback)
+  # ---------------------------------------------------------------- sampler-path host fallbacks
 
   # Nx.Backend.pad/4 callback. The Nx sampler uses pad to extend tensors
   # along arbitrary axes (NUTS leapfrog scratch buffers, batched chain
@@ -517,6 +517,84 @@ defmodule Nx.Vulkan.VulkanoBackend do
     result = Nx.pad(t_bin, pv_bin, padding_config)
     from_binary(out, Nx.to_binary(result), [])
   end
+
+  # put_slice: write `slice` into `tensor` at `start_indices`. Used by
+  # NUTS batched leapfrog to accumulate trajectory steps.
+  @impl true
+  def put_slice(out, tensor, start_indices, slice) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    s_bin = Nx.backend_transfer(ensure_on_backend(slice), Nx.BinaryBackend)
+    idx_bin = Enum.map(start_indices, &maybe_transfer_idx/1)
+    result = Nx.put_slice(t_bin, idx_bin, s_bin)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # indexed_put: scatter updates into tensor at indices. Used to fill
+  # NUTS per-step logp slots inside the leapfrog while loop.
+  @impl true
+  def indexed_put(out, tensor, indices, updates, opts \\ []) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
+    u_bin = Nx.backend_transfer(ensure_on_backend(updates), Nx.BinaryBackend)
+    result = Nx.indexed_put(t_bin, i_bin, u_bin, opts)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # indexed_add: scatter-accumulate. Same shape as indexed_put.
+  @impl true
+  def indexed_add(out, tensor, indices, updates, opts \\ []) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
+    u_bin = Nx.backend_transfer(ensure_on_backend(updates), Nx.BinaryBackend)
+    result = Nx.indexed_add(t_bin, i_bin, u_bin, opts)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # broadcast: project a tensor to a new shape along `axes`. Implicit
+  # broadcasts during binary ops route through binary_op_host_fallback,
+  # but explicit Nx.broadcast/3 needs its own callback. Used at every
+  # NUTS init / mass-matrix scaffolding site.
+  @impl true
+  def broadcast(out, tensor, shape, axes) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.broadcast(t_bin, shape, axes: axes)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # concatenate: join tensors along an axis. Used by Sampler.sample_stream
+  # and several diagnostic paths.
+  @impl true
+  def concatenate(out, tensors, axis) do
+    bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
+    result = Nx.concatenate(bins, axis: axis)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # gather: pick elements at given index tuples. Underpins take/
+  # take_diagonal in Nx 0.10's lowering.
+  @impl true
+  def gather(out, tensor, indices, opts \\ []) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
+    result = Nx.gather(t_bin, i_bin, opts)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # take: pick along a single axis. Common in trajectory selection.
+  @impl true
+  def take(out, tensor, indices, axis) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
+    result = Nx.take(t_bin, i_bin, axis: axis)
+    from_binary(out, Nx.to_binary(result), [])
+  end
+
+  # Indices passed to put_slice can be scalar tensors or integers;
+  # normalise to whatever BinaryBackend.put_slice expects.
+  defp maybe_transfer_idx(%T{} = t),
+    do: Nx.backend_transfer(ensure_on_backend(t), Nx.BinaryBackend)
+
+  defp maybe_transfer_idx(i) when is_integer(i), do: i
 
   # ---------------------------------------------------------------- linalg
 
