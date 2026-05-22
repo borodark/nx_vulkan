@@ -33,7 +33,7 @@ tensors, concats them on the host, uploads the result. At 65k
 elements, the round trip is 1384 µs vs BinaryBackend's 30 µs —
 a 46× slowdown for an op the GPU never touches.
 
-## Tier 1 — Skip the upload-back (small, contained, ~1 day)
+## Tier 1 — Skip the upload-back  *(DONE — landed in commit `fc63865`)*
 
 Easiest win: change the host-fallback callbacks to return a
 **BinaryBackend** tensor instead of uploading the result back to
@@ -116,7 +116,7 @@ result. The Tier 1 win is real, just measured by the wrong bench
 initially. Filed as a lesson: bench what the *consumer* does, not
 just what the op does.
 
-## Tier 2 — Native SPV for the bandwidth-bound four (~1 week)
+## Tier 2 — Native SPV for the bandwidth-bound four (~1 week)  *(TODO)*
 
 Once Tier 1 lands, the remaining bottleneck for these four ops is
 the **download** itself. Replace it with GPU-native shaders that
@@ -141,7 +141,7 @@ sweep to confirm crossovers. Tier 1 buys 70% of the value for
 1 day of work. Do Tier 1 first, measure, decide whether Tier 2
 on the remaining hot ops is worth the time.
 
-## Tier 3 — Index-handling shaders for the gather family
+## Tier 3 — Index-handling shaders for the gather family  *(DEFERRED)*
 
 `gather`, `take`, `indexed_put`, `indexed_add` need real
 GPU-native impls because their work is index-driven scatter or
@@ -156,7 +156,7 @@ NUTS leapfrog uses `indexed_put` only at tiny scales
 ({200, 8}-ish) where even an optimal GPU impl would not beat
 BinaryBackend.
 
-## Routing-policy follow-up (orthogonal but related)
+## Routing-policy follow-up (orthogonal but related)  *(TODO — in eXMC, not nx_vulkan)*
 
 A separate fix that *avoids* the Shape C problem entirely for
 the NUTS hot path: keep small-shape NUTS scratch tensors on

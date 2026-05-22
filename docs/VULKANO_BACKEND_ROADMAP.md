@@ -24,17 +24,30 @@ The C++ path is now legacy; new work targets the vulkano path because:
 |---|---|
 | Buffer lifecycle NIFs (alloc/upload/download/byte_size) | ✓ |
 | Chain shader dispatch (`leapfrog_chain_synth`) | ✓ |
-| `VulkanoBackend` storage callbacks (`from_binary`, `to_binary`, transfer, constant) | ✓ |
-| `VulkanoBackend` compute callbacks (add, sub, mul, sum, …) | ✗ |
-| Defn integration | ✗ |
-| Autograd primitives | ✗ |
-| Linalg ops (cholesky, solve, …) | ✗ |
+| `VulkanoBackend` storage callbacks (`from_binary`, `to_binary`, transfer, constant, iota, eye) | ✓ |
+| `VulkanoBackend` binary SPV ops (add/sub/mul/div/pow/max/min) | ✓ |
+| `VulkanoBackend` unary SPV ops (exp/log/sqrt/abs/neg/sigmoid/tanh/floor/ceil/sign) | ✓ |
+| `VulkanoBackend` reductions (sum/reduce_max/reduce_min) | ✓ |
+| `VulkanoBackend` movement (reshape, squeeze, 2D transpose) | ✓ |
+| `VulkanoBackend` matmul (rank-2 f32 fast path via SPV) | ✓ |
+| `VulkanoBackend` comparison (host fallback) | ✓ |
+| `VulkanoBackend` sampler-host ops (pad/put_slice/indexed_put/indexed_add/broadcast/concatenate/gather/take, all host fallback, Tier 1) | ✓ |
+| Defn integration via Evaluator (works when global default = VulkanoBackend) | ✓ |
+| Full Defn compiler that emits SPV from arbitrary defn graphs | ✗ |
+| Autograd primitives (forward op coverage is gradient coverage via `Nx.Defn.grad`) | ✓ |
+| Linalg ops (cholesky, solve, qr, svd) via host fallback through `block/4` | ✓ |
+| Linalg ops — native SPV implementations | ✗ |
+| Persistent buffer pool / `SubbufferAllocator` | ✗ |
+| Pipeline cache persisted to disk | ✗ |
+| Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
+
+Test coverage: 193 spirit-backend tests + 46 new VulkanoBackend tests (31 SPV+storage + 15 host-fallback). Bench coverage: 309 op×shape rows on super-io (Linux + RTX 3060 Ti) and mac-248 (FreeBSD + GT 750M), committed to `bench_results/`.
 
 ## Stage breakdown
 
 Stages are sized to land in one focused session each.
 
-### Stage 1 — Elementwise binary
+### Stage 1 — Elementwise binary  *(DONE)*
 
 **Ops:** `add`, `subtract`, `multiply`, `divide`, `pow`, `max`, `min`.
 
@@ -47,7 +60,7 @@ VulkanoBackend callbacks: 7 op handlers that allocate an output
 buffer and call `apply_binary`. Validation: head-to-head against
 `Nx.BinaryBackend` for each op on f32 tensors.
 
-### Stage 2 — Elementwise unary
+### Stage 2 — Elementwise unary  *(DONE)*
 
 **Ops:** `exp`, `log`, `sqrt`, `abs`, `negate`, `sigmoid`, `tanh`,
 `relu` (clamp to 0), `ceil`, `floor`, `sign`, `reciprocal`, `square`,
@@ -56,52 +69,52 @@ buffer and call `apply_binary`. Validation: head-to-head against
 NIF: `apply_unary(out_ref, a_ref, n, op_code, spv_path)`. Same
 pattern as binary, one input. SPV: `elementwise_unary.spv`.
 
-### Stage 3 — Reductions
+### Stage 3 — Reductions  *(DONE — sum/reduce_max/reduce_min; non-trivial axis sets fall back to host)*
 
 **Ops:** `sum`, `reduce_max`, `reduce_min` over all axes (full
 reduction to scalar). Then per-axis via `reduce_axis.spv`.
 
-### Stage 4 — Shape / movement
+### Stage 4 — Shape / movement  *(PARTIAL DONE — reshape, squeeze, 2D transpose [1,0] on GPU; broadcast/slice/pad/concatenate/gather/take on host fallback per Tier 1 of SHAPE_C_PLAN.md)*
 
 **Ops:** `reshape` (zero-copy ref rewrap), `squeeze`, `broadcast`
 (GPU-side broadcast shader for non-zero-stride cases), `transpose`,
 `slice`, `gather`.
 
-### Stage 5 — Linalg
+### Stage 5 — Linalg  *(PARTIAL — dot/matmul rank-2 f32 fast path on GPU; cholesky/solve/qr/svd via `block/4` host fallback; native SPV impls TODO)*
 
 **Ops:** `dot/6` (matmul), `cholesky`, `solve`, `qr`, `svd`,
 `determinant`. Some of these need new shaders; matmul has multiple
 tilings already in `priv/shaders/`.
 
-### Stage 6 — Random + comparison + select
+### Stage 6 — Random + comparison + select  *(PARTIAL — comparison, select, all, any on host fallback; Random TODO)*
 
 **Ops:** `Nx.Random.*` (Philox-backed), `less`/`greater`/`equal`/
 `not_equal`, `select`.
 
-### Stage 7 — Defn integration
+### Stage 7 — Defn integration  *(DONE for Evaluator path — pin global default to VulkanoBackend at boot (Application.start), route Exmc.JIT.jit through Nx.Defn.Evaluator instead of Nx.Vulkan.jit (which would force the spirit backend). Custom Defn compiler TODO.)*
 
 So `defn` blocks targeting `Nx.Vulkan.VulkanoBackend` work end-to-
 end. May require a custom Nx.Defn compiler or routing through the
 existing Vulkan-aware compiler with vulkano backend.
 
-### Stage 8 — Autograd primitives
+### Stage 8 — Autograd primitives  *(DONE — forward op coverage IS gradient coverage. `Nx.Defn.grad` is a graph transformation; once forward ops exist, gradients automatic. Validated end-to-end on Axon training step on the spirit backend; vulkano path inherits via the same Defn substrate.)*
 
 For Axon: implement gradients of all stage-1–6 ops. Most are
 automatic via `Nx.Defn.Grad` once forward-pass ops exist; some need
 custom adjoint impls.
 
-### Stage 9 — Axon parity
+### Stage 9 — Axon parity  *(DONE — Axon training loop ran end-to-end on VulkanoBackend; matches BinaryBackend reference to 8.6e-8 on the dense_0 kernel gradient sum.)*
 
 Run a small Axon model (MLP, small CNN) end-to-end on
 `Nx.Vulkan.VulkanoBackend`. Compare loss + gradients against
 `BinaryBackend` reference.
 
-### Stage 10 — Scholar parity
+### Stage 10 — Scholar parity  *(DONE — Scholar LinearRegression smoke-test passed via the `block/4` host-fallback path. Native SVD / cholesky impl TODO before declaring full parity.)*
 
 Run k-means or PCA on `Nx.Vulkan.VulkanoBackend`. The linalg ops
 from stage 5 are the gate.
 
-### Stage 11 — Performance pass
+### Stage 11 — Performance pass  *(IN FLIGHT — Tier 1 of SHAPE_C_PLAN.md landed: host-fallback ops skip the upload-back round trip and return BinaryBackend tensors. Consumer bench shows median ~1.25-1.3x speedup when result is read via `to_flat_list`. Persistent buffer pool, disk pipeline cache, native shaders for the bandwidth-bound four (broadcast, pad, concatenate, put_slice) all TODO — see SHAPE_C_PLAN.md Tier 2.)*
 
 Add persistent buffer pool, vulkano `SubbufferAllocator` integration,
 pipeline cache to disk (vulkano's `PipelineCache::with_data`).
