@@ -55,7 +55,7 @@ to do it is:
 
 ## Three sub-plans
 
-### Sub-plan 1: FreeBSD driver bring-up (~half a day on mac-247)
+### Sub-plan 1: FreeBSD driver bring-up (~half a day on mac-247)  *(EMPIRICALLY FAILED on 2026-05-22 — the whole plan is parked)*
 
 Outside of nx_vulkan proper; pure system administration.
 
@@ -66,6 +66,47 @@ sysrc kld_list+=i915kms     # load on boot
 service kld restart         # or reboot
 vulkaninfo --summary        # confirm Intel device enumerated
 ```
+
+**Result of the empirical attempt on mac-247 (2026-05-22):**
+
+1. `pkg install drm-kmod mesa-libs` + `kldload i915kms` succeeded
+   at the FreeBSD module level.
+2. `dmesg` showed `drmn1: [drm] Cannot find any crtc or sizes` —
+   the Intel driver attached to the device but its CRTC was
+   disabled.
+3. Loading `i915kms` displaced the NVIDIA kernel module. After
+   the load, `kldstat` showed only `i915kms.ko` + `drm.ko`, no
+   `nvidia.ko`.
+4. `vulkaninfo --summary` returned ONLY llvmpipe — NVIDIA's
+   userspace Vulkan ICD couldn't load (`vk_icdGetInstanceProcAddr`
+   returned NULL because the kernel half was gone), and Intel
+   never appeared (no CRTC ⇒ no Vulkan device).
+
+So the experiment produced **strictly worse** state than the
+starting state: NVIDIA went from "working Vulkan device" to
+"invisible," and Intel stayed invisible throughout.
+
+The Apple MUX firmware on the 2013 MacBook Pro hard-wires the
+NVIDIA card to the display. On FreeBSD there is no in-tree
+mechanism to flip the MUX or coax the iGPU into a usable state
+while the NVIDIA driver is active. The hardware is on the PCI
+bus but architecturally unreachable for Vulkan compute.
+
+Recovery from the experiment was straightforward: `kldunload
+i915kms`, reload `nvidia-modeset`, NVIDIA Vulkan came back. The
+trial was already migrated to mac-248 before the experiment, so
+the failed experiment cost zero trial downtime.
+
+**Verdict: the entire MULTI_DEVICE_PLAN.md is parked.** The
+remaining sub-plans (device-selectable `ctx()`, routing policy,
+bench validation) are still good engineering ideas but have no
+target hardware until a multi-GPU box arrives that doesn't have
+Apple firmware vetoing the second device. mac-247 is **not**
+that box.
+
+The `CONTEXT_LIFECYCLE_PLAN.md` ArcSwap refactor remains valid
+and useful for the single-device case (test isolation). It does
+not depend on multi-device support landing.
 
 Verify with `vulkaninfo --summary`:
 ```
