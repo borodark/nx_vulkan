@@ -141,3 +141,38 @@ half of EXLA's throughput on the same hardware where EXLA runs.
 4. **Hex publish strategy.** Once stages 1–6 land, publish a 0.1
    nx_vulkan_vulkano package. Existing `nx_vulkan` keeps the C++
    path until parity is comfortable.
+
+5. **Multi-device on a single machine.** mac-247 (FreeBSD 15 +
+   2013-era MacBook Pro) has the GT 650M Mac Edition AND an Intel
+   HD Graphics 4000 (Ivy Bridge iGPU). `pciconf -lv` confirms both
+   on the PCI bus:
+
+       vgapci1: Intel HD Graphics 4000      (vendor 0x8086, dev 0x0166)
+       vgapci0: NVIDIA GT 650M Mac Edition  (vendor 0x10de, dev 0x0fd5)
+
+   Currently only NVIDIA is exposed to Vulkan. `vulkaninfo` shows
+   `llvmpipe` as the second device (Mesa's software Vulkan, not
+   the iGPU). To surface the Intel iGPU:
+
+   - Load `i915kms` + `drm-kmod`
+   - Confirm FreeBSD `graphics/mesa-libs` ships with the `anv`
+     Intel Vulkan driver enabled for x86_64
+   - Investigate Apple MUX state — early-2013 MBPs may hard-route
+     the iGPU into low-power/standby when discrete is active
+
+   Even with both surfaced, nx_vulkan's `ctx()` picks the first
+   `DiscreteGpu` and ignores everything else. Multi-device routing
+   would need:
+
+   - Device selection in `ctx()` (env var, config, or runtime API)
+   - Per-device pipeline cache + allocator
+   - Either device-affinity tags on `Nx.Vulkan.VulkanoBackend`
+     tensors, or a workload-router that chooses device per op
+
+   Performance ceiling estimate: GT 650M = ~691 GFLOPS f32;
+   HD 4000 = ~330 GFLOPS f32 (no f64). Theoretical +50% peak on
+   mac-247; realistic +20-30% on well-partitioned workloads.
+
+   Filed as long-term — not blocking M-II or W-stage work. Pick
+   up if dual-device compute on the legacy MBP becomes interesting
+   (e.g., for a "compute fabric from yesterday's hardware" demo).
