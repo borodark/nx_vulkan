@@ -581,11 +581,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # take: pick along a single axis. Common in trajectory selection.
+  # The Nx.Backend.take/4 callback's 4th arg is a keyword (e.g.
+  # `[axis: 0]`), NOT a bare integer — forward it through verbatim.
   @impl true
-  def take(out, tensor, indices, axis) do
+  def take(out, tensor, indices, opts) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.take(t_bin, i_bin, axis: axis)
+    result = Nx.take(t_bin, i_bin, opts)
     from_binary(out, Nx.to_binary(result), [])
   end
 
