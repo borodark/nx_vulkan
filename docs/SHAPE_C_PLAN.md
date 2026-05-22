@@ -83,6 +83,39 @@ Re-run the bench with the patched callbacks. Expected:
 If the gate doesn't show 5×+ improvement on concatenate, revert
 and reconsider.
 
+### What Tier 1 actually measured
+
+Run on super-io (Linux + RTX 3060 Ti) and mac-248 (FreeBSD + GT
+750M). Two findings, one expected, one not:
+
+**Op-only bench (`vulkano_ops_bench.exs`)**: no improvement.
+concatenate, pad, broadcast, etc. all show the same speedups as
+pre-Tier-1. Reason: the op-only bench discards every iteration's
+result. Tier 1 trades NIF-resource cleanup (Rust Drop, fast) for
+BEAM GC of large host binaries (slower). On a tight loop those
+costs cancel.
+
+**Consumer bench (`vulkano_consumer_bench.exs`)**: clear win.
+Measures `op + Nx.to_flat_list(result)` — the realistic flow
+where the host actually reads the result (as the eXMC trial's
+`signal_params` does on stored trace tensors). Headline D/E
+speedups (Tier 1 active vs pre-Tier-1 simulated):
+
+| op | median D/E |
+|----|------------|
+| broadcast | 1.42-2.46× |
+| put_slice | 1.13-1.57× |
+| indexed_put | 1.38-1.65× |
+| concatenate | 0.99-1.30× |
+| take | 1.02-1.35× |
+| pad | 1.07-1.22× |
+| gather | 0.85-1.16× (sometimes neutral) |
+
+Median ~1.25-1.3× saved wall time when the consumer reads the
+result. The Tier 1 win is real, just measured by the wrong bench
+initially. Filed as a lesson: bench what the *consumer* does, not
+just what the op does.
+
 ## Tier 2 — Native SPV for the bandwidth-bound four (~1 week)
 
 Once Tier 1 lands, the remaining bottleneck for these four ops is

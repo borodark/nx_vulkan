@@ -176,7 +176,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
     b_bin = Nx.backend_transfer(b, Nx.BinaryBackend)
     result = apply(Nx, op, [a_bin, b_bin])
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # ---------------------------------------------------------------- elementwise unary
@@ -234,7 +234,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp unary_op_host_fallback(op, out, a) do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
     result = apply(Nx, op, [a_bin])
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # ---------------------------------------------------------------- reductions
@@ -301,7 +301,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       end
 
     result = apply(Nx, op, [bin_in, opts])
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   defp all_axes(shape), do: Enum.to_list(0..(tuple_size(shape) - 1))
@@ -403,8 +403,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     else
       bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
       bin_cast = Nx.as_type(bin_in, type)
-      bin = Nx.to_binary(bin_cast)
-      from_binary(out, bin, [])
+      host_result(out, bin_cast)
     end
   end
 
@@ -421,7 +420,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
       b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
       result = apply(Nx, unquote(op), [a_bin, b_bin])
-      from_binary(out, Nx.to_binary(result), [])
+      host_result(out, result)
     end
   end
 
@@ -432,7 +431,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(on_true), Nx.BinaryBackend)
     f_bin = Nx.backend_transfer(ensure_on_backend(on_false), Nx.BinaryBackend)
     result = Nx.select(pred_bin, t_bin, f_bin)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # all/3, any/3 — boolean reductions, host-fallback.
@@ -441,7 +440,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     def unquote(op)(out, tensor, opts) do
       bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
       result = apply(Nx, unquote(op), [bin, opts])
-      from_binary(out, Nx.to_binary(result), [])
+      host_result(out, result)
     end
   end
 
@@ -469,24 +468,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     result = Nx.BinaryBackend.block(out, block_def, inputs_bin, opts)
 
-    # `result` may be a single tensor or a tuple of tensors. Walk and
-    # transfer each tensor leaf back to VulkanoBackend.
-    transfer_back = fn t ->
-      if is_struct(t, Nx.Tensor) do
-        Nx.backend_transfer(t, __MODULE__)
-      else
-        t
-      end
-    end
-
-    case result do
-      %Nx.Tensor{} = t -> transfer_back.(t)
-      tuple when is_tuple(tuple) ->
-        tuple
-        |> Tuple.to_list()
-        |> Enum.map(transfer_back)
-        |> List.to_tuple()
-    end
+    # Per Tier 1 of SHAPE_C_PLAN.md: result is already on BinaryBackend,
+    # leave it there. Nx supports mixed-backend tensors flowing through
+    # the pipeline; the next op auto-transfers if it needs GPU.
+    result
   end
 
   # ---------------------------------------------------------------- slice (host fallback)
@@ -497,11 +482,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # correct but copies through host memory.
   @impl true
   def slice(out, tensor, start_indices, lengths, strides) do
-    # Delegate to Nx-level slice on BinaryBackend, then upload result.
+    # Delegate to Nx-level slice on BinaryBackend; result stays on host
+    # (Tier 1 of SHAPE_C_PLAN.md — avoid the upload-back round trip).
     bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
     bin_result = Nx.slice(bin_in, start_indices, lengths, strides: strides)
-    bin = Nx.to_binary(bin_result)
-    from_binary(out, bin, [])
+    host_result(out, bin_result)
   end
 
   # ---------------------------------------------------------------- sampler-path host fallbacks
@@ -515,7 +500,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     pv_bin = Nx.backend_transfer(ensure_on_backend(pad_value), Nx.BinaryBackend)
     result = Nx.pad(t_bin, pv_bin, padding_config)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # put_slice: write `slice` into `tensor` at `start_indices`. Used by
@@ -526,7 +511,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     s_bin = Nx.backend_transfer(ensure_on_backend(slice), Nx.BinaryBackend)
     idx_bin = Enum.map(start_indices, &maybe_transfer_idx/1)
     result = Nx.put_slice(t_bin, idx_bin, s_bin)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # indexed_put: scatter updates into tensor at indices. Used to fill
@@ -537,7 +522,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
     u_bin = Nx.backend_transfer(ensure_on_backend(updates), Nx.BinaryBackend)
     result = Nx.indexed_put(t_bin, i_bin, u_bin, opts)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # indexed_add: scatter-accumulate. Same shape as indexed_put.
@@ -547,7 +532,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
     u_bin = Nx.backend_transfer(ensure_on_backend(updates), Nx.BinaryBackend)
     result = Nx.indexed_add(t_bin, i_bin, u_bin, opts)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # broadcast: project a tensor to a new shape along `axes`. Implicit
@@ -558,7 +543,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   def broadcast(out, tensor, shape, axes) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     result = Nx.broadcast(t_bin, shape, axes: axes)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # concatenate: join tensors along an axis. Used by Sampler.sample_stream
@@ -567,7 +552,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   def concatenate(out, tensors, axis) do
     bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
     result = Nx.concatenate(bins, axis: axis)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # gather: pick elements at given index tuples. Underpins take/
@@ -577,7 +562,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
     result = Nx.gather(t_bin, i_bin, opts)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # take: pick along a single axis. Common in trajectory selection.
@@ -588,7 +573,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
     result = Nx.take(t_bin, i_bin, opts)
-    from_binary(out, Nx.to_binary(result), [])
+    host_result(out, result)
   end
 
   # Indices passed to put_slice can be scalar tensors or integers;
@@ -637,7 +622,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
       b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
       result = Nx.dot(a_bin, axes_a, batched_a, b_bin, axes_b, batched_b)
-      from_binary(out, Nx.to_binary(result), [])
+      host_result(out, result)
     end
   end
 
@@ -651,6 +636,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp ensure_on_backend(%T{} = t) do
     Nx.backend_transfer(t, __MODULE__)
   end
+
+  # Tier 1 of SHAPE_C_PLAN.md — host-fallback result helper. The
+  # compute already ran on BinaryBackend; the result tensor's `.data`
+  # is `%Nx.BinaryBackend{state: bin}`. Rebuilding it via
+  # `from_binary(out, Nx.to_binary(result), [])` would serialise then
+  # `buf_upload` to a fresh GPU buffer — pure waste, since the only
+  # thing vulkano contributes to a host-fallback op is the round trip.
+  # Leave the result on BinaryBackend; Nx handles mixed-backend tensors
+  # downstream, and any op that genuinely needs GPU will transfer
+  # lazily on first touch.
+  defp host_result(%T{} = out, %T{} = result), do: %{out | data: result.data}
 
   defp byte_size_of(shape) when is_tuple(shape) do
     shape |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
