@@ -55,3 +55,37 @@ was also running on super-io. That CPU/memory contention adds noise
 to host-fallback rows (the ones that hit BinaryBackend). mac-248 ran
 alone with no contention; its numbers are cleaner. For tight
 comparisons across runs, run the bench on a quiescent host.
+
+## Consumer-aware bench (post-Tier-2)
+
+`examples/vulkano_consumer_bench.exs` measures host-fallback ops
+the way a real caller experiences them — including the read-back the
+caller will eventually need, and (in the worst case) the upload-back
+the old host-fallback path imposed. Output CSVs use a different schema:
+
+```
+op_name, size, A_bin_us, B_bin_rd_us, C_vulk_us,
+D_vk_rd_us, E_vk_up_rd_us, D_over_B, D_over_E
+```
+
+| col | what it counts |
+|---|---|
+| `A_bin_us`      | BinaryBackend, no transfers |
+| `B_bin_rd_us`   | BinaryBackend + read-back (consumer model) |
+| `C_vulk_us`     | VulkanoBackend op-only |
+| `D_vk_rd_us`    | VulkanoBackend + read-back the consumer pays |
+| `E_vk_up_rd_us` | VulkanoBackend + upload-back-after-host-fallback (worst case) |
+| `D_over_B`      | `D/B` &mdash; the GPU-vs-host comparison that matters |
+| `D_over_E`      | `D/E` &mdash; how much Tier 1 saved by not uploading back |
+
+| File | Host | GPU | OS |
+|---|---|---|---|
+| `super-io_consumer-aware_2026-05-24.csv` | super-io | NVIDIA RTX 3060 Ti | Linux 6.8 |
+| `mac247-gt650m_consumer-aware_2026-05-24.csv` | mac-247 | NVIDIA GT 650M | FreeBSD 15.0 |
+
+Tier 2 step 1 (commit `672d32f`) replaced the host-fallback
+`concatenate` with a native `vkCmdCopyBuffer` path. Concatenate's
+`D_over_B` now stays below 1.0 across the size range on both hosts.
+The remaining host-fallback rows (pad/put_slice/indexed_put/broadcast/gather/take)
+still benefit from the Tier 1 contract: `D_over_E > 1` on every row
+means the Tier 0 upload-back was always wasted.
