@@ -118,6 +118,52 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert r.data.__struct__ == Nx.BinaryBackend
       assert Nx.to_flat_list(r) == [1, 2, 3]
     end
+
+    test "argmax result is on BinaryBackend" do
+      a = v(f32([1.0, 5.0, 2.0, 4.0]))
+      r = Nx.argmax(a)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_number(r) == 1
+    end
+
+    test "argmax along axis (2D source)" do
+      a = v(f32([[1.0, 5.0, 2.0], [4.0, 0.0, 3.0]]))
+      r = Nx.argmax(a, axis: 1)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_flat_list(r) == [1, 0]
+    end
+
+    test "argmin result is on BinaryBackend" do
+      a = v(f32([1.0, 5.0, 2.0, 4.0]))
+      r = Nx.argmin(a)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_number(r) == 0
+    end
+
+    test "argmin along axis (2D source)" do
+      a = v(f32([[1.0, 5.0, 2.0], [4.0, 0.0, 3.0]]))
+      r = Nx.argmin(a, axis: 1)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_flat_list(r) == [0, 1]
+    end
+
+    test "clip result is on BinaryBackend" do
+      a = v(f32([-1.0, 0.5, 1.5, 3.0]))
+      lo = v(Nx.tensor(0.0, type: :f32, backend: Nx.BinaryBackend))
+      hi = v(Nx.tensor(2.0, type: :f32, backend: Nx.BinaryBackend))
+      r = Nx.clip(a, lo, hi)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_flat_list(r) == [0.0, 0.5, 1.5, 2.0]
+    end
+
+    test "clip with mixed-backend bounds" do
+      a = v(f32([-5.0, 0.0, 5.0]))
+      lo = Nx.tensor(-1.0, type: :f32, backend: Nx.BinaryBackend)
+      hi = Nx.tensor(1.0, type: :f32, backend: Nx.BinaryBackend)
+      r = Nx.clip(a, lo, hi)
+      assert r.data.__struct__ == Nx.BinaryBackend
+      assert Nx.to_flat_list(r) == [-1.0, 0.0, 1.0]
+    end
   end
 
   describe "take/4 — opts keyword forwarded verbatim" do

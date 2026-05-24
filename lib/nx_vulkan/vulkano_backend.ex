@@ -603,6 +603,35 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
+  # argmax / argmin: indices of extrema along an axis. Used by
+  # credible-interval extraction and PyMC-style posterior summaries.
+  # Tier 1 host fallback — no GPU shader yet.
+  @impl true
+  def argmax(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.argmax(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def argmin(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.argmin(t_bin, opts)
+    host_result(out, result)
+  end
+
+  # clip: elementwise clip to [min, max]. min and max arrive as
+  # scalar tensors. Could decompose to two elementwise ops on the
+  # GPU later; for now, Tier 1 host fallback keeps the contract.
+  @impl true
+  def clip(out, tensor, min, max) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    min_bin = Nx.backend_transfer(ensure_on_backend(min), Nx.BinaryBackend)
+    max_bin = Nx.backend_transfer(ensure_on_backend(max), Nx.BinaryBackend)
+    result = Nx.clip(t_bin, min_bin, max_bin)
+    host_result(out, result)
+  end
+
   # Indices passed to put_slice can be scalar tensors or integers;
   # normalise to whatever BinaryBackend.put_slice expects.
   defp maybe_transfer_idx(%T{} = t),
