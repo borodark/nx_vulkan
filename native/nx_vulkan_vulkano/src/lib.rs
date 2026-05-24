@@ -554,6 +554,114 @@ fn buf_alloc<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {
     Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
 }
 
+/// Concatenate N device buffers into a single fresh buffer via
+/// `vkCmdCopyBuffer`. No shader involved — pure DMA on the queue.
+///
+/// Tier 2 of SHAPE_C_PLAN.md step 1: the host-fallback `concatenate`
+/// was 0.02× speedup vs BinaryBackend because BinaryBackend's
+/// concatenate is essentially a binary append. The GPU-native path
+/// here keeps the result on the device, avoiding the download +
+/// re-upload round trip for downstream ops.
+///
+/// Returns `{:ok, output_tensor_ref}` with `n_bytes = Σ inputs[i].n_bytes`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn concat_buffers<'a>(
+    env: Env<'a>,
+    inputs: Vec<ResourceArc<VulkanoTensor>>,
+) -> NifResult<Term<'a>> {
+    if inputs.is_empty() {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let total_bytes: u64 = inputs.iter().map(|t| t.n_bytes).sum();
+
+    let dst = match alloc_buffer(
+        context.mem_allocator.clone(),
+        total_bytes as usize,
+        BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+    ) {
+        Ok(b) => b,
+        Err(e) => return Ok((atoms::error(), atoms::upload_failed(), e).encode(env)),
+    };
+
+    let mut cmd = match AutoCommandBufferBuilder::primary(
+        &context.cmd_allocator,
+        context.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("cmd builder: {e}")).encode(env),
+            )
+        }
+    };
+
+    let mut offset: u64 = 0;
+    for input in &inputs {
+        let len = input.n_bytes;
+        let dst_slice = dst.clone().slice(offset..offset + len);
+
+        if let Err(e) = cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
+            input.buf.clone(),
+            dst_slice,
+        )) {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("copy_buffer: {e}"))
+                    .encode(env),
+            );
+        }
+
+        offset += len;
+    }
+
+    let cmd_buf = match cmd.build() {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("build cmd: {e}")).encode(env),
+            )
+        }
+    };
+
+    let future = match sync::now(context.device.clone())
+        .then_execute(context.queue.clone(), cmd_buf)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("execute: {e}")).encode(env),
+            )
+        }
+    };
+
+    let future = match future.then_signal_fence_and_flush() {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("flush: {e}")).encode(env),
+            )
+        }
+    };
+
+    if let Err(e) = future.wait(None) {
+        return Ok(
+            (atoms::error(), atoms::dispatch_failed(), format!("wait: {e}")).encode(env),
+        );
+    }
+
+    let tensor = VulkanoTensor {
+        buf: dst,
+        n_bytes: total_bytes,
+    };
+    Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
+}
+
 /// Download `tensor.n_bytes` bytes from a device buffer to the BEAM.
 /// Returns `{:ok, binary}`.
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1050,6 +1158,7 @@ rustler::init!(
         buf_download,
         buf_byte_size,
         buf_upload_into,
+        concat_buffers,
         apply_binary,
         apply_unary,
         reduce_axis,

@@ -26,9 +26,22 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
   end
 
   describe "Tier 1 — host-fallback results stay on BinaryBackend" do
-    test "concatenate result is on BinaryBackend" do
+    test "concatenate axis-0 all-vulkano: result stays on VulkanoBackend (Tier 2 fast path)" do
+      # Tier 2 step 1: outer-axis concat of vulkano-resident inputs
+      # routes to concat_buffers NIF (vkCmdCopyBuffer), result stays
+      # GPU-resident. Older Tier 1 behaviour was BinaryBackend; that
+      # path still applies to mixed-backend or non-outer-axis concats
+      # (see "concatenate mixed-backend falls back" below).
       a = v(f32([1.0, 2.0, 3.0]))
       b = v(f32([4.0, 5.0, 6.0]))
+      r = Nx.concatenate([a, b])
+      assert r.data.__struct__ == VulkanoBackend
+      assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    end
+
+    test "concatenate mixed-backend falls back to BinaryBackend host path" do
+      a = v(f32([1.0, 2.0, 3.0]))
+      b = f32([4.0, 5.0, 6.0])
       r = Nx.concatenate([a, b])
       assert r.data.__struct__ == Nx.BinaryBackend
       assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]

@@ -71,6 +71,18 @@ defmodule Nx.Vulkan.NativeV do
   """
   def buf_upload_into(_ref, _data), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Concatenate N device buffers into a single fresh buffer via
+  vkCmdCopyBuffer (no shader). Inputs are copied in list order
+  into the destination starting at offset 0; total output size =
+  Σ inputs[i].n_bytes. Returns `{:ok, output_ref}`.
+
+  Tier 2 step 1 of SHAPE_C_PLAN.md — keeps the result on the
+  device so downstream ops don't pay the download+upload round
+  trip that the host-fallback path imposed.
+  """
+  def concat_buffers(_inputs), do: :erlang.nif_error(:nif_not_loaded)
+
   # -- Compute ops ---------------------------------------------------------
 
   @doc """

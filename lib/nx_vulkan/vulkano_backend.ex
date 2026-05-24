@@ -548,11 +548,38 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # concatenate: join tensors along an axis. Used by Sampler.sample_stream
   # and several diagnostic paths.
+  #
+  # Tier 2 step 1 of SHAPE_C_PLAN.md: GPU-native fast path when all
+  # inputs are already VulkanoBackend AND axis == 0. Outer-axis
+  # concat is a contiguous byte-level append in row-major layout, so
+  # `vkCmdCopyBuffer` per input into a fresh device buffer does it
+  # without a shader. Result stays on the device. Other shapes
+  # (non-outer axis, mixed backend inputs) fall through to the
+  # existing host-fallback.
   @impl true
   def concatenate(out, tensors, axis) do
-    bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
-    result = Nx.concatenate(bins, axis: axis)
-    host_result(out, result)
+    cond do
+      axis == 0 and all_vulkano?(tensors) ->
+        concat_vulkano(out, tensors)
+
+      true ->
+        bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
+        result = Nx.concatenate(bins, axis: axis)
+        host_result(out, result)
+    end
+  end
+
+  defp all_vulkano?(tensors) do
+    Enum.all?(tensors, fn
+      %T{data: %__MODULE__{}} -> true
+      _ -> false
+    end)
+  end
+
+  defp concat_vulkano(out, tensors) do
+    refs = Enum.map(tensors, fn %T{data: %__MODULE__{ref: r}} -> r end)
+    {:ok, ref} = Nx.Vulkan.NativeV.concat_buffers(refs)
+    put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: out.type})
   end
 
   # gather: pick elements at given index tuples. Underpins take/
