@@ -582,6 +582,26 @@ defmodule Nx.Vulkan.VulkanoBackend do
     put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: out.type})
   end
 
+  # stack: combine N tensors along a NEW axis. Nx allocates the
+  # output on the default backend (which is VulkanoBackend when the
+  # app pins it at boot), then dispatches stack/3 to the OUTPUT's
+  # backend — even when the input list is BinaryBackend tensors (the
+  # common NUTS trace-building case, where every per-iteration draw is
+  # a small BinaryBackend tensor). Tier 1 host fallback: transfer
+  # everything to BinaryBackend, stack there, return on BinaryBackend.
+  # `tensors` is a LIST despite the singular `tensor` in the @callback
+  # signature.
+  @impl true
+  def stack(out, tensors, axis) do
+    bins =
+      Enum.map(tensors, fn t ->
+        Nx.backend_transfer(ensure_on_backend(t), Nx.BinaryBackend)
+      end)
+
+    result = Nx.stack(bins, axis: axis)
+    host_result(out, result)
+  end
+
   # gather: pick elements at given index tuples. Underpins take/
   # take_diagonal in Nx 0.10's lowering.
   @impl true
