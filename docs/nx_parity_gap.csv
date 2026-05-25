@@ -1,0 +1,40 @@
+callback,args,family,complexity,exmc_usage_count
+all,"out :: tensor, tensor, keyword",reduction,"easy (host fallback via Nx.<op>)",0
+all_close,"out :: tensor, tensor, tensor, keyword",reduction,"easy (host fallback via Nx.<op>)",0
+any,"out :: tensor, tensor, keyword",reduction,"easy (host fallback via Nx.<op>)",0
+argsort,"out :: tensor, tensor, keyword",sort,"medium (host fallback; GPU sort = hard but doable)",0
+bitcast,"out :: tensor, tensor",shape,"easy (host fallback, mostly free)",0
+cholesky,"out :: tensor, tensor",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+conv,"out :: tensor, tensor, kernel :: tensor, keyword",conv,"skip (out of exmc scope; CNN territory)",0
+cumulative_max,"out :: tensor, t :: tensor, keyword",reduction-cumulative,"easy-medium (host fallback fine; GPU scan possible)",0
+cumulative_min,"out :: tensor, t :: tensor, keyword",reduction-cumulative,"easy-medium (host fallback fine; GPU scan possible)",0
+cumulative_product,"out :: tensor, t :: tensor, keyword",reduction-cumulative,"easy-medium (host fallback fine; GPU scan possible)",0
+cumulative_sum,"out :: tensor, t :: tensor, keyword",reduction-cumulative,"easy-medium (host fallback fine; GPU scan possible)",0
+determinant,"out :: tensor, t :: tensor",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+eigh,"{eigenvals :: tensor, eigenvecs :: tensor}, tensor, keyword",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+fft,"out :: tensor, tensor, keyword",fft,"skip (out of exmc scope; GPU shader = very hard)",0
+from_pointer,"opaque_pointer :: term(",pointer,"skip (FFI surface; not needed for exmc)",0
+ifft,"out :: tensor, tensor, keyword",fft,"skip (out of exmc scope; GPU shader = very hard)",0
+logical_not,"out :: tensor, t :: tensor",logic,"easy (host fallback)",0
+lu,"{p :: tensor, l :: tensor, u :: tensor}, tensor, keyword",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+optional,"atom, [term], fun",system,"n/a (optional callback, no impl needed)",0
+phase,"out :: tensor, t :: tensor",complex,"skip (no complex tensors in exmc)",0
+product,"out :: tensor, tensor, keyword",reduction,"easy (host fallback via Nx.<op>)",0
+qr,"{q :: tensor, r :: tensor}, tensor, keyword",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+reduce,"out :: tensor, tensor, acc :: tensor, keyword, fun",reduction,"easy (host fallback via Nx.<op>)",0
+reverse,"out :: tensor, tensor, axes",shape,"easy (host fallback, mostly free)",0
+solve,"out :: tensor, a :: tensor, b :: tensor",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+sort,"out :: tensor, tensor, keyword",sort,"medium (host fallback; GPU sort = hard but doable)",0
+svd,"{u :: tensor, s :: tensor, v :: tensor}, tensor, keyword",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+take_along_axis,"out :: tensor, input :: tensor, indices :: tensor, keyword",sort,"medium (host fallback; GPU sort = hard but doable)",0
+to_batched,"out :: tensor, tensor, keyword",shape,"easy (host fallback, mostly free)",0
+to_pointer,"tensor, opts :: keyword",pointer,"skip (FFI surface; not needed for exmc)",0
+top_k,"out :: tensor, tensor, keyword",sort,"medium (host fallback; GPU sort = hard but doable)",0
+triangular_solve,"out :: tensor, a :: tensor, b :: tensor, keyword",linalg,"medium (host fallback via BinaryBackend; GPU shader = hard)",0
+window_max,"out :: tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
+window_min,"out :: tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
+window_product,"out :: tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
+window_reduce,"out :: tensor, tensor, acc :: tensor, shape, keyword, fun",window,"medium (host fallback; rarely needed)",0
+window_scatter_max,"out :: tensor, tensor, tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
+window_scatter_min,"out :: tensor, tensor, tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
+window_sum,"out :: tensor, tensor, shape, keyword",window,"medium (host fallback; rarely needed)",0
