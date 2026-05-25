@@ -46,6 +46,26 @@ defmodule Nx.Vulkan.NativeV do
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Plan A* — boundary-cast f64 variant of `leapfrog_chain_synth/6`.
+
+  Same dispatch contract but all binaries are little-endian f64
+  (8 bytes per element). Push block is 24+ bytes (eps is f64 at byte
+  offset 16). SPV at `spv_path` must be the f64-compiled synth shader
+  (uses `GL_ARB_gpu_shader_fp64` for storage; transcendentals via
+  emitter-generated `double(log(float(x)))` wrappers).
+
+  Returns `{:ok, {q_chain_bin, p_chain_bin, grad_chain_bin,
+  logp_chain_bin}}` as little-endian f64 binaries — each `q/p/grad`
+  is `K * d * 8` bytes; `logp` is `K * 8` bytes.
+
+  See `docs/EXMC_VULKAN_DOS_AND_DONTS.md` for why this two-variant
+  split exists (GLSL.std.450 has no f64 transcendentals at the Khronos
+  spec layer; boundary-cast is the workaround).
+  """
+  def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # -- Buffer lifecycle ---------------------------------------------------
 
   @doc """
