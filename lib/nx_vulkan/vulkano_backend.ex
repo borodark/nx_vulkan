@@ -776,6 +776,137 @@ defmodule Nx.Vulkan.VulkanoBackend do
     Nx.to_batched(t_bin, opts[:batch_size], opts)
   end
 
+  # --- Round 2: linalg family (8 callbacks, all delegate to Nx.LinAlg) ---
+  # Most return a SINGLE tensor; lu/qr/svd/eigh return a tuple. The tuple
+  # cases skip host_result/2 (which takes a single tensor) and rebuild
+  # each component as a BinaryBackend tensor explicitly.
+
+  @impl true
+  def cholesky(out, tensor) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.LinAlg.cholesky(t_bin)
+    host_result(out, result)
+  end
+
+  @impl true
+  def determinant(out, tensor) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.LinAlg.determinant(t_bin)
+    host_result(out, result)
+  end
+
+  @impl true
+  def solve(out, a, b) do
+    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
+    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
+    result = Nx.LinAlg.solve(a_bin, b_bin)
+    host_result(out, result)
+  end
+
+  @impl true
+  def triangular_solve(out, a, b, opts) do
+    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
+    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
+    result = Nx.LinAlg.triangular_solve(a_bin, b_bin, opts)
+    host_result(out, result)
+  end
+
+  # Tuple-return decompositions — each element rebuilt as BinaryBackend.
+  @impl true
+  def qr({q_out, r_out}, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    {q, r} = Nx.LinAlg.qr(t_bin, opts)
+    {host_result(q_out, q), host_result(r_out, r)}
+  end
+
+  @impl true
+  def lu({p_out, l_out, u_out}, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    {p, l, u} = Nx.LinAlg.lu(t_bin, opts)
+    {host_result(p_out, p), host_result(l_out, l), host_result(u_out, u)}
+  end
+
+  @impl true
+  def svd({u_out, s_out, vt_out}, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    {u, s, vt} = Nx.LinAlg.svd(t_bin, opts)
+    {host_result(u_out, u), host_result(s_out, s), host_result(vt_out, vt)}
+  end
+
+  @impl true
+  def eigh({eigenvals_out, eigenvecs_out}, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    {evals, evecs} = Nx.LinAlg.eigh(t_bin, opts)
+    {host_result(eigenvals_out, evals), host_result(eigenvecs_out, evecs)}
+  end
+
+  # --- Round 2: window family (7 callbacks) ---
+  # All delegate to BinaryBackend's window ops via Nx.<op>.
+
+  @impl true
+  def window_sum(out, tensor, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.window_sum(t_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_product(out, tensor, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.window_product(t_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_max(out, tensor, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.window_max(t_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_min(out, tensor, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.window_min(t_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_reduce(out, tensor, acc, dimensions, opts, fun) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    acc_bin = Nx.backend_transfer(ensure_on_backend(acc), Nx.BinaryBackend)
+    result = Nx.window_reduce(t_bin, acc_bin, dimensions, opts, fun)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_scatter_max(out, tensor, source, init_value, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
+    iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
+    result = Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def window_scatter_min(out, tensor, source, init_value, dimensions, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
+    iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
+    result = Nx.window_scatter_min(t_bin, s_bin, iv_bin, dimensions, opts)
+    host_result(out, result)
+  end
+
+  # --- Round 2: generic reduce (1 callback) ---
+  # User-supplied function runs on BinaryBackend tensors.
+  @impl true
+  def reduce(out, tensor, acc, opts, fun) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    acc_bin = Nx.backend_transfer(ensure_on_backend(acc), Nx.BinaryBackend)
+    result = Nx.reduce(t_bin, acc_bin, opts, fun)
+    host_result(out, result)
+  end
+
   # Indices passed to put_slice can be scalar tensors or integers;
   # normalise to whatever BinaryBackend.put_slice expects.
   defp maybe_transfer_idx(%T{} = t),

@@ -237,6 +237,20 @@ defmodule Nx.Vulkan.ParityTest do
       ]
     },
 
+    # --- Round 2 fixtures: linalg (via Nx.LinAlg module) ---
+    %{
+      callback: :determinant,
+      module: Nx.LinAlg,
+      cases: [
+        %{
+          name: "determinant 4x4 f64",
+          inputs: [{{4, 4}, {:f, 64}, 42}],
+          opts: [],
+          expected_status: :pass_host_fallback
+        }
+      ]
+    },
+
     # --- Intentionally out-of-scope (skip set) ---
     %{
       callback: :fft,
@@ -273,8 +287,9 @@ defmodule Nx.Vulkan.ParityTest do
     @tag :vulkano_only
     test "vulkano: run all non-skip fixtures, write JSON report" do
       results = Enum.flat_map(@fixtures, fn entry ->
+        module = Map.get(entry, :module, Nx)
         Enum.map(entry.cases, fn case_spec ->
-          run_vulkano_case(entry.callback, case_spec)
+          run_vulkano_case(module, entry.callback, case_spec)
         end)
       end)
 
@@ -300,8 +315,9 @@ defmodule Nx.Vulkan.ParityTest do
     test "parity: run all non-skip fixtures against EXLA reference (super-io only)" do
       if exla_available?() do
         results = Enum.flat_map(@fixtures, fn entry ->
+          module = Map.get(entry, :module, Nx)
           Enum.map(entry.cases, fn case_spec ->
-            run_parity_case(entry.callback, case_spec)
+            run_parity_case(module, entry.callback, case_spec)
           end)
         end)
 
@@ -322,17 +338,17 @@ defmodule Nx.Vulkan.ParityTest do
 
   # --- Helpers ---
 
-  defp run_vulkano_case(callback, case_spec) do
+  defp run_vulkano_case(module, callback, case_spec) do
     inputs = Enum.map(case_spec.inputs, &generate_tensor(&1, VulkanoBackend))
-    apply_and_capture(callback, inputs, case_spec)
+    apply_and_capture(module, callback, inputs, case_spec)
   end
 
-  defp run_parity_case(callback, case_spec) do
+  defp run_parity_case(module, callback, case_spec) do
     inputs_exla = Enum.map(case_spec.inputs, &generate_tensor(&1, EXLA.Backend))
     inputs_vulk = Enum.map(case_spec.inputs, &generate_tensor(&1, VulkanoBackend))
 
-    {exla_status, exla_result} = safe_apply(callback, inputs_exla, case_spec.opts)
-    {vulk_status, vulk_result} = safe_apply(callback, inputs_vulk, case_spec.opts)
+    {exla_status, exla_result} = safe_apply(module, callback, inputs_exla, case_spec.opts)
+    {vulk_status, vulk_result} = safe_apply(module, callback, inputs_vulk, case_spec.opts)
 
     actual_status =
       cond do
@@ -355,8 +371,8 @@ defmodule Nx.Vulkan.ParityTest do
     }
   end
 
-  defp apply_and_capture(callback, inputs, case_spec) do
-    {status, result} = safe_apply(callback, inputs, case_spec.opts)
+  defp apply_and_capture(module, callback, inputs, case_spec) do
+    {status, result} = safe_apply(module, callback, inputs, case_spec.opts)
 
     actual_status =
       cond do
@@ -375,9 +391,9 @@ defmodule Nx.Vulkan.ParityTest do
     }
   end
 
-  defp safe_apply(callback, inputs, opts) do
+  defp safe_apply(module, callback, inputs, opts) do
     try do
-      result = apply(Nx, callback, inputs ++ wrap_opts(opts))
+      result = apply(module, callback, inputs ++ wrap_opts(opts))
       {:ok, result}
     rescue
       e -> {:error, Exception.message(e)}
