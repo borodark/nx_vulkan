@@ -652,6 +652,130 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
+  # --- Tier 1 parity batch (2026-05-26) — see docs/NX_PARITY_RESEARCH.md ---
+  # Each implements the Nx.Backend callback via Nx.BinaryBackend (download,
+  # invoke Nx.<op>, return on BinaryBackend per Tier 1 contract). No
+  # GPU acceleration yet; can be promoted to compute shaders later when
+  # profiling justifies (top candidates per family in research doc).
+
+  # all_close: pairwise tolerance check. Returns a 0-arity boolean tensor.
+  @impl true
+  def all_close(out, a, b, opts) do
+    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
+    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
+    result = Nx.all_close(a_bin, b_bin, opts)
+    host_result(out, result)
+  end
+
+  # product: multiplicative reduction. Same shape as sum but with *.
+  @impl true
+  def product(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.product(t_bin, opts)
+    host_result(out, result)
+  end
+
+  # logical_not: elementwise boolean inversion. Returns u8 tensor.
+  @impl true
+  def logical_not(out, tensor) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.logical_not(t_bin)
+    host_result(out, result)
+  end
+
+  # reverse: reverse along given axes. Composes from slice in some
+  # cases but a direct callback handles general patterns.
+  @impl true
+  def reverse(out, tensor, axes) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.reverse(t_bin, axes: axes)
+    host_result(out, result)
+  end
+
+  # cumulative_max / cumulative_min / cumulative_product: prefix scans.
+  # cumulative_sum already passes via Nx composition; the others need
+  # explicit callbacks.
+  @impl true
+  def cumulative_max(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.cumulative_max(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def cumulative_min(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.cumulative_min(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def cumulative_product(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.cumulative_product(t_bin, opts)
+    host_result(out, result)
+  end
+
+  # sort / argsort / top_k / take_along_axis — sort family
+  @impl true
+  def sort(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.sort(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def argsort(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.argsort(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def top_k(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.top_k(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def take_along_axis(out, tensor, indices, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
+    result = Nx.take_along_axis(t_bin, i_bin, opts)
+    host_result(out, result)
+  end
+
+  # all / any — boolean reductions
+  @impl true
+  def all(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.all(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def any(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.any(t_bin, opts)
+    host_result(out, result)
+  end
+
+  # bitcast: reinterpret bytes as different type without conversion
+  @impl true
+  def bitcast(out, tensor) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.bitcast(t_bin, out.type)
+    host_result(out, result)
+  end
+
+  # to_batched: split leading axis into chunks. Returns a stream of tensors.
+  @impl true
+  def to_batched(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    Nx.to_batched(t_bin, opts[:batch_size], opts)
+  end
+
   # Indices passed to put_slice can be scalar tensors or integers;
   # normalise to whatever BinaryBackend.put_slice expects.
   defp maybe_transfer_idx(%T{} = t),

@@ -156,7 +156,53 @@ defmodule Nx.Vulkan.ParityTest do
       ]
     },
 
-    # --- Future Tier 1 batches (skipped until implementations land) ---
+    # --- Tier 1 round 1 (2026-05-26) — explicit host-fallback impls ---
+    %{
+      callback: :cumulative_max,
+      cases: [
+        %{
+          name: "cumulative max f64",
+          inputs: [{{8}, {:f, 64}, 42}],
+          opts: [],
+          expected_status: :pass_host_fallback
+        }
+      ]
+    },
+    %{
+      callback: :cumulative_min,
+      cases: [
+        %{
+          name: "cumulative min f64",
+          inputs: [{{8}, {:f, 64}, 42}],
+          opts: [],
+          expected_status: :pass_host_fallback
+        }
+      ]
+    },
+    %{
+      callback: :cumulative_product,
+      cases: [
+        %{
+          name: "cumulative product f32",
+          inputs: [{{6}, {:f, 32}, 42}],
+          opts: [],
+          expected_status: :pass_host_fallback
+        }
+      ]
+    },
+    %{
+      callback: :logical_not,
+      cases: [
+        %{
+          name: "boolean negation",
+          inputs: [{{8}, {:u, 8}, 42}],
+          opts: [],
+          expected_status: :pass_host_fallback
+        }
+      ]
+    },
+
+    # --- Sort family (composes today; promote to pass after explicit impl lands) ---
     %{
       callback: :sort,
       cases: [
@@ -164,7 +210,7 @@ defmodule Nx.Vulkan.ParityTest do
           name: "sort 100 f32 values",
           inputs: [{{100}, {:f, 32}, 42}],
           opts: [],
-          expected_status: :skip_unimplemented
+          expected_status: :pass_host_fallback
         }
       ]
     },
@@ -175,7 +221,7 @@ defmodule Nx.Vulkan.ParityTest do
           name: "argsort 100 f32 values",
           inputs: [{{100}, {:f, 32}, 42}],
           opts: [],
-          expected_status: :skip_unimplemented
+          expected_status: :pass_host_fallback
         }
       ]
     },
@@ -186,7 +232,7 @@ defmodule Nx.Vulkan.ParityTest do
           name: "reverse along axis 0",
           inputs: [{{10}, {:s, 32}, 42}],
           opts: [axes: [0]],
-          expected_status: :skip_unimplemented
+          expected_status: :pass_host_fallback
         }
       ]
     },
