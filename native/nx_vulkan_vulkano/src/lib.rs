@@ -303,6 +303,38 @@ struct PushBlockF64 {
     eps: f64,
 }
 
+// Task #154: batched multi-instrument push block. Layout matches Phase 1
+// f32 batched shader template (see exmc multi_rv_custom_spec.ex
+// @batched_template). 20-byte header. Prior-param floats follow.
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushBlockBatch {
+    k_steps: u32,
+    n_obs: u32,
+    d: u32,
+    n_instances: u32,
+    eps: f32,
+}
+
+fn parse_push_block_batch(bytes: &[u8]) -> Result<PushBlockBatch, &'static str> {
+    if bytes.len() < 20 {
+        return Err("push block (batch) must be >= 20 bytes");
+    }
+    let u32_at = |off: usize| {
+        u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    let f32_at = |off: usize| {
+        f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    Ok(PushBlockBatch {
+        k_steps: u32_at(0),
+        n_obs: u32_at(4),
+        d: u32_at(8),
+        n_instances: u32_at(12),
+        eps: f32_at(16),
+    })
+}
+
 fn parse_push_block_f64(bytes: &[u8]) -> Result<PushBlockF64, &'static str> {
     if bytes.len() < 24 {
         return Err("push block (f64) must be >= 24 bytes");
@@ -663,6 +695,167 @@ fn leapfrog_chain_synth_f64<'a>(
             .push_constants(layout.clone(), 0, push_block)
             .map_err(|e| format!("push_constants: {e}"))?
             .dispatch([1, 1, 1])
+            .map_err(|e| format!("dispatch: {e}"))?;
+
+        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+
+        let future = sync::now(context.device.clone())
+            .then_execute(context.queue.clone(), cmd_buf)
+            .map_err(|e| format!("then_execute: {e}"))?
+            .then_signal_fence_and_flush()
+            .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+
+        future.wait(None).map_err(|e| format!("wait: {e}"))?;
+
+        Ok((
+            download_buffer(q_chain_buf)?,
+            download_buffer(p_chain_buf)?,
+            download_buffer(grad_chain_buf)?,
+            download_buffer(logp_chain_buf)?,
+        ))
+    })();
+
+    match result {
+        Ok((q, p, g, l)) => {
+            let q_bin = bytes_to_nif_binary(env, &q);
+            let p_bin = bytes_to_nif_binary(env, &p);
+            let g_bin = bytes_to_nif_binary(env, &g);
+            let l_bin = bytes_to_nif_binary(env, &l);
+            Ok((atoms::ok(), (q_bin, p_bin, g_bin, l_bin)).encode(env))
+        }
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Task #154 — batched multi-instrument leapfrog dispatch.
+///
+/// Mirrors leapfrog_chain_synth (f32 single-instance) but:
+/// - Push block includes n_instances (PushBlockBatch — 20 bytes header)
+/// - Input buffers carry N concatenated instances (qs: N*d*4, etc.)
+/// - SPV must be the batched f32 shader (from MultiRvCustomSpec.render_batched/1)
+/// - Dispatches with [n_instances, 1, 1] — one workgroup per instance
+/// - Output buffers carry N concatenated chain outputs
+///
+/// Returns {q_chain_bin, p_chain_bin, grad_chain_bin, logp_chain_bin}
+/// as little-endian f32 binaries:
+///   q/p/grad: n_instances * K * d * 4 bytes
+///   logp:    n_instances * K * 4 bytes
+#[rustler::nif(schedule = "DirtyIo")]
+fn leapfrog_chain_synth_batch<'a>(
+    env: Env<'a>,
+    q_init: Binary<'a>,
+    p_init: Binary<'a>,
+    extras: Binary<'a>,
+    push: Binary<'a>,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.len() != p_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+    if push.len() == 0 || push.len() > 128 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    let push_block = match parse_push_block_batch(push.as_slice()) {
+        Ok(p) => p,
+        Err(_) => return Ok((atoms::error(), atoms::bad_input()).encode(env)),
+    };
+
+    let d = push_block.d as usize;
+    let n_instances = push_block.n_instances as usize;
+    if n_instances == 0 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+    // f32 = 4 bytes; per-instance chain: K * d * 4; total: n_instances * K * d * 4
+    let chain_bytes = n_instances * (k as usize) * d * 4;
+    let logp_bytes = n_instances * (k as usize) * 4;
+
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env));
+        }
+    };
+
+    let result = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
+
+        let q_buf = upload_buffer(
+            context.mem_allocator.clone(),
+            q_init.as_slice(),
+            BufferUsage::STORAGE_BUFFER,
+        )?;
+        let p_buf = upload_buffer(
+            context.mem_allocator.clone(),
+            p_init.as_slice(),
+            BufferUsage::STORAGE_BUFFER,
+        )?;
+        let extras_buf = upload_buffer(
+            context.mem_allocator.clone(),
+            extras.as_slice(),
+            BufferUsage::STORAGE_BUFFER,
+        )?;
+
+        let q_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let p_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let grad_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let logp_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            logp_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, q_buf.clone()),
+                WriteDescriptorSet::buffer(1, p_buf.clone()),
+                WriteDescriptorSet::buffer(2, extras_buf.clone()),
+                WriteDescriptorSet::buffer(3, q_chain_buf.clone()),
+                WriteDescriptorSet::buffer(4, p_chain_buf.clone()),
+                WriteDescriptorSet::buffer(5, grad_chain_buf.clone()),
+                WriteDescriptorSet::buffer(6, logp_chain_buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let mut cmd = AutoCommandBufferBuilder::primary(
+            &context.cmd_allocator,
+            context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .map_err(|e| format!("cmd builder: {e}"))?;
+
+        // KEY DIFFERENCE vs single-instance: dispatch [n_instances, 1, 1]
+        // — each workgroup handles one instance, scaling compute with the
+        // batch size while dispatch overhead stays constant.
+        cmd.bind_pipeline_compute(pipeline.clone())
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(layout.clone(), 0, push_block)
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch([n_instances as u32, 1, 1])
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
@@ -1351,6 +1544,7 @@ rustler::init!(
     [
         leapfrog_chain_synth,
         leapfrog_chain_synth_f64,
+        leapfrog_chain_synth_batch,
         buf_upload,
         buf_alloc,
         buf_download,

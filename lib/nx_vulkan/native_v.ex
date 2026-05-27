@@ -66,6 +66,34 @@ defmodule Nx.Vulkan.NativeV do
   def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Task #154 — batched multi-instrument leapfrog dispatch (Phase 2).
+
+  Sibling of `leapfrog_chain_synth/6` (single instance, f32). Inputs are
+  N-instance concatenations packed as little-endian f32:
+
+  - `q_init`: `n_instances * d * 4` bytes (instance-contiguous)
+  - `p_init`: same shape as q_init
+  - `extras`: `n_instances * (n_obs + d) * 4` bytes (per-instance
+    `obs[0..n_obs-1]` followed by `inv_mass[0..d-1]`)
+  - `push`: 20-byte header (K, n_obs, d, n_instances, eps) + prior floats
+  - `k`: leapfrog steps per dispatch (matches push.K)
+  - `spv_path`: path to the batched SPV from
+    `MultiRvCustomSpec.render_batched/1`
+
+  Dispatched as `[n_instances, 1, 1]` workgroups — one per instance,
+  256 threads each. Per-instance shared memory naturally isolated.
+
+  Returns `{:ok, {q_chain_bin, p_chain_bin, grad_chain_bin,
+  logp_chain_bin}}` as f32 binaries:
+  - q/p/grad: `n_instances * K * d * 4` bytes
+  - logp: `n_instances * K * 4` bytes
+
+  See `exmc/docs/PLAN_BATCHED_INSTRUMENT_DISPATCH.md` for the full design.
+  """
+  def leapfrog_chain_synth_batch(_q, _p, _extras, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # -- Buffer lifecycle ---------------------------------------------------
 
   @doc """
