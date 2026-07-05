@@ -95,6 +95,18 @@ defmodule Nx.Vulkan.ParityTest do
           inputs: [{{8, 8}, {:f, 32}, 42}, {{8, 8}, {:f, 32}, 7}],
           opts: [],
           expected_status: :pass
+        },
+        %{
+          name: "8x8 matmul f64",
+          inputs: [{{8, 8}, {:f, 64}, 42}, {{8, 8}, {:f, 64}, 7}],
+          opts: [],
+          expected_status: :pass
+        },
+        %{
+          name: "16x32 @ 32x8 matmul f64",
+          inputs: [{{16, 32}, {:f, 64}, 99}, {{32, 8}, {:f, 64}, 13}],
+          opts: [],
+          expected_status: :pass
         }
       ]
     },
