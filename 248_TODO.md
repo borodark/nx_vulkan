@@ -24,7 +24,40 @@
 
 ---
 
-# mac-248 — R1: replay the fair race on FreeBSD (**DEFERRED — pick up after f64 matmul**)
+# mac-248 — QUEUED (after f64 matmul): D88 Stage 2 prereq
+
+> **Handoff 2026-07-05**: `pymc/exmc/research/PLAN_D88_STAGE_2.md`
+> defines Stage 2. The blocker before Stage 2 can start is a single
+> **regime portability check on FreeBSD**:
+>
+> Run the regime model end-to-end on this host under the default f64
+> Vulkan settings (no `force_precision` override, no `ncp: true`).
+> Compare posterior means/sds for the 8 free RVs (`mu_trend`,
+> `sigma_trend`, `theta_mr`, `mu_mr`, `sigma_mr`, `sigma_vol`,
+> `logit_w1`, `logit_w2`) against a fresh super-io EXLA reference at
+> the same seed and same warmup/samples.
+>
+> The equivalent check on super-io ran alongside this handoff — its
+> log is at `pymc/exmc/research/stage2_prereq_super-io.log` (on
+> super-io) and gives the reference numbers.
+>
+> Tolerance: per-RV mean diff < 0.25 × reference posterior sd; sd
+> ratio between 0.667 and 1.5. Same criteria as
+> `PLAN_D88_STAGE_2.md` "Success criteria" section.
+>
+> Report a per-RV table in `pymc/exmc/research/stage2_prereq_mac248.md`
+> and, if bit-exact-ish (< 1e-6 relative), a one-line PASS commit on
+> `pymc/main`. If not, commit the table with a FAIL verdict and stop
+> — do not proceed to any Stage 2 trial-loop work until the
+> divergence is understood.
+>
+> **Prerequisite**: f64 matmul above must land first (or at least
+> the Rust NIF + backend routing so the code compiles). If matmul
+> isn't ready, this task waits — no partial start.
+
+---
+
+# mac-248 — R1: replay the fair race on FreeBSD (**DEFERRED — pick up after f64 matmul + Stage 2 prereq**)
 
 > **Status update 2026-05-04**: R1 is now **READY**. The blocking
 > multivariate-IR bug was a missing `Nx.sum` on free-RV per-element
