@@ -2,21 +2,19 @@ defmodule Nx.Vulkan.Fast do
   @moduledoc """
   Named fused kernels for MCMC hot paths.
 
-  Each function emits an `Nx.Defn.Expr.optional/3` IR node whose name
-  matches a callback on `Nx.Vulkan.Backend`. Under Nx.Vulkan the
-  evaluator dispatches one fused shader; under any other backend the
-  defn fallback runs and produces a mathematically-equivalent result.
-  Same pattern as `Emily.Fast`.
+  Each function is a composition of standard Nx ops that produces
+  a mathematically-equivalent result to the fused shader that
+  `Nx.Vulkan.Backend` would dispatch. Cross-backend correctness
+  is guaranteed (EXLA, BinaryBackend, EMLX, VulkanoBackend).
 
-  ## Why this exists
+  ## Note on Nx 0.12 migration
 
-  We previously built `Nx.Vulkan.Compiler` to walk the IR and detect
-  fusable patterns automatically. That works for narrow cases but
-  doesn't scale: each new pattern is more compiler code, false
-  negatives are silent, and the matched shapes drift from real exmc
-  usage. Naming the kernels at call sites makes the intent explicit
-  and the dispatch deterministic. The fallback ensures cross-backend
-  correctness (EXLA, BinaryBackend, EMLX).
+  Prior to Nx 0.12, each function emitted `Nx.Defn.Expr.optional/3`
+  IR nodes for backend-specific fused dispatch. That API was removed
+  in Nx 0.12. The functions now call the fallback Nx ops directly.
+  The VulkanoBackend's per-op dispatch is fast enough that the
+  fused-kernel optimization is not critical — the chain shader path
+  (where performance matters) bypasses this module entirely.
 
   ## How to use
 
@@ -27,24 +25,7 @@ defmodule Nx.Vulkan.Fast do
         p_new = Nx.Vulkan.Fast.momentum_step(p, eps, grad)
         {q_new, p_new}
       end
-
-  Under Nx.Vulkan.Backend each Fast call collapses to one
-  `Nx.Vulkan.fused_chain_4` dispatch (single shader). Under any other
-  backend the defn fallback runs the composed primitives.
-
-  ## Adding kernels
-
-  Each kernel is two functions:
-
-    1. The public entry — emits `Nx.Defn.Expr.optional/3`.
-    2. A private `_fallback` — defn-style composed Nx ops.
-
-  Plus one matching callback in `Nx.Vulkan.Backend`. Total ~30 lines
-  per kernel; compare to ~100 lines + tests for an IR-detector
-  pattern.
   """
-
-  alias Nx.Defn.Expr
 
   @doc """
   Position update: `q + eps * p`. The dominant elementwise body in
@@ -60,10 +41,6 @@ defmodule Nx.Vulkan.Fast do
   """
   @spec leapfrog_position(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def leapfrog_position(q, eps, p) do
-    Expr.optional(:fast_leapfrog_position, [q, eps, p, []], &leapfrog_position_fallback/4)
-  end
-
-  defp leapfrog_position_fallback(q, eps, p, _opts) do
     Nx.add(q, Nx.multiply(eps, p))
   end
 
@@ -74,14 +51,6 @@ defmodule Nx.Vulkan.Fast do
   """
   @spec leapfrog_momentum_half(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def leapfrog_momentum_half(p, half_eps, grad) do
-    Expr.optional(
-      :fast_leapfrog_momentum_half,
-      [p, half_eps, grad, []],
-      &leapfrog_momentum_half_fallback/4
-    )
-  end
-
-  defp leapfrog_momentum_half_fallback(p, half_eps, grad, _opts) do
     Nx.add(p, Nx.multiply(half_eps, grad))
   end
 
@@ -91,10 +60,6 @@ defmodule Nx.Vulkan.Fast do
   """
   @spec momentum_step(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
   def momentum_step(p, eps, grad) do
-    Expr.optional(:fast_momentum_step, [p, eps, grad, []], &momentum_step_fallback/4)
-  end
-
-  defp momentum_step_fallback(p, eps, grad, _opts) do
     Nx.add(p, Nx.multiply(eps, grad))
   end
 
@@ -106,10 +71,6 @@ defmodule Nx.Vulkan.Fast do
   """
   @spec inv_mass_apply(Nx.t(), Nx.t()) :: Nx.t()
   def inv_mass_apply(p, inv_mass) do
-    Expr.optional(:fast_inv_mass_apply, [p, inv_mass, []], &inv_mass_apply_fallback/3)
-  end
-
-  defp inv_mass_apply_fallback(p, inv_mass, _opts) do
     Nx.multiply(p, inv_mass)
   end
 
@@ -117,18 +78,9 @@ defmodule Nx.Vulkan.Fast do
   Kinetic energy: `0.5 * sum(p² * inv_mass)`. Reduces to a scalar.
   Used in NUTS for the joint log-probability:
   `joint_logp = log_prob - kinetic_energy(p, inv_mass)`.
-
-  Under Nx.Vulkan dispatches `kinetic_energy.spv` (one shader: square +
-  multiply + per-workgroup reduce + 0.5 multiplier baked in). The
-  shader produces partial sums; the backend callback sums them on the
-  host and returns a scalar.
   """
   @spec kinetic_energy(Nx.t(), Nx.t()) :: Nx.t()
   def kinetic_energy(p, inv_mass) do
-    Expr.optional(:fast_kinetic_energy, [p, inv_mass, []], &kinetic_energy_fallback/3)
-  end
-
-  defp kinetic_energy_fallback(p, inv_mass, _opts) do
     p
     |> Nx.pow(2)
     |> Nx.multiply(inv_mass)
@@ -139,18 +91,11 @@ defmodule Nx.Vulkan.Fast do
   @doc """
   Normal log-density: `-0.5*((x-mu)/sigma)² - log(sigma) - 0.5*log(2π)`.
   Output shape matches `x`. The MCMC distribution-density hot path.
-
-  Under Nx.Vulkan dispatches `normal_logpdf.spv` (one fused shader)
-  instead of the five separate Nx ops the fallback emits.
   """
-  @spec normal_logpdf(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
-  def normal_logpdf(x, mu, sigma) do
-    Expr.optional(:fast_normal_logpdf, [x, mu, sigma, []], &normal_logpdf_fallback/4)
-  end
-
   @log_sqrt_2pi 0.91893853320467274178
 
-  defp normal_logpdf_fallback(x, mu, sigma, _opts) do
+  @spec normal_logpdf(Nx.t(), Nx.t(), Nx.t()) :: Nx.t()
+  def normal_logpdf(x, mu, sigma) do
     z = Nx.divide(Nx.subtract(x, mu), sigma)
     z2 = Nx.multiply(z, z)
     log_sigma = Nx.log(sigma)

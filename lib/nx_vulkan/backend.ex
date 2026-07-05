@@ -1653,6 +1653,23 @@ defmodule Nx.Vulkan.Backend do
     shape |> Tuple.to_list() |> Enum.reduce(1, &*/2)
   end
 
+  # ---------------------------------------------------------------- block
+
+  # block/4 — Nx 0.12 dispatches LinAlg ops (determinant, cholesky, etc.)
+  # via block structs. Host-fallback: transfer inputs to BinaryBackend,
+  # evaluate there, return the result (stays on BinaryBackend per Tier 1).
+  @impl true
+  def block(out, block_def, inputs, opts) do
+    inputs_bin =
+      cond do
+        is_list(inputs) -> Enum.map(inputs, &transfer_arg/1)
+        is_tuple(inputs) -> inputs |> Tuple.to_list() |> Enum.map(&transfer_arg/1) |> List.to_tuple()
+        true -> transfer_arg(inputs)
+      end
+
+    Nx.BinaryBackend.block(out, block_def, inputs_bin, opts)
+  end
+
   # ---------------------------------------------------------------- inspect
 
   @impl true
