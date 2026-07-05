@@ -1,16 +1,52 @@
-# mac-248 — NEXT: D88 Stage 2 regime portability check on FreeBSD
+# mac-248 — CURRENT: Nx 0.12.1 upgrade verification
 
-> **Status 2026-07-05**: `feat/f64-matmul` merged to main as `423d258`.
-> Bit-exact on 3×4, 3.7e-11 rel diff at 512×512, both mac hosts +
-> super-io. 236/236 backend tests green on all three hosts. Existing
-> `matmul` NIF turned out dtype-agnostic — Surface 2 was a no-op.
+> **Handoff 2026-07-05, ~19:20 local**: super-io bumped Nx from
+> 0.10.0 → 0.12.1 on two branches — pull and run the full test
+> matrix on this host to catch any FreeBSD-specific regressions
+> before the branches merge to main.
 >
-> The Stage 2 regime portability check (previously "queued after
-> matmul") is now the current task. See the section below.
+> Branches:
+> - `nx_vulkan/feat/nx-0.12-compat` — mix.exs constraint relaxed
+>   from `{:nx, "~> 0.10"}` to `{:nx, "~> 0.10 or ~> 0.11 or ~> 0.12"}`.
+>   No code changes.
+> - `pymc/feat/nx-0.12` (exmc side) — nx bumped to `~> 0.12.1` +
+>   fixes `MassMatrix.finalize_dense` default-backend leak
+>   (`Nx.LinAlg.cholesky` and `Nx.take_diagonal` were creating
+>   scratch tensors on the Vulkano default, crashing under
+>   BinaryBackend cov). Wrapped body in `Nx.with_default_backend
+>   (Nx.BinaryBackend, fn -> ... end)`.
+>
+> **Already confirmed here** (`~/exmc/exmc` on `feat/nx-0.12`,
+> `~/nx_vulkan` on `feat/nx-0.12-compat`):
+> - Both repos compile clean on Nx 0.12.1.
+> - `MassMatrix.finalize_dense` smoke test (d=3 dense cov) returns
+>   `cov` + `chol_cov` on `Nx.BinaryBackend` with no crash. GT 750M.
+>
+> **What's left**:
+> 1. `mix test` in nx_vulkan on `feat/nx-0.12-compat` — expect
+>    236/236 pass, same as f64-matmul baseline.
+> 2. `mix test` in exmc on `feat/nx-0.12` — expect no new failures
+>    vs the pre-upgrade baseline. Any regression class:
+>    - Nx.take_diagonal / Nx.gather anywhere else in exmc that also
+>      leaks the default backend (grep for `Nx.LinAlg`, `Nx.eye`,
+>      `Nx.iota` without `backend:` under a Vulkano default). The
+>      mass matrix leak may not be alone.
+>    - Nx 0.12 slice/scalar fix (0.12 CHANGELOG) may make lesson
+>      #53's JIT workaround obsolete — no action needed, note it if
+>      spotted.
+> 3. Report: table `mac-248 nx_vulkan tests X/Y | exmc tests A/B`
+>    committed to `nx_vulkan/research/nx_0_12_verification.md`, or
+>    push results back to super-io via the standard workflow.
+>
+> **Then**: proceed to the "D88 Stage 2 regime portability check"
+> section below on the Nx 0.12 branches (not on main). The point
+> of the Stage 2 prereq is a portability check on the current
+> stack — running it on Nx 0.10 while we're actively moving to
+> 0.12 would just get re-run.
 
 ---
 
-# mac-248 — CURRENT: D88 Stage 2 regime portability check
+# mac-248 — QUEUED (after Nx 0.12 verification): D88 Stage 2 regime portability check
 
 > **Handoff 2026-07-05**: `pymc/exmc/research/PLAN_D88_STAGE_2.md`
 > defines Stage 2. The blocker before Stage 2 can start is a single
