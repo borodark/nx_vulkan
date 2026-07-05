@@ -231,6 +231,43 @@ defmodule Nx.Vulkan.VulkanoBackendTest do
     end
   end
 
+  describe "matmul (dot rank-2 f64 fast path)" do
+    test "{3,4} @ {4,2} — exact for small dims" do
+      a = v(Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], type: :f64, backend: Nx.BinaryBackend))
+      b = v(Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]], type: :f64, backend: Nx.BinaryBackend))
+      r = Nx.dot(a, b)
+      expected = Nx.dot(
+        Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], type: :f64),
+        Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]], type: :f64)
+      )
+      assert Nx.to_flat_list(r) == Nx.to_flat_list(expected)
+      assert Nx.shape(r) == {3, 2}
+      assert Nx.type(r) == {:f, 64}
+    end
+
+    test "identity matmul f64" do
+      a = v(Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], type: :f64, backend: Nx.BinaryBackend))
+      i = v(Nx.eye(3, type: :f64, backend: Nx.BinaryBackend))
+      r = Nx.dot(a, i)
+      assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    end
+
+    @tag timeout: 180_000
+    test "64x64 f64 accumulator precision" do
+      key = Nx.Random.key(42)
+      {a, key} = Nx.Random.normal(key, shape: {64, 64}, type: :f64)
+      {b, _} = Nx.Random.normal(key, shape: {64, 64}, type: :f64)
+      a_vk = v(a)
+      b_vk = v(b)
+      result_vk = Nx.dot(a_vk, b_vk) |> Nx.backend_transfer(Nx.BinaryBackend)
+      result_cpu = Nx.dot(a, b)
+      diff = Nx.subtract(result_vk, result_cpu)
+      max_abs = Nx.to_number(Nx.reduce_max(Nx.abs(diff)))
+      # f64 accumulation over 64 elements: expect max abs diff < 1e-12
+      assert max_abs < 1.0e-12, "64x64 f64 matmul max abs diff too large: #{max_abs}"
+    end
+  end
+
   describe "mixed-backend composition (Tier 1 makes this realistic)" do
     test "vulkano + binary = follow-up op succeeds" do
       # After Tier 1, host-fallback ops return BinaryBackend tensors.
