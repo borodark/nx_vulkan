@@ -43,7 +43,29 @@
 
 ---
 
-# mac-248 — R1: replay the fair race on FreeBSD (**DEFERRED — pick up after f64 matmul + Stage 2 prereq**)
+# mac-248 — QUEUED (after Stage 2 prereq): f64 chain shader surface
+
+> **Handoff 2026-07-05**: `research/PLAN_F64_CHAIN_SHADER.md` is the
+> next task after the Stage 2 prereq clears. Bigger than matmul —
+> 5 spirit-family f64 SPVs (exponential, studentt, cauchy,
+> halfnormal, weibull) + `log_d`/`exp_d` boundary-cast helpers +
+> Rust NIFs + Elixir wrappers + dispatch routing + synth codegen.
+> Estimated ~1.5 days at the matmul work-rate.
+>
+> Key finding from the survey: `leapfrog_chain_normal_f64.spv` +
+> NIF (`native.ex:168`) + wrapper (`nx_vulkan.ex:702`) already
+> shipped, unused. And `leapfrog_chain_synth_f64` (vulkano,
+> `src/lib.rs:590`) is fully wired but never called. The plan
+> finishes the matrix.
+>
+> Prerequisite: Stage 2 prereq above passes so the trial keeps
+> making forward progress before we take on the bigger surface.
+> Chain shader work does NOT block D88 Stage 2 (regime is
+> Custom-likelihood, doesn't hit this path).
+
+---
+
+# mac-248 — R1: replay the fair race on FreeBSD (**DEFERRED — pick up after chain shader**)
 
 > **Status update 2026-05-04**: R1 is now **READY**. The blocking
 > multivariate-IR bug was a missing `Nx.sum` on free-RV per-element
