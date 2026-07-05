@@ -917,21 +917,22 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- linalg
 
   @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
+  @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
 
   # Dot product (matmul) — Nx callback signature:
   #   dot(out, a, contracting_axes_a, batched_axes_a,
   #            b, contracting_axes_b, batched_axes_b)
   #
   # Fast path: rank-2 × rank-2, contracting [1] of a vs [0] of b
-  # (standard matmul A·B). f32 only — matmul.spv has no f64 variant
-  # in priv/shaders/ yet. Everything else routes through BinaryBackend.
+  # (standard matmul A·B). f32 and f64 supported via separate SPVs.
+  # Everything else routes through BinaryBackend.
   @impl true
   def dot(%T{shape: out_shape, type: type} = out, a, axes_a, batched_a, b, axes_b, batched_b) do
     a_v = ensure_on_backend(a)
     b_v = ensure_on_backend(b)
 
     fast_path =
-      type == {:f, 32} and a_v.type == {:f, 32} and b_v.type == {:f, 32} and
+      type in [{:f, 32}, {:f, 64}] and a_v.type == type and b_v.type == type and
         tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
         axes_a == [1] and axes_b == [0] and
         batched_a == [] and batched_b == []
@@ -946,7 +947,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
       out_bytes = m * n * element_bytes(type)
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, @matmul_spv)
+      spv = if type == {:f, 64}, do: @matmul_f64_spv, else: @matmul_spv
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else
