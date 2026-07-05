@@ -1,4 +1,30 @@
-# mac-248 — R1: replay the fair race on FreeBSD (**READY — multivariate IR fix landed**)
+# mac-248 — NEXT: f64 matmul in nx_vulkan (queued 2026-07-05)
+
+> **Handoff 2026-07-05**: `research/PLAN_F64_MATMUL.md` is the current
+> task. Three surfaces: (1) `glsl/matmul_f64.comp` written and
+> compiled via glslangValidator on this host; (2) Rust NIF `matmul_f64`
+> mirroring `matmul` at `native/nx_vulkan_vulkano/src/lib.rs:1624`;
+> (3) VulkanoBackend `dot/7` fast_path extended to `{:f, 64}`.
+>
+> Prerequisites: none — `shader_float64` is confirmed on GT 750M by
+> #177 three-host bit-exact evidence (see
+> `~/exmc/exmc/research/177_grad_diff_findings.md` on this host).
+> Naive path first; tiling is a follow-up if profiling shows need.
+> Commit each surface separately; push to `super-io` remote per the
+> #177 workflow.
+>
+> Report back with a per-host result block matching the format in
+> `177_grad_diff_findings.md` and commit to
+> `nx_vulkan/research/177_grad_diff_findings.md` — or start a fresh
+> `research/f64_matmul_findings.md` if that's cleaner. Your call.
+>
+> **R1 (the fair race replay) is deferred** — matmul is more useful
+> to the FreeBSD fleet plan right now (unblocks matmul-using models
+> post D88 Stage 2). Come back to R1 after matmul lands.
+
+---
+
+# mac-248 — R1: replay the fair race on FreeBSD (**DEFERRED — pick up after f64 matmul**)
 
 > **Status update 2026-05-04**: R1 is now **READY**. The blocking
 > multivariate-IR bug was a missing `Nx.sum` on free-RV per-element
