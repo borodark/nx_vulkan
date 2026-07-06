@@ -1,4 +1,43 @@
-# mac-248 — CURRENT: Nx 0.12.1 upgrade verification
+# mac-248 — NEXT: add log1p/2 + erf/2 host fallbacks to VulkanoBackend
+
+> **Handoff 2026-07-05, ~20:20 local**: super-io's 73-test rerun on
+> the Nx 0.12 branches (post your Expr.optional + block/4 fixes)
+> surfaced two more missing Nx callbacks that VulkanoBackend needs
+> to implement — same pattern as your `block/4` host-fallback in
+> `3a77d9e`:
+>
+> - `VulkanoBackend.log1p/2` — 7 exmc test failures. Nx 0.12
+>   requires it as a Nx.Backend behaviour method. Route to
+>   BinaryBackend the same way `block/4` does.
+> - `VulkanoBackend.erf/2` — 2 exmc test failures. Same fix pattern.
+>
+> Expected commit shape identical to `3a77d9e Nx 0.12 compat:
+> remove Expr.optional, add Backend.block/4`. Push to
+> `super-io/feat/nx-0.12-compat`.
+>
+> Clears 9 of the 73 remaining exmc failures. The other 64 split:
+> - 21 × `BinaryBackend.to_binary/1` (default-backend leak on the
+>   exmc side — super-io is sweeping the Vulkano-default-leak
+>   pattern in Portfolio/MvNormal/Dirichlet/CustomSynth codepaths;
+>   same fix shape as `MassMatrix.finalize_dense`).
+> - 19 × "two incompatible tensor implementations" (Nx 0.12
+>   tightened defn boundary — VulkanoBackend tensors captured as
+>   closures now fail; exmc side sweep).
+> - 13 × `Exmc.SynthUnsupportedError` (still investigating).
+> - 5 × timeouts.
+>
+> After log1p/erf ship, super-io will re-run the exmc suite and
+> report the residual.
+
+---
+
+# mac-248 — DONE: Nx 0.12.1 upgrade verification (Expr.optional + block/4)
+
+> **Status 2026-07-05, ~20:00**: `3a77d9e Nx 0.12 compat: remove
+> Expr.optional, add Backend.block/4` shipped. nx_vulkan tests
+> 84/84 pass on mac-248 GT 750M under Nx 0.12.1. exmc side had
+> 73 remaining failures — see the "NEXT" section above for the
+> log1p/erf increment.
 
 > **Handoff 2026-07-05, ~19:20 local**: super-io bumped Nx from
 > 0.10.0 → 0.12.1 on two branches — pull and run the full test
