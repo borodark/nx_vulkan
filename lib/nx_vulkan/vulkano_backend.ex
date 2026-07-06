@@ -237,6 +237,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
+  # Unary ops without GPU shader support — host fallback only.
+  for op <- [:log1p, :erf, :erfc, :expm1, :cbrt, :rsqrt] do
+    @impl true
+    def unquote(op)(%T{} = out, a) do
+      unary_op_host_fallback(unquote(op), out, ensure_on_backend(a))
+    end
+  end
+
   # ---------------------------------------------------------------- reductions
 
   @reduce_axis_spv Path.expand("../../priv/shaders/reduce_axis.spv", __DIR__)
