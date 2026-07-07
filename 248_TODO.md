@@ -1,4 +1,66 @@
-# mac-248 — NEXT: add log1p/2 + erf/2 host fallbacks to VulkanoBackend
+# mac-248 — NEXT: full Nx 0.12 Backend callback sweep
+
+> **Handoff 2026-07-07, ~00:15 UTC**: super-io integrated your
+> log1p/erf/erfc/expm1/cbrt/rsqrt host fallbacks (commit `ca68b51`,
+> confirmed 236/236 nx_vulkan tests + Dirichlet cleared on the exmc
+> side). Compile warnings on the exmc feat/nx-0.12 branch now list
+> **36 more callbacks** VulkanoBackend still doesn't implement — same
+> class as the 6 you shipped. All can route through BinaryBackend
+> the same way (`Nx.backend_transfer(t, Nx.BinaryBackend) |> apply |>
+> Nx.backend_transfer(target_backend)`).
+>
+> The 36 missing callbacks (from `mix compile --force`):
+>
+> **Trig (11)**: `acos/2 acosh/2 asin/2 asinh/2 atan/2 atanh/2 cos/2
+> cosh/2 sin/2 sinh/2 tan/2`
+>
+> **Bitwise / integer (10)**: `bitwise_and/3 bitwise_not/2 bitwise_or/3
+> bitwise_xor/3 count_leading_zeros/2 left_shift/3 population_count/2
+> quotient/3 remainder/3 right_shift/3`
+>
+> **Logical (3)**: `logical_and/3 logical_or/3 logical_xor/3`
+>
+> **Type / check (3)**: `is_infinity/2 is_nan/2 round/2`
+>
+> **Complex (3)**: `conjugate/2 real/2 imag/2`
+>
+> **Special (1)**: `erf_inv/2`
+>
+> **FFT (2)**: `fft/3 ifft/3` (host-fallback OK; real Vulkan impl is a
+> separate follow-up)
+>
+> **Conv (1)**: `conv/4` (host-fallback OK; real Vulkan impl is a
+> separate follow-up — chain shader team's turf)
+>
+> **Pointer (2)**: `from_pointer/5 to_pointer/2` (host fallback OK,
+> unsafe surface — probably rare to hit)
+>
+> All host fallbacks follow the exact pattern in `3a77d9e`
+> `Backend.block/4`. Suggest one commit per group (trig, bitwise,
+> logical, type-check, complex, special, fft, conv, pointer) so
+> revert blast radius is small if any one hits a subtle issue.
+> Push to `super-io/feat/nx-0.12-compat`.
+>
+> Once this ships, the 5 test timeouts on the exmc side probably
+> also clear — some of those tests are almost certainly hanging
+> in Nx.Defn.Evaluator retrying a missing callback.
+>
+> After this: the D88 Stage 2 regime prereq re-run is still queued
+> (see section below), unblocked once the callback sweep and any
+> straggling exmc failures are handled on super-io.
+
+---
+
+# mac-248 — DONE: log1p/erf host fallbacks (2026-07-06)
+
+> ~~log1p/2 + erf/2 + erfc/2 + expm1/2 + cbrt/2 + rsqrt/2~~ shipped
+> in `ca68b51 Nx 0.12 compat: add log1p/erf/erfc/expm1/cbrt/rsqrt
+> host fallbacks`. Cleared all 7 log1p + 2 erf test failures on
+> super-io (Dirichlet + downstream). Kept below for the record.
+
+---
+
+# mac-248 — HISTORICAL: log1p/2 + erf/2 host fallbacks handoff
 
 > **Handoff 2026-07-05, ~20:20 local**: super-io's 73-test rerun on
 > the Nx 0.12 branches (post your Expr.optional + block/4 fixes)
