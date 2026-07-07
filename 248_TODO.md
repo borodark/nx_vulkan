@@ -1,4 +1,25 @@
-# mac-248 — NEXT: full Nx 0.12 Backend callback sweep
+# mac-248 — NEXT: one straggler — `atan2/3` host fallback
+
+> **Handoff 2026-07-07**: `de4f137` cleared 35 of the 36 flagged
+> callbacks; `atan2/3` (binary: `out, a, b`) got missed. Same
+> host-transfer pattern. Was likely absent from my original list
+> because I greped a cached compile — post-shipment `mix compile
+> --force` on exmc shows just this one. One-line commit.
+>
+> After that: the exmc rerun is running in the background on
+> super-io — I'll report residual failures when it lands.
+
+---
+
+# mac-248 — DONE: full Nx 0.12 Backend callback sweep (2026-07-07)
+
+> ~~All 36 host fallbacks~~ shipped in `de4f137`. Zero "not
+> implemented" warnings for that batch, 84/84 nx_vulkan tests
+> pass. Kept below for reference.
+
+---
+
+# mac-248 — HISTORICAL: full Nx 0.12 Backend callback sweep
 
 > **Handoff 2026-07-07, ~00:15 UTC**: super-io integrated your
 > log1p/erf/erfc/expm1/cbrt/rsqrt host fallbacks (commit `ca68b51`,
