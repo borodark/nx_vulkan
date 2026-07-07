@@ -238,11 +238,83 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # Unary ops without GPU shader support — host fallback only.
-  for op <- [:log1p, :erf, :erfc, :expm1, :cbrt, :rsqrt] do
+  # Nx 0.12 requires all Nx.Backend callbacks to be implemented.
+  @host_fallback_unary_ops [
+    # original batch
+    :log1p, :erf, :erfc, :expm1, :cbrt, :rsqrt,
+    # trig
+    :acos, :acosh, :asin, :asinh, :atan, :atanh,
+    :cos, :cosh, :sin, :sinh, :tan,
+    # type / check
+    :is_infinity, :is_nan, :round,
+    # special
+    :erf_inv,
+    # bitwise unary
+    :bitwise_not, :count_leading_zeros, :population_count,
+    # complex
+    :conjugate, :real, :imag
+  ]
+
+  for op <- @host_fallback_unary_ops do
     @impl true
     def unquote(op)(%T{} = out, a) do
       unary_op_host_fallback(unquote(op), out, ensure_on_backend(a))
     end
+  end
+
+  # Binary ops without GPU shader support — host fallback only.
+  @host_fallback_binary_ops [
+    # bitwise
+    :bitwise_and, :bitwise_or, :bitwise_xor,
+    :left_shift, :right_shift,
+    # integer
+    :quotient, :remainder,
+    # logical
+    :logical_and, :logical_or, :logical_xor
+  ]
+
+  for op <- @host_fallback_binary_ops do
+    @impl true
+    def unquote(op)(%T{} = out, a, b) do
+      a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
+      b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
+      result = apply(Nx, unquote(op), [a_bin, b_bin])
+      host_result(out, result)
+    end
+  end
+
+  # Multi-arg ops — host fallback
+  @impl true
+  def conv(out, inp, kernel, opts) do
+    inp_bin = Nx.backend_transfer(ensure_on_backend(inp), Nx.BinaryBackend)
+    kernel_bin = Nx.backend_transfer(ensure_on_backend(kernel), Nx.BinaryBackend)
+    result = Nx.conv(inp_bin, kernel_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def fft(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.fft(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def ifft(out, tensor, opts) do
+    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+    result = Nx.ifft(t_bin, opts)
+    host_result(out, result)
+  end
+
+  @impl true
+  def from_pointer(out, pointer, backend, offset, opts) do
+    Nx.BinaryBackend.from_pointer(out, pointer, backend, offset, opts)
+  end
+
+  @impl true
+  def to_pointer(%T{} = tensor, opts) do
+    t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+    Nx.BinaryBackend.to_pointer(t_bin, opts)
   end
 
   # ---------------------------------------------------------------- reductions
