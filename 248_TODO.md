@@ -1,4 +1,51 @@
-# mac-248 — NEXT: one straggler — `atan2/3` host fallback
+# mac-248 — NEXT: BinaryBackend-vs-Vulkan fair race on Nx 0.12
+
+> **Handoff 2026-07-07**: super-io is running its Vulkan-only race
+> against the pre-Nx-0.12 baseline (`bench/fair_race_results_linux.md`
+> "Vulkan" column) right now on `feat/nx-0.12`. mac-248's analogue —
+> since EXLA has never been on FreeBSD — is a
+> **BinaryBackend-vs-Vulkan** race using the same 7-cell fixture from
+> `bench/fair_race.exs`.
+>
+> Goal: quantify what the Nx 0.12 upgrade + your 42 host-fallback
+> callbacks (`ca68b51` + `de4f137`) did to Kepler f32 Vulkan
+> throughput. If BinaryBackend gets slower (which it might — Nx
+> 0.12 has some evaluator changes), that shifts the crossover
+> point in the fair race analysis. If Vulkan gets slower per
+> iteration (more host-fallback trips through your new callbacks),
+> that also matters — some of the 42 callbacks may now be hot
+> paths that were previously never called on Vulkan tensors.
+>
+> Steps:
+> 1. Pull `nx_vulkan/feat/nx-0.12-compat` and
+>    `pymc/feat/nx-0.12` (both on super-io remote).
+> 2. `mix compile` in `~/exmc/exmc` — expect clean, with the
+>    single `atan2/3` warning until this handoff's straggler ships.
+> 3. Write `bench/binary_vs_vulkan_race_nx_0_12.exs` alongside
+>    super-io's `bench/vulkan_only_race_nx_0_12.exs` — same cell
+>    layout, but replace the `:exla` run with a
+>    `Nx.default_backend(Nx.BinaryBackend)` block. Keep
+>    `Application.put_env(:exmc, :compiler, :none)` so JIT stays
+>    off (matches BinaryBackend evaluator).
+> 4. `RACE_QUICK=1 mix run bench/binary_vs_vulkan_race_nx_0_12.exs`
+>    first — 100/100 iters, ~5 min. Verify it runs to completion,
+>    then do the full 1000/1000 (~45 min) for real numbers.
+> 5. Commit results table to `bench/binary_vs_vulkan_race_mac248.md`
+>    with a short one-paragraph verdict: regression, wash, or
+>    improvement vs pre-upgrade Kepler numbers if any exist
+>    (memory says GT 750M is `free-macpro-gpu` in some blog write-
+>    ups; not sure a clean pre-baseline exists — worth calling
+>    out if not).
+>
+> **After this**: `atan2/3` host fallback (one-line commit).
+>
+> `atan2/3` is not blocking the race — no cell uses it.
+
+---
+
+# mac-248 — QUEUED (after race): `atan2/3` host fallback
+
+> `de4f137` cleared 35 of the 36 flagged
 
 > **Handoff 2026-07-07**: `de4f137` cleared 35 of the 36 flagged
 > callbacks; `atan2/3` (binary: `out, a, b`) got missed. Same
