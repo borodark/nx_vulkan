@@ -1,4 +1,54 @@
-# mac-248 — NEXT: BinaryBackend-vs-Vulkan fair race on Nx 0.12
+# mac-248 — NEXT: f64 family chain shaders (Surfaces 1-5)
+
+> **Handoff 2026-07-09**: Surface 7 (f64 synth chain shader) shipped
+> in `823e8a96c` and PASSES on both Kepler GPUs — the D87 f32
+> accumulation collapse is resolved on the synth path (Beta / Gamma
+> / Lognormal / regime custom). Superb work. Super-io integrated,
+> found 9 downstream test breakages caused by the f32→precision-aware
+> wire type change on the synth path; wire_type is now threaded
+> explicitly through `dispatch.ex` so the 6 family shaders keep
+> reading f32 bytes while synth reads whatever precision it wrote
+> (patches on `pymc/feat/nx-0.12` after Surface 7 lands).
+>
+> **Natural next step is Surfaces 1-5 of `PLAN_F64_CHAIN_SHADER`:
+> f64 variants of the 5 remaining family shaders** (Exponential,
+> StudentT, Cauchy, Weibull, HalfNormal — Normal already ships a
+> `_f64.spv`). This gives us:
+>
+> 1. Vulkan can finally run **multi-RV Normal at d=8 / d=50** (the
+>    SynthUnsupportedError cells in the race table). Fixed with
+>    the existing Normal-f64 SPV once dispatch routing lands.
+> 2. Removes the last `:f32` boundary casts in
+>    `Exmc.NUTS.Vulkan.Dispatch.batch_chain_to_tensors/3` — no more
+>    silent-collapse class on any single-family Vulkan model.
+> 3. Symmetry: after this, every model class Vulkan runs is at
+>    working precision end-to-end.
+>
+> Scope estimate from `PLAN_F64_CHAIN_SHADER`: 5 GLSL sources
+> (copy-diff from f32 with `float→double` + `#extension
+> GL_ARB_gpu_shader_fp64` + `log_d`/`exp_d` helpers where needed),
+> 5 SPVs compiled via `glslangValidator`, 5 Rust NIFs mirroring
+> `leapfrog_chain_normal_f64`, 5 Elixir wrappers, dispatch.ex
+> routing branch that picks the `_f64` NIF when
+> `Exmc.JIT.precision() == :f64`. Estimated ~2 days at your Surface
+> 7 work rate.
+>
+> Recommend one commit per family (Exponential first — simplest math,
+> smallest blast radius), let super-io regress-test between each,
+> then StudentT / Cauchy / Weibull / HalfNormal in whatever order.
+> Same super-io/feat/nx-0.12-compat branch.
+
+---
+
+# mac-248 — QUEUED (after family shaders): `atan2/3` host fallback + BinaryBackend-vs-Vulkan race
+
+Both smaller items now behind family-f64. `atan2/3` is a one-line
+commit; the race is a good "cooldown" after the big shader work
+lands.
+
+---
+
+# mac-248 — HISTORICAL: BinaryBackend-vs-Vulkan fair race on Nx 0.12
 
 > **Handoff 2026-07-07**: super-io is running its Vulkan-only race
 > against the pre-Nx-0.12 baseline (`bench/fair_race_results_linux.md`
