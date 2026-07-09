@@ -1,213 +1,187 @@
-# PLAN — f64 chain shader surface (mac-248 implementation target)
+# PLAN — f64 chain shader coverage via vulkano synth (Option B)
 
-Filed: 2026-07-05. Cross-refs:
-[[exmc/DECISIONS.md D87 D88]],
-[[exmc/research/175_f64_leapfrog_plan.md]] (Surface 3, non-goal there),
-[[nx_vulkan/research/PLAN_F64_MATMUL.md]] (commit `423d258`, sister task),
-[[nx_vulkan/248_TODO.md]].
+Filed: 2026-07-05. Superseded 2026-07-09: strategic pivot from
+"extend spirit C++ path" (original Surfaces 1-5) to "vulkano synth
+subsumes single-family models under f64 default". Kept the file
+name for continuity with existing cross-refs.
 
-Surprise from the survey: `leapfrog_chain_normal_f64.spv` already
-exists (spirit C++ path, `Nx.Vulkan.Native`), and
-`leapfrog_chain_synth_f64` is fully wired end-to-end on the vulkano
-Rust side (`native/nx_vulkan_vulkano/src/lib.rs:590`, wrapper
-`native_v.ex:66`) — both have no caller. The matrix is partial, not
-empty. This plan finishes it.
+Cross-refs:
+- `../248_TODO.md`
+- `pymc/exmc/DECISIONS.md` D87 / D88
+- `pymc/exmc/research/175_f64_leapfrog_plan.md`
+- `pymc/exmc/research/PLAN_FREEBSD_FLEET.md`
+- `pymc/exmc/research/BETA_GAMMA_SYNTH_REGRESSION.md`
 
-## Why this task
+## Strategic frame
 
-The regime model does NOT hit this path — Custom likelihood, so
-`ChainShaderCodegen.detect_meta/1` returns `:unsupported` (Plan B'
-guard, `compiler.ex:99`), routing through `Evaluator +
-VulkanoBackend` per-op which is already precision-portable per #175.
-This task does NOT block D88 Stage 2.
+D88 committed to a vulkano-first (Rust) compute path for the
+FreeBSD fleet. The spirit C++ path (`Nx.Vulkan.Native.*`) is on the
+retirement track — kept working for backward compat until the
+fleet ships, then quietly deprecated. Every new f64 chain shader
+we ship should live on vulkano.
 
-It DOES block, silently, on the f64 default:
+Surface 7 (2026-07-09, commit `823e8a96c`) landed f64 support in
+the **vulkano synth path**: any Custom-likelihood model — the
+regime model, any hand-composed multi-RV logpdf — now samples at
+f64 on Vulkan without the D87 f32-accumulation collapse. That
+covers 100% of models exmc's `CustomSynth` codegen can emit for.
 
-- **Plan B fast path** (spirit C++) — Single-family Vulkan models
-  Normal/Exponential/StudentT/Cauchy/HalfNormal/Weibull dispatch
-  through the f32 SPVs. Same silent-collapse class as #177's regime
-  failure (D87 root cause: f32 accumulation, emitter correct).
-- **Plan A\* synth path** (vulkano) — Custom-likelihood models
-  whose emitter output goes through the vulkano
-  `leapfrog_chain_synth` NIF. Synth-f64 exists but is unreachable —
-  dispatch.ex routes to the f32 sibling unconditionally.
+What's still on f32-only spirit: the six hand-written **family
+fused chain shaders** (Normal, Exponential, StudentT, Cauchy,
+Weibull, HalfNormal) at `nx_vulkan/priv/shaders/leapfrog_chain_*.spv`.
+`ChainShaderCodegen.detect_meta/1` routes single-family models
+there, so Vulkan sampling of a single Normal/Exponential/etc.
+model still runs the D87 f32 collapse under D88 f64 default.
 
-## Current state — what exists
+## Option B: route families through synth under f64
 
-- **Spirit C++ (`nx_vulkan_native`, Plan B fast path):** 6 built-in
-  families shipped f32 — `normal`, `exponential`, `studentt`,
-  `cauchy`, `halfnormal`, `weibull` (SPVs in `priv/shaders/`, NIFs
-  `native.ex:144-172`). Only Normal has an f64 sibling:
-  `leapfrog_chain_normal_f64.spv` + NIF (`native.ex:168`) + wrapper
-  (`nx_vulkan.ex:702`) — currently unused.
-- **Vulkano (`nx_vulkan_vulkano`, Plan A\*):** `leapfrog_chain_synth`
-  (f32, `src/lib.rs:424`) + `leapfrog_chain_synth_f64` (f64,
-  `src/lib.rs:590`, wrapper `native_v.ex:66`). Rust NIFs both
-  registered. f64 NIF is unused because dispatch.ex never calls it.
-- **exmc dispatch (`Exmc.NUTS.Vulkan.Dispatch`):** every call site
-  hardcodes `Nx.as_type(:f32)` at the NIF boundary — load-bearing
-  per the moduledoc "Precision boundary" (lines 29-50), which
-  explicitly flags this task as future work.
-- **GLSL sources:** NOT in the repo. SPVs shipped precompiled (same
-  as matmul).
+Instead of authoring five more f64 SPVs on the spirit path (the
+original Surfaces 1-5), we make `ChainShaderCodegen` emit a synth
+meta for single-family models when `Exmc.JIT.precision() == :f64`.
+The vulkano synth codegen already handles arbitrary Nx expression
+trees; a single-family `Normal(mu, sigma)` model is a subset of
+what the regime model already exercises daily.
 
-## Scope — surfaces in implementation order
+Payoffs:
+1. **Zero new SPVs, NIFs, Elixir wrappers.** All the work is
+   exmc-side codegen wiring — one function change in
+   `ChainShaderCodegen.detect_meta/1`.
+2. **Retires the spirit path faster.** Under D88 f64 default, no
+   single-family model reaches spirit anymore. Spirit's family SPVs
+   become f32-only fallback for `force_precision: :f32` mode; a
+   later cleanup can delete them once no fleet host runs at f32.
+3. **Multi-RV Normal at any d works on Vulkan.** Currently
+   `SynthUnsupportedError` in the fair race — `detect_meta` fails
+   for d>1 single-family models. Synth handles multi-RV natively
+   (regime model has 8 free RVs).
+4. **Correctness class fixed.** D87's silent-collapse pathology
+   can't recur on any single-family model at f64 — same guarantee
+   Surface 7 gave the synth-covered set.
+5. **Beta / Gamma regression** flagged in
+   `pymc/exmc/research/BETA_GAMMA_SYNTH_REGRESSION.md` is
+   automatically covered — those cells already go through synth.
 
-Each surface is independently commitable. Land tests alongside.
+Costs:
+- **Perf.** Synth generates one long fused kernel per unique
+  (family, params) combination; the six hand-written spirit SPVs
+  are pre-optimised for their families. Expect the synth path to
+  be within 10-20% of the fused path per iteration (Surface 7's
+  regime sampling on Kepler is competitive with the family SPVs
+  at the same problem size). Not a correctness issue and not on
+  the D88 Stage 2 critical path.
+- **Codegen fragility.** Synth walks `Nx.Defn.grad` output; adding
+  a new family requires no new codegen but does require the
+  distribution's `logpdf` to be differentiable through Nx.Defn.
+  All 6 current families already are — no new work.
 
-### Surface 1 — GLSL sources for the 5 missing spirit families
+## Scope — one exmc-side change, one nx_vulkan cleanup follow-up
 
-Write `glsl/leapfrog_chain_{exponential,studentt,cauchy,halfnormal,weibull}_f64.comp`.
-Match the existing f32 shader's math bit-for-bit; only change is
-`float`→`double` on buffers/locals and
-`#extension GL_ARB_gpu_shader_fp64 : require`. If f32 GLSL sources
-aren't in the repo, disassemble via
-`spirv-cross --output tmp.comp priv/shaders/leapfrog_chain_<fam>.spv`
-as a starting point.
+### Surface A (exmc) — `ChainShaderCodegen.detect_meta/1` routes families to synth under f64
 
-### Surface 2 — `log_d` / `exp_d` boundary-cast helpers
+Location: `pymc/exmc/lib/exmc/nuts/chain_shader_codegen.ex` (module
+name TBD if actual path differs). The current implementation
+pattern-matches on IR shape:
 
-GLSL.std.450 has no f64 transcendentals. Emit as inline helpers in
-each shader that needs them (StudentT, Weibull, HalfNormal, Cauchy,
-LogNormal-inside-synth):
+- Single free RV, no data → detect family from `Exmc.Dist` module,
+  return `{:normal, mu, sigma}` etc.
+- Multi-RV or with Custom likelihood → fall through to
+  `CustomSynth.synthesise/1`, which returns
+  `{:synthesised, sha, layout, push_spec, spv_path, obs_bin}`.
 
-```glsl
-double log_d(double x) { return double(log(float(x))); }
-double exp_d(double x) { return double(exp(float(x))); }
+Change: when `Exmc.JIT.precision() == :f64`, skip the single-family
+detection and always route to `CustomSynth.synthesise/1`. Under
+`:f32` (either default or `force_precision: :f32`), keep the
+existing family fast path — it's faster and works.
+
+Concretely:
+
+```elixir
+def detect_meta(ir) do
+  case Exmc.JIT.precision() do
+    :f64 -> route_to_synth(ir)
+    :f32 -> detect_family(ir) || route_to_synth(ir)
+  end
+end
 ```
 
-Precision loss is bounded — cast down at f32 mantissa (23-bit),
-back up to f64 storage.
+`route_to_synth` wraps `CustomSynth.synthesise(ir)` and returns
+its `{:synthesised, ...}` tuple. `CustomSynth` was already the
+"fallback" — this promotes it to primary at f64.
 
-### Surface 3 — SPV compilation
+### Surface B (nx_vulkan, cleanup) — deprecate spirit family NIFs after fleet ships
 
-`glslangValidator -V glsl/<name>.comp -o priv/shaders/<name>.spv`,
-then `spirv-val`. 5 new SPVs (Normal-f64 already shipped) + 1
-synth-f64 SPV emitted by the codegen at Surface 7.
-
-### Surface 4 — Rust NIFs (spirit path only)
-
-`native/nx_vulkan_native/src/lib.rs`: mirror
-`leapfrog_chain_normal_f64` for the 5 missing families. Push blocks:
-same layout as f32 sibling, `double` scalars where the f32 sibling
-has `float`. Register in the C shim and the `rustler::init!` list.
-
-Vulkano: no per-family NIFs needed — synth-f64 already registered.
-
-### Surface 5 — Elixir wrappers
-
-`nx_vulkan/lib/nx_vulkan/native.ex` + `nx_vulkan.ex`: mirror
-`leapfrog_chain_normal_f64` (`native.ex:168`, `nx_vulkan.ex:702`)
-for the 5 missing families. `shader_path("leapfrog_chain_<fam>_f64.spv")`.
-
-### Surface 6 — `Exmc.NUTS.Vulkan.Dispatch` routing
-
-At each family call site in `dispatch.ex`, branch on
-`Exmc.JIT.precision()`:
-
-- `:f32` → existing NIF + f32 SPV path + `Nx.as_type(:f32)` casts.
-- `:f64` → `_f64` NIF + f64 SPV + `Nx.as_type(:f64)` casts +
-  `bin_to_tensor/2` reads `:f64` instead of `:f32`.
-
-Update the moduledoc "Precision boundary" section — remove the
-"Future work" note; this task closes it.
-
-### Surface 7 — `custom_synth.ex` codegen for f64
-
-`MultiRvCustomSpec.render/1` currently emits f32 GLSL. Add a
-`precision: :f64` mode: swap `float`→`double`, add the
-`GL_ARB_gpu_shader_fp64` extension line, inject `log_d`/`exp_d`
-helpers when the captured decls reference log/exp. Dispatch picks
-the f64 shader when `precision() == :f64`.
-
-Task #154's `@batched_template` (multi_rv_custom_spec.ex:684) stays
-f32 — batched f64 is a Non-goal per that file's line 699-701.
-
-## Non-changes to keep
-
-- f32 SPVs stay side-by-side with f64 for hardware without
-  `shaderFloat64`. Fleet has it; keep the escape hatch.
-- `force_precision: :f32` env override remains the fallback signal.
-- Batched synth (`leapfrog_chain_synth_batch`) stays f32.
+Not now. After D88 Stage 2 passes (regime on FreeBSD, then per
+`PLAN_FREEBSD_FLEET`), delete `nx_vulkan/priv/shaders/leapfrog_chain_
+{normal,exponential,studentt,cauchy,weibull,halfnormal}*.spv` and
+their `Native.leapfrog_chain_*` NIF stubs. The `_f64` Normal SPV
+was already unused; it goes with them.
 
 ## Testing plan
 
-Land tests alongside the code.
-
-- **Per-shader unit** in `test/exmc/nuts/vulkan/dispatch_test.exs`:
-  one call per family, f64, vs BinaryBackend `Evaluator`. Tolerance:
-  `< 1e-12` rel for polynomial-dominated (Normal, Cauchy); `< 1e-8`
-  for transcendental-heavy (StudentT, Weibull, HalfNormal,
-  Exponential) because of `log_d`/`exp_d` boundary noise.
-- **Full sampling** in `test/exmc/regression/`: one model per
-  family, 500 warmup + 500 samples, posterior mean/sd match EXLA-f64
-  within reference SDs. Assert `Dispatch.dispatch_count/0 > 0` to
-  catch silent Evaluator fallback (dispatch moduledoc lines 17-28).
-- **Silent-collapse smoke test** — Normal(mu, sigma), `sigma` prior
-  scale `0.01` (regime failure mimic per D87). Under f64 default:
-  posterior recovers within reference SDs. Under `force_precision:
-  :f32`: sampler collapses (assertion inverted, expects failure).
-  Fixture in `test/exmc/regression/f64_chain_collapse_test.exs`.
-- **spirv-val** on each new SPV in CI.
+- **Sampling parity** (`pymc/exmc/test/exmc/nuts/chain_shader_coverage_test.exs`):
+  extend the harness to sample each of the 6 families at
+  `force_precision: :f64` via the synth path and match posterior
+  moments against BinaryBackend within reference SDs. Same fixture
+  Surface 7 uses for regime.
+- **Silent-collapse smoke test**: Normal with sigma prior scale
+  `0.01`. Under f64 default: samples correctly via synth. Under
+  `force_precision: :f32`: samples via family fused shader,
+  collapses per D87. Both are the expected behaviour after this
+  change.
+- **Fair race delta**: rerun `bench/vulkan_only_race_nx_0_12.exs`
+  after Surface A lands. Expect the 6 single-family cells to still
+  work; expect multi-RV Normal at d=8/d=50 to leave SKIP status
+  and produce real numbers. Compare wall-time regression vs
+  pre-Surface-A (family-SPV) baseline; if within 20%, ship.
 
 ## Success criteria
 
-1. All 5 missing spirit-family f64 SPVs in `priv/shaders/`,
-   spirv-val clean.
-2. Synth-f64 codegen path emits a working SPV; dispatch.ex routes
-   to `leapfrog_chain_synth_f64` NIF when `precision() == :f64`.
-3. `mix test` in nx_vulkan and exmc both pass on mac-248 and super-io.
-4. Every family's sampling test matches EXLA-f64 within reference SDs.
-5. Silent-collapse smoke test passes: sigma=0.01 Normal samples
-   correctly under f64 default, collapses under `force_precision: :f32`.
+1. `ChainShaderCodegen.detect_meta/1` routes single-family models
+   to synth when `Exmc.JIT.precision() == :f64`.
+2. All 6 family sampling tests pass at f64 via synth. Posterior
+   moments within reference SDs of BinaryBackend.
+3. Silent-collapse smoke test passes: sigma=0.01 Normal at f64
+   samples correctly; the same model at `force_precision: :f32`
+   collapses (assertion inverted).
+4. Vulkan-only race post-Surface-A shows multi-RV Normal at d=8
+   and d=50 producing real numbers, not SKIP.
+5. `Exmc.NUTS.Vulkan.Dispatch.batch_chain_to_tensors/3`'s explicit
+   `:f32` wire type stays — spirit family path is still reachable
+   under `force_precision: :f32`. Only the routing changes.
 
-## Non-goals for this task
+## Non-goals
 
-- **Tiled f64 chain shaders.** Naive path first; profile after
-  Surface 6 lands. f64 memory bandwidth is 2× f32 — tile params
-  will differ.
-- **Batched f64 chain shader** (Task #154 multi-instance path).
-  `@batched_template` stays f32 per its own comment.
-- **New families** (Beta, Gamma, LogNormal, Exponential-power).
-  Not currently in the fast-path family set; file a separate task
-  if any fleet model needs them.
-- **f16 / int8 anything.**
-- **Converting spirit C++ `Native` synth wrapper.** Spirit path is
-  legacy; #175's D87 update deferred it. Vulkano-only for the
-  synth-f64 route.
+- **Extending spirit with f64 family SPVs / NIFs.** Explicitly
+  rejected in favour of Option B. If mac-248 ever wants to ship
+  the 5 files as a side project for parity's sake, fine — but not
+  on the fleet critical path.
+- **Deleting spirit family SPVs today.** Backward compat until
+  D88 Stage 2 lands.
+- **Batched f64 synth shader** (multi-instance Task #154 path).
+  Same deferral as before.
+- **f16 / int8.**
 
 ## Blocking dependencies
 
-None. `shaderFloat64` device feature enabled per #175 evidence
-across the three-host fleet; `leapfrog_chain_synth_f64` Rust NIF
-already merged; Normal-f64 SPV already shipped as the reference
-for GLSL shape.
+None. Surface 7 is on main. `CustomSynth.synthesise/1` already
+handles single-family models (tested via prior-only regime
+components). The change is a one-branch routing decision.
 
-## Handoff to mac-248
+## Owner
 
-Concrete session-start checklist:
+Super-io side (single exmc-side change). mac-248's queue stays on
+the smaller items: `atan2/3` straggler, BinaryBackend-vs-Vulkan
+race, then Option B verification on Kepler once super-io ships
+Surface A.
 
-1. Read this plan and `PLAN_F64_MATMUL.md` (commit `423d258`).
-2. Confirm `glslangValidator --version` and `spirv-val --version`
-   on PATH.
-3. Confirm the shipped `leapfrog_chain_normal_f64.spv` disassembles
-   cleanly via `spirv-cross --output tmp.comp
-   priv/shaders/leapfrog_chain_normal_f64.spv` — use as the GLSL
-   template for the 5 siblings.
-4. Surface 1 → Surface 3 first (all 5 spirit-family SPVs). Commit
-   each family separately (small blast radius).
-5. Surface 4 → 5 (Rust NIFs + Elixir wrappers) in one commit per
-   family, mirroring `leapfrog_chain_normal_f64`'s existing shape.
-6. Surface 6 (exmc dispatch routing) in a single commit — touch
-   only `dispatch.ex`.
-7. Surface 7 (synth-f64 codegen) last — biggest exmc-side blast
-   radius; land after the fast path is proven.
-8. Push each commit to `super-io` remote
-   (`git@192.168.0.249:/home/git/repos/nx_vulkan.git` and the exmc
-   mirror), same workflow as #177/matmul.
-9. Report per-host smoke-test results in the
-   `177_grad_diff_findings.md` table format.
+## Cross-references
 
-Scope estimate: ~1.5 days at matmul work-rate. 10 SPVs (5 spirit +
-1 synth + Normal-f64 verification + 3 helper compiles) vs matmul's
-1, but the shader math is copy-diff from existing f32, not novel.
+- `bench/nx_0_12_race_results.md` — pre-Option-B race table.
+  Post-Surface-A rerun replaces the multi-RV Normal SKIPs with
+  real numbers.
+- `pymc/exmc/research/BETA_GAMMA_SYNTH_REGRESSION.md` — Beta and
+  Gamma cells already go through synth; Option B doesn't help or
+  hurt them. Their regression is a separate profiling problem.
+- `pymc/exmc/research/PLAN_FREEBSD_FLEET.md` — Stage 2 no longer
+  needs family-f64. Regime model uses Custom likelihood → synth
+  path, already handled.

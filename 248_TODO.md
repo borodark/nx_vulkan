@@ -1,50 +1,37 @@
-# mac-248 — NEXT: f64 family chain shaders (Surfaces 1-5)
+# mac-248 — NEXT: `atan2/3` straggler + BinaryBackend-vs-Vulkan race
 
 > **Handoff 2026-07-09**: Surface 7 (f64 synth chain shader) shipped
 > in `823e8a96c` and PASSES on both Kepler GPUs — the D87 f32
 > accumulation collapse is resolved on the synth path (Beta / Gamma
-> / Lognormal / regime custom). Superb work. Super-io integrated,
-> found 9 downstream test breakages caused by the f32→precision-aware
-> wire type change on the synth path; wire_type is now threaded
-> explicitly through `dispatch.ex` so the 6 family shaders keep
-> reading f32 bytes while synth reads whatever precision it wrote
-> (patches on `pymc/feat/nx-0.12` after Surface 7 lands).
+> / Lognormal / regime custom). Superb work.
 >
-> **Natural next step is Surfaces 1-5 of `PLAN_F64_CHAIN_SHADER`:
-> f64 variants of the 5 remaining family shaders** (Exponential,
-> StudentT, Cauchy, Weibull, HalfNormal — Normal already ships a
-> `_f64.spv`). This gives us:
+> **Strategic pivot**: the "family f64 shader" work (Surfaces 1-5
+> of `PLAN_F64_CHAIN_SHADER`) is being handled on the exmc side via
+> **Option B** — under D88 f64 default, single-family models will
+> route through the vulkano synth path (Surface 7) instead of the
+> spirit C++ family SPVs. Zero new SPVs / NIFs / wrappers, and the
+> D87 silent-collapse pathology can't recur on any single-family
+> model at f64. See the updated
+> `research/PLAN_F64_CHAIN_SHADER.md` for the details.
 >
-> 1. Vulkan can finally run **multi-RV Normal at d=8 / d=50** (the
->    SynthUnsupportedError cells in the race table). Fixed with
->    the existing Normal-f64 SPV once dispatch routing lands.
-> 2. Removes the last `:f32` boundary casts in
->    `Exmc.NUTS.Vulkan.Dispatch.batch_chain_to_tensors/3` — no more
->    silent-collapse class on any single-family Vulkan model.
-> 3. Symmetry: after this, every model class Vulkan runs is at
->    working precision end-to-end.
+> This means the mac-248 queue is back to the two smaller items:
 >
-> Scope estimate from `PLAN_F64_CHAIN_SHADER`: 5 GLSL sources
-> (copy-diff from f32 with `float→double` + `#extension
-> GL_ARB_gpu_shader_fp64` + `log_d`/`exp_d` helpers where needed),
-> 5 SPVs compiled via `glslangValidator`, 5 Rust NIFs mirroring
-> `leapfrog_chain_normal_f64`, 5 Elixir wrappers, dispatch.ex
-> routing branch that picks the `_f64` NIF when
-> `Exmc.JIT.precision() == :f64`. Estimated ~2 days at your Surface
-> 7 work rate.
+> 1. **`atan2/3` host fallback** — the one straggler from the 36-callback
+>    sweep. Mirror the `block/4` fallback pattern from `3a77d9e`. One-line
+>    commit.
+> 2. **BinaryBackend-vs-Vulkan race on Nx 0.12** — mac-248's analogue of
+>    super-io's fair race, since EXLA has never been on FreeBSD. Same
+>    7-cell fixture from `pymc/exmc/bench/fair_race.exs`. Replace the
+>    `:exla` half with a `Nx.default_backend(Nx.BinaryBackend)` block +
+>    `Application.put_env(:exmc, :compiler, :none)`. `RACE_QUICK=1`
+>    for sanity (~5 min), then full 1000/1000 (~45 min). Commit
+>    results table to `bench/binary_vs_vulkan_race_mac248.md`.
 >
-> Recommend one commit per family (Exponential first — simplest math,
-> smallest blast radius), let super-io regress-test between each,
-> then StudentT / Cauchy / Weibull / HalfNormal in whatever order.
-> Same super-io/feat/nx-0.12-compat branch.
-
----
-
-# mac-248 — QUEUED (after family shaders): `atan2/3` host fallback + BinaryBackend-vs-Vulkan race
-
-Both smaller items now behind family-f64. `atan2/3` is a one-line
-commit; the race is a good "cooldown" after the big shader work
-lands.
+> **Later**: verify Option B on Kepler once super-io ships Surface A
+> (`ChainShaderCodegen.detect_meta/1` routes families to synth at
+> f64). Expect the exmc test suite to stay green and the fair race
+> to show real numbers for multi-RV Normal at d=8 / d=50 (currently
+> SKIPs on the race table).
 
 ---
 
