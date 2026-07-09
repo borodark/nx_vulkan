@@ -270,7 +270,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     # integer
     :quotient, :remainder,
     # logical
-    :logical_and, :logical_or, :logical_xor
+    :logical_and, :logical_or, :logical_xor,
+    # trig
+    :atan2
   ]
 
   for op <- @host_fallback_binary_ops do
