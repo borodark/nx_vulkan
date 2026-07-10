@@ -1,4 +1,142 @@
-# mac-248 — NEXT: call `future.cleanup_finished()` after `future.wait(None)`
+# mac-248 — NEXT: sidestep FenceSignalFuture entirely (submit + wait_idle)
+
+> **Handoff 2026-07-10 late-late from super-io.** `4259e19`
+> (`cleanup_finished` at 9 sites) built cleanly. Kepler still 36/36.
+> Ampere super-io still panics — same VUID-less vulkano internal
+> "resource is already in use" error, now flagging binding 5
+> (`grad_chain_buf`) instead of binding 6. `cleanup_finished` never
+> gets a chance to run: the panic fires *during* `future.wait(None)`,
+> not after.
+>
+> **Backtrace:**
+>
+> ```
+> 10: core::ptr::drop_in_place<CommandBufferExecFuture<NowFuture>>
+> 11: FenceSignalFuture<F>::wait
+> 12: nx_vulkan_vulkano::…::leapfrog_chain_synth_f64
+> ```
+>
+> Reading vulkano-0.34.2 source pins the exact mechanism:
+>
+> `FenceSignalFuture::wait` (`sync/future/fence_signal.rs:168-179`):
+>
+> ```rust
+> match replace(&mut *state, FenceSignalFutureState::Cleaned) {
+>     FenceSignalFutureState::Flushed(previous, fence) => {
+>         fence.wait(timeout)?;                    // ← if this ? errors,
+>         unsafe { previous.signal_finished(); }   // ← never runs,
+>         Ok(())                                   // ← previous drops without finished=true
+>     }
+>     ...
+> }
+> ```
+>
+> `CommandBufferExecFuture::Drop` (`command_buffer/traits.rs:442-450`):
+>
+> ```rust
+> fn drop(&mut self) {
+>     if !*self.finished.get_mut() && !thread::panicking() {
+>         self.flush().unwrap();                          // ← line 445, the panic
+>         self.queue.with(|mut q| q.wait_idle()).unwrap();
+>         unsafe { self.previous.signal_finished() };
+>     }
+> }
+> ```
+>
+> On Ampere, the internal `fence.wait(timeout)?` inside vulkano
+> returns Err (the fence somehow enters a bad state — likely due to
+> `StandardCommandBufferAllocator` returning a recycled handle whose
+> fence tracker is out of sync). `?` short-circuits, `previous`
+> (the wrapped `CommandBufferExecFuture`) drops without
+> `signal_finished()` being called, its `self.finished` stays false,
+> Drop takes the fallback branch and tries `self.flush()` — flush
+> attempts to resubmit, vulkano's auto-sync sees the same buffer
+> `Arc`s as still in-use, returns AccessError, `.unwrap()` panics.
+>
+> On Kepler the internal `fence.wait` completes fine — the timing
+> just doesn't produce the race — so `previous.signal_finished()`
+> runs and Drop skips the panic path.
+>
+> **Fix.** Get out of `FenceSignalFuture` entirely. Replace the
+> current pattern:
+>
+> ```rust
+> let mut future = sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(...)?
+>     .then_signal_fence_and_flush()
+>     .map_err(...)?;
+>
+> future.wait(None).map_err(...)?;
+> future.cleanup_finished();
+> ```
+>
+> with the "submit-and-wait-idle" pattern:
+>
+> ```rust
+> let future = sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(|e| format!("then_execute: {e}"))?;
+>
+> future.flush().map_err(|e| format!("flush: {e}"))?;
+> context.queue.with(|mut q| q.wait_idle())
+>     .map_err(|e| format!("wait_idle: {e}"))?;
+> drop(future);  // now safe — GPU is idle, no in-flight submissions
+> ```
+>
+> Skipping `then_signal_fence_and_flush()` skips the fence-signal
+> future that owns the buggy Drop. Explicit `queue.wait_idle()`
+> is heavier than a fence wait per-submission but definitive — the
+> whole queue drains before the next NIF call, so there's no
+> "already in use" state to trip vulkano's tracker.
+>
+> Perf hit: `wait_idle()` waits for the entire queue instead of a
+> specific fence, so any other work queued on the same queue would
+> also drain. In our NIF-per-dispatch model nothing else uses that
+> queue (single dedicated compute queue), so the practical cost is
+> zero.
+>
+> **Alternative if wait_idle is unacceptable:** use raw
+> `Queue::submit_unchecked` + a manual `Fence::new`, bypass vulkano's
+> `AutoCommandBufferBuilder` auto-sync tracker. Much bigger refactor
+> — save that for a follow-up if wait_idle regresses throughput.
+>
+> **Repro on Ampere super-io** (same as before):
+>
+> ```
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> **Suggested commit message:**
+>
+> ```
+> Replace FenceSignalFuture with explicit flush + queue.wait_idle
+>
+> Amends 4259e19. cleanup_finished never runs because the panic fires
+> DURING future.wait(None), not after — vulkano's internal fence.wait
+> inside FenceSignalFuture::wait errors on Ampere, `?` short-circuits,
+> the wrapped CommandBufferExecFuture drops without signal_finished,
+> and Drop's fallback `self.flush().unwrap()` panics on the resource
+> tracker.
+>
+> Sidestep the whole FenceSignalFuture/CommandBufferExecFuture Drop
+> dance: flush the submission, drain the queue with wait_idle, drop
+> the future. Queue is dedicated to compute NIFs so wait_idle has no
+> other contention. Fixes 03874/03875/AccessError chain end-to-end.
+> ```
+
+---
+
+# mac-248 — DONE (partial): call `future.cleanup_finished()` after `future.wait(None)` (4259e19)
+
+> Built cleanly; correct in spirit (cleanup_finished IS what
+> releases the tracker locks per the doc). But the panic never
+> reaches cleanup_finished — it fires from Drop of the wrapped
+> CommandBufferExecFuture, invoked during wait's own internal
+> state-transition when its inner fence.wait errors on Ampere.
+> Sidestep via `queue.wait_idle()` (see NEXT above).
+>
+> Kept for provenance.
 
 > **Handoff 2026-07-10 late from super-io.** `5efbb9e`
 > (`SimultaneousUse` at 9 sites) killed the Vulkan-side VUID
