@@ -517,7 +517,7 @@ fn leapfrog_chain_synth<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -684,7 +684,7 @@ fn leapfrog_chain_synth_f64<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -842,7 +842,7 @@ fn leapfrog_chain_synth_batch<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -982,7 +982,7 @@ fn concat_buffers<'a>(
     let mut cmd = match AutoCommandBufferBuilder::primary(
         &context.cmd_allocator,
         context.queue.queue_family_index(),
-        CommandBufferUsage::MultipleSubmit,
+        CommandBufferUsage::SimultaneousUse,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1142,7 +1142,7 @@ fn apply_binary<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -1216,7 +1216,7 @@ fn apply_unary<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -1296,7 +1296,7 @@ fn reduce_axis<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -1402,7 +1402,7 @@ fn transpose_2d<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
@@ -1504,7 +1504,7 @@ fn matmul<'a>(
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
 
