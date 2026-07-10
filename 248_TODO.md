@@ -1,4 +1,111 @@
-# mac-248 — NEXT: fix `CommandBufferUsage::OneTimeSubmit` panic at 9 sites
+# mac-248 — NEXT: `MultipleSubmit` → `SimultaneousUse` at 9 sites (amend b2fc215)
+
+> **Handoff 2026-07-10 evening from super-io.** Your `b2fc215`
+> ("Fix OneTimeSubmit panic + clean dangling spirit refs") built
+> and passed on Kepler (36/36 nx_vulkan tests, exmc repro test
+> runs to completion / times out on f64 synth speed). Rebuilt on
+> super-io (Ampere RTX 3060 Ti); repro test STILL panics — but with
+> a DIFFERENT vulkano VUID:
+>
+> ```
+> thread '<unnamed>' panicked at .../vulkano-0.34.2/src/command_buffer/traits.rs:445:26:
+> called `Result::unwrap()` on an `Err` value: a validation error occurred
+> Caused by:
+>     a command buffer, or one of the secondary command buffers it executes,
+>     was not created with the `CommandBufferUsage::SimultaneousUse` usage,
+>     but it is already in use by the device
+> Vulkan VUIDs: VUID-vkQueueSubmit2-commandBuffer-03875
+> ```
+>
+> **What happened.** From `vulkano-0.34.2/src/command_buffer/mod.rs:685-704`:
+>
+> - `OneTimeSubmit` — submit once, ever
+> - `MultipleSubmit` — submit many times, **not simultaneously in-flight**
+> - `SimultaneousUse` — submit many times, may be in-flight concurrently.
+>   *"The safest option is SimultaneousUse, but it may be slower than the
+>   other two."*
+>
+> Your fix flipped OneTimeSubmit → MultipleSubmit — killed 03874 (which
+> covers "already been submitted") but exposed 03875 (which covers
+> "already in use by the device"). On Kepler, submissions drain to
+> the fence before the next one arrives; on Ampere they overlap.
+>
+> **Root mechanism.** `StandardCommandBufferAllocator` pools the
+> underlying `vk::CommandBuffer` handles. When our NIF calls
+> `future.wait(None)` and returns, the fence is signaled at the
+> vulkano/Elixir boundary but Vulkan's own in-flight tracker hasn't
+> yet marked the buffer available. The next NIF invocation gets the
+> same recycled handle back from the pool → 03875. On slower Kepler
+> the timing races don't happen; on Ampere they do.
+>
+> **Fix.** Flip all 9 sites `MultipleSubmit` → `SimultaneousUse`:
+>
+> ```
+> $ grep -n MultipleSubmit native/nx_vulkan_vulkano/src/lib.rs
+> 520:            CommandBufferUsage::MultipleSubmit,
+> 687:            CommandBufferUsage::MultipleSubmit,
+> 845:            CommandBufferUsage::MultipleSubmit,
+> 985:        CommandBufferUsage::MultipleSubmit,
+> 1145:            CommandBufferUsage::MultipleSubmit,
+> 1219:            CommandBufferUsage::MultipleSubmit,
+> 1299:            CommandBufferUsage::MultipleSubmit,
+> 1405:            CommandBufferUsage::MultipleSubmit,
+> 1507:            CommandBufferUsage::MultipleSubmit,
+> ```
+>
+> Same one-word change at every site. `sed -i 's/MultipleSubmit/SimultaneousUse/g'
+> native/nx_vulkan_vulkano/src/lib.rs`.
+>
+> The "may be slower" caveat is nominal for us — we're already
+> hammering vulkano thousands of times per NUTS sample and the
+> fence-wait dwarfs any per-buffer overhead. If a benchmark says
+> otherwise post-fix, we revisit; for now correctness > 1-3% throughput.
+>
+> **Alternative considered.** Vulkano's tracker bug could also be
+> worked around by allocating a fresh `StandardCommandBufferAllocator`
+> per NIF call, but that's much heavier (allocator init on every
+> `Nx.multiply`) and this VUID is exactly the case `SimultaneousUse`
+> was designed for.
+>
+> **Repro on super-io** (or any Ampere+):
+>
+> ```
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> ~19s to panic. Post-fix should sample to completion in ~30–60s.
+>
+> **Suggested commit message** for the amend:
+>
+> ```
+> Fix VUID-vkQueueSubmit2-commandBuffer-03875 on Ampere+: SimultaneousUse
+>
+> Amends b2fc215. MultipleSubmit forbids concurrent in-flight submissions
+> of the same command buffer; StandardCommandBufferAllocator's handle
+> pool returns recycled buffers that Vulkan's driver still considers
+> in-flight even after future.wait(None) at the vulkano/Elixir boundary.
+> On Kepler the timing hides this; on Ampere it fires.
+>
+> SimultaneousUse allows overlapping in-flight submissions and is the
+> documented "safest option" (mod.rs:685-704). Perf trade-off is
+> nominal for our hot path (fence-wait dominates).
+> ```
+>
+> **After the amend.** Ping super-io. We re-run the full exmc
+> suite. Expected residual after 61 - ~35 NIF panics: ~26 failures
+> (10 SynthUnsupportedError + 3 Push encoders + downstream), all
+> non-blocking per D90.
+
+---
+
+# mac-248 — DONE 2026-07-10: OneTimeSubmit → MultipleSubmit (b2fc215)
+
+> Landed cleanly on Kepler; fix incomplete on Ampere. Amendment
+> queued above. Kept for provenance.
+>
+> Original handoff below.
+
+# mac-248 — DONE (partial): fix `CommandBufferUsage::OneTimeSubmit` panic at 9 sites
 
 > **Handoff 2026-07-10 from super-io.** `POST_F32_DROP_REVIEW`
 > (in `pymc/exmc/research/POST_F32_DROP_REVIEW.md`) blocks the
