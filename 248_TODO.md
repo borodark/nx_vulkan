@@ -1,4 +1,148 @@
-# mac-248 — NEXT: sidestep FenceSignalFuture entirely (submit + wait_idle)
+# mac-248 — NEXT: bind future + `signal_finished()` (amend 516fe6b)
+
+> **Handoff 2026-07-10 latest from super-io.** `516fe6b`
+> (`then_execute` + `flush` + `device.wait_idle`, no FenceSignalFuture)
+> got us past the `AccessError` tracker panic. On Ampere super-io
+> the test still panics — but with a **different error at a different
+> line**, and the root cause is subtle and mechanical.
+>
+> **New panic:**
+>
+> ```
+> panicked at .../vulkano-0.34.2/src/command_buffer/traits.rs:447:52:
+> called `Result::unwrap()` on an `Err` value: DeviceLost
+> ```
+>
+> Line 447 is the second `.unwrap()` in `CommandBufferExecFuture::Drop`:
+>
+> ```rust
+> fn drop(&mut self) {
+>     if !*self.finished.get_mut() && !thread::panicking() {
+>         self.flush().unwrap();                              // 445
+>         self.queue.with(|mut q| q.wait_idle()).unwrap();    // ← 447, panics
+>         unsafe { self.previous.signal_finished() };
+>     }
+> }
+> ```
+>
+> **Why Drop fires before our device.wait_idle.** In `516fe6b`
+> (`native/nx_vulkan_vulkano/src/lib.rs:535-543`):
+>
+> ```rust
+> sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(|e| format!("then_execute: {e}"))?
+>     .flush()
+>     .map_err(|e| format!("flush: {e}"))?;
+>
+> // SAFETY: we just flushed the only pending command buffer on this queue.
+> unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+> ```
+>
+> The `CommandBufferExecFuture` produced by `then_execute` is
+> **never bound** — the chain returns `Result<(), _>` from `flush()`
+> and the temporary future dies at the *statement* semicolon (Rust
+> temporary lifetime = end of the containing statement).
+>
+> So the actual timeline on Ampere:
+>
+> 1. `then_execute` builds the future, `flush()` marks
+>    `self.submitted = true` and submits the cmd buffer to the queue
+>    (asynchronous — fence not yet signaled).
+> 2. `;` at end of statement drops the temporary future.
+> 3. `Drop` runs: `self.finished` is still false, so it takes the
+>    fallback branch.
+> 4. `self.flush().unwrap()` is a no-op (checks `submitted == true`,
+>    returns Ok).
+> 5. `self.queue.wait_idle().unwrap()` — this drains the queue. On
+>    Kepler the submission has already finished by this point (slower
+>    dispatches, longer natural delay before Drop). On Ampere the
+>    submission is still in-flight, and `queue.wait_idle` runs into
+>    a driver state that `unwrap`s to `Err(DeviceLost)`.
+> 6. Our own `device.wait_idle()` on line 543 never runs — we panicked
+>    at step 5.
+>
+> **Fix.** Bind the future to a `let` so its Drop happens *after* our
+> explicit `device.wait_idle()`, and call `signal_finished()` on it to
+> set `finished = true` and neutralise Drop:
+>
+> ```rust
+> let future = sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(|e| format!("then_execute: {e}"))?;
+>
+> future.flush().map_err(|e| format!("flush: {e}"))?;
+>
+> // SAFETY: single dedicated compute queue; wait_idle drains it fully.
+> unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+>
+> // SAFETY: device.wait_idle above guarantees the submission is done.
+> // signal_finished sets future.finished = true so Drop's fallback
+> // (flush().unwrap() + queue.wait_idle().unwrap()) is skipped
+> // (see command_buffer/traits.rs:442-450).
+> unsafe { future.signal_finished(); }
+> ```
+>
+> 9 sites (same list as before), 4 lines added/moved per site:
+> - split the chain: `then_execute?.flush()?` → `let future = then_execute?;`
+>   then `future.flush()?;`
+> - add `unsafe { future.signal_finished(); }` after
+>   `device.wait_idle()`
+>
+> **Why this actually terminates the panic chain.** `signal_finished`
+> at `command_buffer/traits.rs:321-324`:
+>
+> ```rust
+> unsafe fn signal_finished(&self) {
+>     self.finished.store(true, Ordering::SeqCst);
+>     self.previous.signal_finished();
+> }
+> ```
+>
+> That flag is the exact one Drop checks at line 443 (`!*self.finished.get_mut()`).
+> With it set, Drop's guard evaluates to false — the entire fallback
+> body is skipped. No flush, no wait_idle, no unwrap, no DeviceLost.
+>
+> **Also update the `chain_synth` site at ~1029** where the
+> `let mut future = ...` was already bound (I saw `let mut future =`
+> at line 1030-1038 in your `516fe6b`). Same treatment: add
+> `unsafe { future.signal_finished(); }` right after `context.device.wait_idle()`.
+>
+> **Repro on Ampere super-io** (unchanged):
+>
+> ```
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> ~18s to panic pre-fix; sample-to-completion post-fix (expect
+> ~30–60s of warmup + ~1000 samples).
+>
+> **Suggested commit message:**
+>
+> ```
+> Bind exec future + signal_finished to neutralise CommandBufferExecFuture Drop
+>
+> Amends 516fe6b. The chained then_execute?.flush()? pattern doesn't bind
+> the CommandBufferExecFuture — the temporary drops at the semicolon,
+> BEFORE our explicit context.device.wait_idle() runs. Drop's fallback
+> then calls queue.wait_idle().unwrap() while the submission is still
+> in-flight on Ampere, panicking with DeviceLost.
+>
+> Bind the future to a local, run our explicit device.wait_idle to drain,
+> then call unsafe { future.signal_finished(); } to set finished=true so
+> the Drop guard at command_buffer/traits.rs:443 skips the fallback body
+> entirely. Same 9+1 sites.
+> ```
+
+---
+
+# mac-248 — DONE (partial): sidestep FenceSignalFuture (516fe6b)
+
+> Correct in direction — killed the AccessError tracker chain end-to-end.
+> Missed the temporary-lifetime detail: the un-bound
+> `CommandBufferExecFuture` still runs its buggy Drop, just at a
+> different point in the sequence. Amend above binds the future and
+> signals it finished so Drop is neutralised.
 
 > **Handoff 2026-07-10 late-late from super-io.** `4259e19`
 > (`cleanup_finished` at 9 sites) built cleanly. Kepler still 36/36.
