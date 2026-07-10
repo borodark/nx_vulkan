@@ -4,7 +4,7 @@ defmodule Nx.Vulkan.Synthesis do
 
   Render template → write GLSL to disk → compile to SPIR-V via
   `glslangValidator` → cache by content hash → return SPV path
-  ready for `Nx.Vulkan.Native.leapfrog_chain_synth/6`.
+  ready for `Nx.Vulkan.NativeV.leapfrog_chain_synth_f64/6`.
 
   ## Cache layout
 
@@ -20,7 +20,7 @@ defmodule Nx.Vulkan.Synthesis do
       iex> spec = Nx.Vulkan.ChainShaderSpecs.beta()
       iex> {:ok, spv_path} = Nx.Vulkan.Synthesis.compile(spec)
       iex> push = Nx.Vulkan.ChainShaderSpecs.beta_push(1, 32, 0.05, 2.0, 5.0)
-      iex> Nx.Vulkan.Native.leapfrog_chain_synth(q_ref, p_ref, inv_mass_ref,
+      iex> Nx.Vulkan.NativeV.leapfrog_chain_synth_f64(q_ref, p_ref, inv_mass_ref,
       ...>                                       push, 32, spv_path)
       {:ok, {q_chain, p_chain, grad_chain, logp_chain}}
   """

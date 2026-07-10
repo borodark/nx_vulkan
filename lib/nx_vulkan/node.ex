@@ -29,9 +29,9 @@ defmodule Nx.Vulkan.Node do
   once at init) and may stash per-shader buffer state in process dict.
 
       result = Nx.Vulkan.Node.with_node(fn ->
-        # any GPU work — uses Nx.Vulkan.Native NIFs directly,
+        # any GPU work — uses Nx.Vulkan.NativeV NIFs directly,
         # serialized through this GenServer process.
-        Nx.Vulkan.Native.leapfrog_chain_synth(q, p, m, push, k, spv)
+        Nx.Vulkan.NativeV.leapfrog_chain_synth_f64(q, p, m, push, k, spv)
       end)
 
   Returns the function's return value, or `{:error, reason}` on
@@ -94,7 +94,6 @@ defmodule Nx.Vulkan.Node do
   @impl true
   def init(opts) do
     {:ok, _} = Application.ensure_all_started(:nx_vulkan)
-    Nx.Vulkan.Native.init()
 
     if Keyword.get(opts, :load_pipeline_cache, true) do
       _ = Nx.Vulkan.PipelineCache.load()
