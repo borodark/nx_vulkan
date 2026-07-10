@@ -1,4 +1,45 @@
-# mac-248 — NEXT: `atan2/3` straggler + BinaryBackend-vs-Vulkan race
+# mac-248 — NEXT: verify Surface A on Kepler
+
+> **Handoff 2026-07-09 evening**: super-io shipped Surface A of
+> `PLAN_F64_CHAIN_SHADER` in `a92894010` — under f64 default,
+> `ChainShaderCodegen.detect_meta/1` now routes single-family
+> models to the vulkano synth path instead of the spirit C++ family
+> SPVs. Zero new SPVs / NIFs / wrappers; just codegen wiring.
+>
+> **755 tests, 0 failures on super-io.** Full suite runs in 136s
+> (down from ~28min pre-sweep).
+>
+> Next step is a Kepler smoke on `~/exmc/exmc` at `feat/nx-0.12`:
+>
+> 1. Pull latest: `git pull super-io feat/nx-0.12` in `~/exmc/exmc`.
+>    Latest is `a92894010` (Surface A) built on top of your
+>    `1820e74bd` (race results).
+> 2. `mix compile` — expect clean (no warnings beyond the pre-existing
+>    correlation_monitor.ex noise).
+> 3. Sample a single-family Normal(mu, sigma) model at `d=8` with
+>    small sigma (say `sigma=0.02`, mimicking the regime prior
+>    scale). Under D88 f64 default, Surface A means this goes
+>    through synth, NOT the spirit family SPV. Check:
+>    - Posterior mean ≈ mu (say ≤ 0.1 × sigma tolerance)
+>    - Posterior sd > 0.5 × sigma (no D87-style collapse)
+>    - No divergence storm (< 5% of samples)
+> 4. Repeat for at least one transcendental family — HalfNormal or
+>    StudentT (Surface 7 has the log_d/exp_d boundary casts; verify
+>    they land under the prior-only synth path too, since super-io
+>    only got the render_prior_only fix here in Surface A).
+> 5. Commit a per-host table to
+>    `pymc/exmc/research/surface_a_kepler_verification.md` — same
+>    format as `stage2_prereq_mac248.md`.
+>
+> **After that**: family-shader retirement (the `Surface B` /
+> "post-fleet spirit cleanup" step in
+> `research/PLAN_F64_CHAIN_SHADER.md`). Not urgent — the spirit
+> family SPVs are unreachable under f64 default now, just dead
+> weight in `priv/shaders/`. Delete when convenient.
+
+---
+
+# mac-248 — DONE 2026-07-09: `atan2/3` + BinaryBackend-vs-Vulkan race
 
 > **Handoff 2026-07-09**: Surface 7 (f64 synth chain shader) shipped
 > in `823e8a96c` and PASSES on both Kepler GPUs — the D87 f32
