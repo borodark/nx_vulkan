@@ -4,7 +4,7 @@ defmodule Nx.Vulkan.Fast do
 
   Each function is a composition of standard Nx ops that produces
   a mathematically-equivalent result to the fused shader that
-  `Nx.Vulkan.Backend` would dispatch. Cross-backend correctness
+  `Nx.Vulkan.VulkanoBackend` would dispatch. Cross-backend correctness
   is guaranteed (EXLA, BinaryBackend, EMLX, VulkanoBackend).
 
   ## Note on Nx 0.12 migration

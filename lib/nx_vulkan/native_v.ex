@@ -1,53 +1,18 @@
 defmodule Nx.Vulkan.NativeV do
   @moduledoc """
-  Rustler NIF for the pure-Rust (vulkano) compute backend.
+  Rustler NIF for the vulkano compute backend.
 
-  Sibling of `Nx.Vulkan.Native` (the C++/spirit-backed NIF). Same
-  chain-shader dispatch contract, but resource lifetimes are
-  managed by Rust ownership (Arc<Buffer>) rather than opaque
-  `VkBuf*` pointers — so the stale-handle bug class that
-  surfaced as `ArgumentError` in `Nx.Vulkan.Backend.to_binary`
-  (Mission II R4) is structurally absent.
+  Resource lifetimes are managed by Rust ownership (Arc<Buffer>).
+  When the BEAM GCs the Elixir reference, vulkano's `Drop` runs
+  and the GPU memory is freed.
 
-  This module is the spike landing zone — for now it only
-  exposes `leapfrog_chain_synth/6`, taking bytes in and bytes
-  out (no persistent ResourceArc tensor handles). When the
-  vulkano backend gets feature-parity with the C++ path, this
-  expands to cover `apply_binary`, `reduce`, etc.
-
-  ## Compatibility
-
-  - Loads any SPV the existing pipeline emits (verified
-    byte-for-byte equivalence against `Nx.Vulkan.Native.leapfrog_chain_synth`
-    on the regime-model R3 fixture; see
-    `nx_vulkan/spike/vulkano_synth/README.md`).
-  - Builds on Linux + FreeBSD 15.0 with vulkano 0.34.
+  Builds on Linux + FreeBSD 15.0 with vulkano 0.34.
   """
 
   use Rustler, otp_app: :nx_vulkan, crate: :nx_vulkan_vulkano
 
   @doc """
-  Dispatch a K-step leapfrog chain against the synthesised SPV.
-
-  All inputs are binaries:
-
-  - `q_init`, `p_init`: d * 4 bytes each (little-endian f32)
-  - `extras`: (n_obs + d) * 4 bytes — obs followed by inv_mass
-    in the R2.2.3 packed layout
-  - `push`: 20–128 bytes, the synth template's push block
-    (`K, n_obs, d, _pad, eps`)
-  - `k`: leapfrog steps per dispatch (must match push.K)
-  - `spv_path`: filesystem path to the cached SPV blob
-
-  Returns `{:ok, {q_chain_bin, p_chain_bin, grad_chain_bin,
-  logp_chain_bin}}` on success — same shape as the C++ NIF's
-  return after `download_binary_batch4/4`.
-  """
-  def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  @doc """
-  Plan A* — boundary-cast f64 variant of `leapfrog_chain_synth/6`.
+  Boundary-cast f64 leapfrog chain dispatch.
 
   Same dispatch contract but all binaries are little-endian f64
   (8 bytes per element). Push block is 24+ bytes (eps is f64 at byte
@@ -66,33 +31,6 @@ defmodule Nx.Vulkan.NativeV do
   def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  @doc """
-  Task #154 — batched multi-instrument leapfrog dispatch (Phase 2).
-
-  Sibling of `leapfrog_chain_synth/6` (single instance, f32). Inputs are
-  N-instance concatenations packed as little-endian f32:
-
-  - `q_init`: `n_instances * d * 4` bytes (instance-contiguous)
-  - `p_init`: same shape as q_init
-  - `extras`: `n_instances * (n_obs + d) * 4` bytes (per-instance
-    `obs[0..n_obs-1]` followed by `inv_mass[0..d-1]`)
-  - `push`: 20-byte header (K, n_obs, d, n_instances, eps) + prior floats
-  - `k`: leapfrog steps per dispatch (matches push.K)
-  - `spv_path`: path to the batched SPV from
-    `MultiRvCustomSpec.render_batched/1`
-
-  Dispatched as `[n_instances, 1, 1]` workgroups — one per instance,
-  256 threads each. Per-instance shared memory naturally isolated.
-
-  Returns `{:ok, {q_chain_bin, p_chain_bin, grad_chain_bin,
-  logp_chain_bin}}` as f32 binaries:
-  - q/p/grad: `n_instances * K * d * 4` bytes
-  - logp: `n_instances * K * 4` bytes
-
-  See `exmc/docs/PLAN_BATCHED_INSTRUMENT_DISPATCH.md` for the full design.
-  """
-  def leapfrog_chain_synth_batch(_q, _p, _extras, _push, _k, _spv_path),
-    do: :erlang.nif_error(:nif_not_loaded)
 
   # -- Buffer lifecycle ---------------------------------------------------
 
@@ -183,5 +121,16 @@ defmodule Nx.Vulkan.NativeV do
   (m*n*4).
   """
   def matmul(_out, _a, _b, _m, _n, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # Chain shader NIFs — registered in Rust, must have stubs here for NIF loading.
+  # f32 variant kept as stub only (unused); f64 is the active path.
+  def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def leapfrog_chain_synth_batch(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 end

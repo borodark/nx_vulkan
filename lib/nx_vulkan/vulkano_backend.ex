@@ -1,8 +1,7 @@
 defmodule Nx.Vulkan.VulkanoBackend do
   @moduledoc """
-  Pure-Rust (vulkano) `Nx.Backend` implementation. Sibling of
-  `Nx.Vulkan.Backend` (C++ spirit-backed); same compute fabric,
-  different memory-management story.
+  Pure-Rust (vulkano) `Nx.Backend` implementation. f64-only compute;
+  f32 inputs are accepted and cast as needed.
 
   Tensors are represented by:
 
@@ -131,16 +130,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
     min: 6
   ]
 
-  @elementwise_binary_spv Path.expand(
-                            "../../priv/shaders/elementwise_binary.spv",
-                            __DIR__
-                          )
   @elementwise_binary_f64_spv Path.expand(
                                 "../../priv/shaders/elementwise_binary_f64.spv",
                                 __DIR__
                               )
 
-  defp binary_spv({:f, 32}), do: @elementwise_binary_spv
   defp binary_spv({:f, 64}), do: @elementwise_binary_f64_spv
   defp binary_spv(_), do: nil
 
@@ -197,16 +191,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
     sign: 10
   ]
 
-  @elementwise_unary_spv Path.expand(
-                           "../../priv/shaders/elementwise_unary.spv",
-                           __DIR__
-                         )
   @elementwise_unary_f64_spv Path.expand(
                                "../../priv/shaders/elementwise_unary_f64.spv",
                                __DIR__
                              )
 
-  defp unary_spv({:f, 32}), do: @elementwise_unary_spv
   defp unary_spv({:f, 64}), do: @elementwise_unary_f64_spv
   defp unary_spv(_), do: nil
 
@@ -321,10 +310,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- reductions
 
-  @reduce_axis_spv Path.expand("../../priv/shaders/reduce_axis.spv", __DIR__)
   @reduce_axis_f64_spv Path.expand("../../priv/shaders/reduce_axis_f64.spv", __DIR__)
 
-  defp reduce_spv({:f, 32}), do: @reduce_axis_spv
   defp reduce_spv({:f, 64}), do: @reduce_axis_f64_spv
   defp reduce_spv(_), do: nil
 
@@ -998,7 +985,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- linalg
 
-  @matmul_spv Path.expand("../../priv/shaders/matmul.spv", __DIR__)
   @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
 
   # Dot product (matmul) — Nx callback signature:
@@ -1014,7 +1000,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     b_v = ensure_on_backend(b)
 
     fast_path =
-      type in [{:f, 32}, {:f, 64}] and a_v.type == type and b_v.type == type and
+      type == {:f, 64} and a_v.type == type and b_v.type == type and
         tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
         axes_a == [1] and axes_b == [0] and
         batched_a == [] and batched_b == []
@@ -1029,8 +1015,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       out_bytes = m * n * element_bytes(type)
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-      spv = if type == {:f, 64}, do: @matmul_f64_spv, else: @matmul_spv
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, spv)
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, @matmul_f64_spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else

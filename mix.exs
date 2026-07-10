@@ -20,7 +20,7 @@ defmodule Nx.Vulkan.MixProject do
   end
 
   defp description do
-    "GPU tensor backend for Nx via Vulkan compute. Pure-Rust path (vulkano) plus C++ spirit path. Validated on Axon training, Scholar linear regression, and the eXMC NUTS sampler. Works on Linux + FreeBSD NVIDIA where CUDA does not exist."
+    "GPU tensor backend for Nx via Vulkan compute (vulkano/Rust, f64-only compute). Validated on Axon training, Scholar linear regression, and the eXMC NUTS sampler. Works on Linux + FreeBSD NVIDIA where CUDA does not exist."
   end
 
   defp docs do
@@ -41,8 +41,7 @@ defmodule Nx.Vulkan.MixProject do
   defp deps do
     [
       {:nx, "~> 0.10 or ~> 0.11 or ~> 0.12"},
-      # The NIF — bound to spirit's Vulkan compute backend via a small
-      # extern "C" shim. Rustler manages NIF resource lifetimes so
+      # Pure-Rust vulkano NIF. Rustler manages NIF resource lifetimes so
       # tensor handles get freed when their Elixir reference is GC'd.
       # Pin to 0.36; 0.37.3 has a rustler-sys signature mismatch with
       # rustc 1.90 (`&self.as_c_arg()` where `self.as_c_arg()` is wanted).
@@ -67,13 +66,8 @@ defmodule Nx.Vulkan.MixProject do
       files:
         ~w(
           lib
-          native/nx_vulkan_native/Cargo.toml
-          native/nx_vulkan_native/Cargo.lock
-          native/nx_vulkan_native/src
-          native/nx_vulkan_native/build.rs
           native/nx_vulkan_vulkano/Cargo.toml
           native/nx_vulkan_vulkano/src
-          c_src
           priv/shaders
           docs
           examples
