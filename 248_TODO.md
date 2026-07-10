@@ -1,4 +1,132 @@
-# mac-248 — NEXT: `MultipleSubmit` → `SimultaneousUse` at 9 sites (amend b2fc215)
+# mac-248 — NEXT: call `future.cleanup_finished()` after `future.wait(None)`
+
+> **Handoff 2026-07-10 late from super-io.** `5efbb9e`
+> (`SimultaneousUse` at 9 sites) killed the Vulkan-side VUID
+> (`03874`, then `03875`) — both queue-submit validators are quiet.
+> On Ampere super-io the test still panics, but this is now a
+> **vulkano internal resource-tracker** error, not a Vulkan VUID:
+>
+> ```
+> thread '<unnamed>' panicked at .../vulkano-0.34.2/src/command_buffer/traits.rs:445:26:
+> called `Result::unwrap()` on an `Err` value: a validation error occurred
+> Caused by:
+>     access to a resource has been denied
+>     (resource use: Some(ResourceUseRef {
+>       command_index: 3, command_name: "dispatch",
+>       resource_in_command: DescriptorSet { set: 0, binding: 6, index: 0 },
+>       secondary_use_ref: None
+>     }),
+>     error: the resource is already in use, and there is no tracking of concurrent usages)
+> ```
+>
+> Backtrace pinpoints the panic:
+>
+> ```
+> 10: core::ptr::drop_in_place<CommandBufferExecFuture<NowFuture>>
+> 11: FenceSignalFuture<F>::wait
+> 12: nx_vulkan_vulkano::…::leapfrog_chain_synth_f64
+> ```
+>
+> The panic is in the **Drop** of the future, not in our explicit
+> `wait(None)?`. Our wait returns Ok, we download buffers, then
+> `future` goes out of scope; its Drop calls its own internal wait
+> which touches vulkano's per-resource lock tracker. Binding 6 is
+> `logp_chain_buf`, whose `Arc<Buffer>` was allocated from the
+> `StandardMemoryAllocator` pool. Vulkano's tracker follows the
+> `Arc`, so recycled memory backing still appears in-use to the
+> tracker even after the fence signaled.
+>
+> **Fix.** Vulkano's own docs
+> (`vulkano-0.34.2/src/sync/future/mod.rs:132-134`):
+>
+> > It is highly recommended to call `cleanup_finished` from time to time.
+> > Doing so will prevent memory usage from increasing over time, and will
+> > also **destroy the locks on resources used by the GPU**.
+>
+> That's the resource lock the panic is complaining about. Change
+> every call site from:
+>
+> ```rust
+> let future = sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(|e| format!("then_execute: {e}"))?
+>     .then_signal_fence_and_flush()
+>     .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+>
+> future.wait(None).map_err(|e| format!("wait: {e}"))?;
+> ```
+>
+> to:
+>
+> ```rust
+> let mut future = sync::now(context.device.clone())
+>     .then_execute(context.queue.clone(), cmd_buf)
+>     .map_err(|e| format!("then_execute: {e}"))?
+>     .then_signal_fence_and_flush()
+>     .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+>
+> future.wait(None).map_err(|e| format!("wait: {e}"))?;
+> future.cleanup_finished();  // release GpuFuture's resource locks before drop
+> ```
+>
+> Two edits per site (add `mut`; add cleanup call). 9 sites × 2 =
+> 18 lines. `grep -n "future.wait(None)" native/nx_vulkan_vulkano/src/lib.rs`
+> lists them all.
+>
+> **Why `SimultaneousUse` alone wasn't enough.** That flag governs
+> the *command buffer*'s reuse policy at the Vulkan API layer — it
+> quieted `vkQueueSubmit2` validation. Vulkano keeps its own
+> per-resource lock structure on top of the Vulkan layer (that's the
+> "there is no tracking of concurrent usages" line), and only
+> `cleanup_finished()` releases those locks. Not calling it while
+> looping thousands of times per NUTS sample is what the doc
+> comment is warning about: "memory usage from increasing over time".
+>
+> **Repro on super-io Ampere:**
+>
+> ```
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> ~19s to panic. Post-fix should sample to completion.
+>
+> **Suggested commit message:**
+>
+> ```
+> Call GpuFuture::cleanup_finished after wait — release resource locks
+>
+> Amends 5efbb9e. SimultaneousUse quieted VUID-vkQueueSubmit2-*
+> queue-submit validators, but vulkano keeps its own per-resource
+> lock tracker on top of the Vulkan layer. Without cleanup_finished,
+> those locks accumulate across NIF calls and eventually the
+> AutoCommandBufferBuilder-tracked resource conflict fires from
+> CommandBufferExecFuture's Drop impl (mid-scope, not from our
+> explicit wait).
+>
+> Fix per vulkano-0.34.2/src/sync/future/mod.rs:132-134: call
+> future.cleanup_finished() immediately after future.wait(None)?
+> at every one of the 9 sites.
+>
+> Verified on Ampere super-io: test/trading_test.exs:75 samples to
+> completion.
+> ```
+>
+> **After the fix**, ping super-io. Full-suite rerun. Expected drop
+> from 61 failures to ~26 (10 SynthUnsupportedError + 3 Push
+> encoders + ~13 downstream needing individual audit), all
+> non-blocking per D90.
+
+---
+
+# mac-248 — DONE 2026-07-10: `MultipleSubmit` → `SimultaneousUse` (5efbb9e)
+
+> Landed on both Kepler + Ampere; Vulkan-side VUIDs quiet. Vulkano
+> internal tracker still needs `cleanup_finished` per the amend
+> above.
+>
+> Original handoff below.
+
+# mac-248 — DONE (partial): `MultipleSubmit` → `SimultaneousUse` at 9 sites (amend b2fc215)
 
 > **Handoff 2026-07-10 evening from super-io.** Your `b2fc215`
 > ("Fix OneTimeSubmit panic + clean dangling spirit refs") built
