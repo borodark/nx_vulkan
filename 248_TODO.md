@@ -1,4 +1,117 @@
-# mac-248 — NEXT: verify Surface A on Kepler
+# mac-248 — NEXT: fix `CommandBufferUsage::OneTimeSubmit` panic at 9 sites
+
+> **Handoff 2026-07-10 from super-io.** `POST_F32_DROP_REVIEW`
+> (in `pymc/exmc/research/POST_F32_DROP_REVIEW.md`) blocks the
+> `feat/nx-0.12` merge on a single vulkano NIF bug you can
+> reproduce in ~20s.
+>
+> **Symptom.** 28+ tests fail with `:nif_panicked` in
+> `Nx.Vulkan.NativeV.leapfrog_chain_synth_f64` and (after full-suite
+> rerun) also in `Nx.Vulkan.NativeV.apply_binary`. Rust backtrace:
+>
+> ```
+> thread '<unnamed>' panicked at .../vulkano-0.34.2/src/command_buffer/traits.rs:445:26:
+> called `Result::unwrap()` on an `Err` value: a validation error occurred
+> Caused by:
+>     a command buffer, or one of the secondary command buffers it executes,
+>     was created with the `CommandBufferUsage::OneTimeSubmit` usage,
+>     but it has already been submitted in the past
+> Vulkan VUIDs: VUID-vkQueueSubmit2-commandBuffer-03874
+> ```
+>
+> **Root cause.** `StandardCommandBufferAllocator` pools the
+> underlying `vk::CommandBuffer` handles across NIF calls. Every one
+> of our NIFs (`leapfrog_chain_synth_f64`, `apply_binary`,
+> `apply_unary`, reduce, etc.) builds a fresh
+> `AutoCommandBufferBuilder::primary(..., CommandBufferUsage::OneTimeSubmit)`,
+> submits once via `then_execute` + `then_signal_fence_and_flush`,
+> waits, drops. The second call gets a recycled handle whose
+> vulkano-side state still records the prior `OneTimeSubmit`
+> submission — validator rejects it.
+>
+> Pre-`851155b5a` (exmc), spirit's C++ backend served many code paths
+> with its own buffer lifecycle, so this bug was latent. After spirit
+> deletion, every `Nx.multiply` / `Nx.max` / `leapfrog_chain_synth_f64`
+> in the suite hammers vulkano and fires the panic on the second call.
+>
+> **Fix.** `CommandBufferUsage::OneTimeSubmit` →
+> `CommandBufferUsage::MultipleSubmit` at all 9 sites in
+> `native/nx_vulkan_vulkano/src/lib.rs`:
+>
+> ```
+> $ grep -n OneTimeSubmit native/nx_vulkan_vulkano/src/lib.rs
+> 520:            CommandBufferUsage::OneTimeSubmit,
+> 687:            CommandBufferUsage::OneTimeSubmit,
+> 845:            CommandBufferUsage::OneTimeSubmit,
+> 985:        CommandBufferUsage::OneTimeSubmit,
+> 1145:            CommandBufferUsage::OneTimeSubmit,
+> 1219:            CommandBufferUsage::OneTimeSubmit,
+> 1299:            CommandBufferUsage::OneTimeSubmit,
+> 1405:            CommandBufferUsage::OneTimeSubmit,
+> 1507:            CommandBufferUsage::OneTimeSubmit,
+> ```
+>
+> All 9 sites follow the same oneshot-per-NIF pattern (build → submit
+> once → wait → drop), so `MultipleSubmit` is correct at all of them.
+> Nothing in the codebase currently reuses a built command buffer;
+> if a future persistent-command-buffer optimisation ever lands, it
+> gets its own review then.
+>
+> **Alternatives considered** (do NOT do these unless option 1 fails
+> for a reason we don't currently anticipate):
+> - Per-call `StandardCommandBufferAllocator::new(...)`. Heavier —
+>   allocator setup on every NIF call. Only pick this if
+>   `MultipleSubmit` turns out to have side effects on the pool.
+> - Explicit `cmd_allocator.try_reset_pool()` per call. Same
+>   trade-off; also more places to touch.
+>
+> **Repro on any host.**
+>
+> ```
+> cd ~/exmc/exmc
+> git pull super-io feat/nx-0.12    # or whatever your remote is called
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> Panics in ~20s. Post-fix, that test should pass, and the full
+> suite failure count should drop from 61 to <20 (the residual is
+> ~10 `SynthUnsupportedError` from tests that need `@tag`s and 3
+> missing Push encoders for Lognormal/TruncatedNormal — non-blocking).
+>
+> **Ship the fix as a single commit on `feat/nx-0.12-compat`.**
+> Suggested commit message:
+>
+> ```
+> Fix VUID-vkQueueSubmit2-commandBuffer-03874: MultipleSubmit at 9 sites
+>
+> StandardCommandBufferAllocator pools vk::CommandBuffer handles across
+> NIF invocations. Every compute NIF built its command buffer with
+> CommandBufferUsage::OneTimeSubmit, submitted once via then_execute +
+> then_signal_fence_and_flush, waited, dropped. On the second call the
+> pool returned a recycled handle whose vulkano state still recorded
+> the prior submission, and vkQueueSubmit2 validation rejected it.
+>
+> Every one of the 9 sites is a oneshot-per-NIF pattern with no reuse,
+> so switching to MultipleSubmit is correct at all of them.
+>
+> Fixes 28+ :nif_panicked failures on pymc/exmc feat/nx-0.12 post-851155b5a
+> (Drop f32 dispatch paths).
+> ```
+>
+> **After the fix.** Ping super-io — we re-run the full exmc suite
+> and (assuming the residual is honestly ~10 SynthUnsupportedError +
+> 3 Push-encoder + <5 downstream) proceed to Surface A Kepler
+> verification as originally queued (see below).
+>
+> **Context docs:**
+> - `pymc/exmc/research/POST_F32_DROP_REVIEW.md` — the full review
+> - `pymc/exmc/research/ARCH_PRECISION_MATRIX.md` — compiler ×
+>   precision matrix
+> - `pymc/exmc/DECISIONS.md` §90 — the ratifying decision
+
+---
+
+# mac-248 — NEXT: verify Surface A on Kepler (unblocked after the fix above)
 
 > **Handoff 2026-07-09 evening**: super-io shipped Surface A of
 > `PLAN_F64_CHAIN_SHADER` in `a92894010` — under f64 default,
