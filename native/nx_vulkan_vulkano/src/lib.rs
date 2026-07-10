@@ -532,13 +532,14 @@ fn leapfrog_chain_synth<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
 
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -699,13 +700,14 @@ fn leapfrog_chain_synth_f64<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
 
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -860,13 +862,14 @@ fn leapfrog_chain_synth_batch<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
 
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -1019,7 +1022,7 @@ fn concat_buffers<'a>(
         }
     };
 
-    let future = match sync::now(context.device.clone())
+    let mut future = match sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
     {
         Ok(f) => f,
@@ -1030,7 +1033,7 @@ fn concat_buffers<'a>(
         }
     };
 
-    let future = match future.then_signal_fence_and_flush() {
+    let mut future = match future.then_signal_fence_and_flush() {
         Ok(f) => f,
         Err(e) => {
             return Ok(
@@ -1044,6 +1047,7 @@ fn concat_buffers<'a>(
             (atoms::error(), atoms::dispatch_failed(), format!("wait: {e}")).encode(env),
         );
     }
+    future.cleanup_finished();
 
     let tensor = VulkanoTensor {
         buf: dst,
@@ -1157,12 +1161,13 @@ fn apply_binary<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("fence: {e}"))?;
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok(())
     })();
@@ -1230,12 +1235,13 @@ fn apply_unary<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("fence: {e}"))?;
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok(())
     })();
@@ -1319,12 +1325,13 @@ fn reduce_axis<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("fence: {e}"))?;
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok(())
     })();
@@ -1416,12 +1423,13 @@ fn transpose_2d<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("fence: {e}"))?;
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok(())
     })();
@@ -1518,12 +1526,13 @@ fn matmul<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
+        let mut future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
             .then_signal_fence_and_flush()
             .map_err(|e| format!("fence: {e}"))?;
         future.wait(None).map_err(|e| format!("wait: {e}"))?;
+        future.cleanup_finished();
 
         Ok(())
     })();
