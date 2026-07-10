@@ -532,15 +532,18 @@ fn leapfrog_chain_synth<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        unsafe { future.signal_finished(); }
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -701,15 +704,18 @@ fn leapfrog_chain_synth_f64<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        unsafe { future.signal_finished(); }
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -864,15 +870,18 @@ fn leapfrog_chain_synth_batch<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        unsafe { future.signal_finished(); }
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -1025,13 +1034,20 @@ fn concat_buffers<'a>(
         }
     };
 
-    if let Err(e) = sync::now(context.device.clone())
+    let future = match sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
-        .map_err(|e| format!("execute: {e}"))
-        .and_then(|f| f.flush().map_err(|e| format!("flush: {e}")))
     {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(
+                (atoms::error(), atoms::dispatch_failed(), format!("execute: {e}")).encode(env),
+            )
+        }
+    };
+
+    if let Err(e) = future.flush() {
         return Ok(
-            (atoms::error(), atoms::dispatch_failed(), e).encode(env),
+            (atoms::error(), atoms::dispatch_failed(), format!("flush: {e}")).encode(env),
         );
     }
 
@@ -1040,6 +1056,8 @@ fn concat_buffers<'a>(
             (atoms::error(), atoms::dispatch_failed(), format!("wait_idle: {e}")).encode(env),
         );
     }
+
+    // signal_finished skipped — buffer may be read by caller
 
     let tensor = VulkanoTensor {
         buf: dst,
@@ -1153,15 +1171,18 @@ fn apply_binary<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        // signal_finished skipped — buffer may be read by caller
 
         Ok(())
     })();
@@ -1229,15 +1250,18 @@ fn apply_unary<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        // signal_finished skipped — buffer may be read by caller
 
         Ok(())
     })();
@@ -1321,15 +1345,18 @@ fn reduce_axis<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        // signal_finished skipped — buffer may be read by caller
 
         Ok(())
     })();
@@ -1421,15 +1448,18 @@ fn transpose_2d<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        // signal_finished skipped — buffer may be read by caller
 
         Ok(())
     })();
@@ -1526,15 +1556,18 @@ fn matmul<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        sync::now(context.device.clone())
+        let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?
-            .flush()
-            .map_err(|e| format!("flush: {e}"))?;
+            .map_err(|e| format!("then_execute: {e}"))?;
 
-        // SAFETY: we just flushed the only pending command buffer on this
-        // queue. device.wait_idle drains all queues but we only have one.
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
         unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+
+        // SAFETY: device.wait_idle guarantees the submission is done.
+        // signal_finished sets finished=true so Drop skips its fallback path.
+        // signal_finished skipped — buffer may be read by caller
 
         Ok(())
     })();
