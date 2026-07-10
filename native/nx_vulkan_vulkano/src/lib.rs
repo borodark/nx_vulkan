@@ -532,14 +532,15 @@ fn leapfrog_chain_synth<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
 
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -700,14 +701,15 @@ fn leapfrog_chain_synth_f64<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
 
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -862,14 +864,15 @@ fn leapfrog_chain_synth_batch<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("then_signal_fence_and_flush: {e}"))?;
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
 
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -1022,32 +1025,21 @@ fn concat_buffers<'a>(
         }
     };
 
-    let mut future = match sync::now(context.device.clone())
+    if let Err(e) = sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
+        .map_err(|e| format!("execute: {e}"))
+        .and_then(|f| f.flush().map_err(|e| format!("flush: {e}")))
     {
-        Ok(f) => f,
-        Err(e) => {
-            return Ok(
-                (atoms::error(), atoms::dispatch_failed(), format!("execute: {e}")).encode(env),
-            )
-        }
-    };
-
-    let mut future = match future.then_signal_fence_and_flush() {
-        Ok(f) => f,
-        Err(e) => {
-            return Ok(
-                (atoms::error(), atoms::dispatch_failed(), format!("flush: {e}")).encode(env),
-            )
-        }
-    };
-
-    if let Err(e) = future.wait(None) {
         return Ok(
-            (atoms::error(), atoms::dispatch_failed(), format!("wait: {e}")).encode(env),
+            (atoms::error(), atoms::dispatch_failed(), e).encode(env),
         );
     }
-    future.cleanup_finished();
+
+    if let Err(e) = unsafe { context.device.wait_idle() } {
+        return Ok(
+            (atoms::error(), atoms::dispatch_failed(), format!("wait_idle: {e}")).encode(env),
+        );
+    }
 
     let tensor = VulkanoTensor {
         buf: dst,
@@ -1161,13 +1153,15 @@ fn apply_binary<'a>(
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("fence: {e}"))?;
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok(())
     })();
@@ -1235,13 +1229,15 @@ fn apply_unary<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("fence: {e}"))?;
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok(())
     })();
@@ -1325,13 +1321,15 @@ fn reduce_axis<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("fence: {e}"))?;
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok(())
     })();
@@ -1423,13 +1421,15 @@ fn transpose_2d<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("fence: {e}"))?;
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok(())
     })();
@@ -1526,13 +1526,15 @@ fn matmul<'a>(
             .map_err(|e| format!("dispatch: {e}"))?;
 
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let mut future = sync::now(context.device.clone())
+        sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?
-            .then_signal_fence_and_flush()
-            .map_err(|e| format!("fence: {e}"))?;
-        future.wait(None).map_err(|e| format!("wait: {e}"))?;
-        future.cleanup_finished();
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        // SAFETY: we just flushed the only pending command buffer on this
+        // queue. device.wait_idle drains all queues but we only have one.
+        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
 
         Ok(())
     })();
