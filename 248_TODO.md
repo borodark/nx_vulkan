@@ -1,4 +1,33 @@
-# mac-248 — NEXT: Ampere DeviceLost at exactly ~16 dispatches (cb8d6ca partial) — UPDATED
+# mac-248 — TWO OPEN THREADS (Ampere DeviceLost @ 16 + Custom-only semantic)
+
+## Thread 1: Custom-only IR semantic (new, small)
+
+`test/custom_dist_test.exs:190` in exmc fails because a Custom-only
+IR (a lone `Exmc.Dist.Custom` RV with no standard priors) produces
+`layout=[]` → `d=0`. `MultiRvCustomSpec.compose_custom_term/5`
+hardcodes `Nx.tensor(0.0)` as the `x` argument to the user's logpdf
+(line 253) — the Custom's implicit "position" is a dummy — so a
+Custom-only IR technically has no free RVs to sample.
+
+Guarded on the exmc side at `extract_components/1` (commit
+`8e61c2f0d`) — Custom-only now returns
+`{:error, :no_free_rvs_in_custom_only_model}` → Plan-B' raises
+`SynthUnsupportedError` cleanly, no more Rust `Buffer::new_unsized`
+panic on 0-byte buffers.
+
+**Semantic question for you:** should Custom-as-prior actually work?
+The test author clearly expected it to (`x ~ Custom Normal(0,1)`,
+assert `mean ≈ 0`). That would require:
+- Including the Custom RV's `node_id(node)` in `layout` alongside
+  the standard priors.
+- Changing `compose_custom_term/5` line 253 to pass `q[q_index[id]]`
+  (transformed appropriately) instead of `Nx.tensor(0.0)`.
+
+Not blocking merge — the test either gets `@tag :requires_family_fallback`
+(same treatment as the other 12 SynthUnsupportedError tests) or the
+semantic gets a proper fix in M-III. Owner's call.
+
+## Thread 2 (unchanged): Ampere DeviceLost at exactly ~16 dispatches
 
 > **CORRECTION 2026-07-10 late from super-io.** My earlier handoff
 > in this file (below) speculated Ampere was accumulating over
