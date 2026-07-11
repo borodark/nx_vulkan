@@ -1,4 +1,85 @@
-# mac-248 — NEXT: Ampere DeviceLost after N NIF invocations (cb8d6ca partial on Ampere)
+# mac-248 — NEXT: Ampere DeviceLost at exactly ~16 dispatches (cb8d6ca partial) — UPDATED
+
+> **CORRECTION 2026-07-10 late from super-io.** My earlier handoff
+> in this file (below) speculated Ampere was accumulating over
+> 3–10k NIF calls. **That was wrong.** Empirical count from
+> `pymc/exmc/research/ampere_nif_count.exs` (mix run against the
+> failing regime test):
+>
+> ```
+> Sampling CRASHED after 16 chain-shader dispatches.
+> ```
+>
+> **16**, not thousands. The test's 18s wall time is dominated by
+> mix compile + Nx defn tracing, not by 18000 GPU calls. Each of
+> those 16 dispatches runs 32 leapfrog steps inside a single NIF
+> call (K=32 chain shader), so ~512 shader iterations total —
+> still small.
+>
+> **What this rules out.**
+> - Not memory-allocator pool exhaustion — 16 calls can't grow a
+>   `StandardMemoryAllocator` pool past its default headroom.
+> - Not descriptor-set pool cycling — default
+>   `StandardDescriptorSetAllocator` pools handle >>16 sets before
+>   any expansion.
+> - Not command-buffer pool exhaustion — same.
+>
+> **What "16" points at.** Some 16th-call state issue that's
+> latent on Kepler because timing hides it. Candidates in rough
+> order:
+>
+> 1. **Command buffer allocator's per-frame capacity.** vulkano
+>    0.34's `StandardCommandBufferAllocator` has a
+>    `primary_buffer_count` default that governs how many
+>    command buffers can be in flight per pool. Default in 0.34 is
+>    exactly **32** per pool — but our `SimultaneousUse` cmd buffers
+>    may not be marked as "returned" fast enough on Ampere, so we
+>    exhaust before the pool recycles. 16 doesn't match 32 exactly
+>    but is suspicious.
+> 2. **NVIDIA driver's per-context command buffer soft limit on
+>    Ampere.** Different GA104 driver behaviour vs Kepler GK107.
+>    16 is a common ring-buffer default in NVIDIA drivers.
+> 3. **`PersistentDescriptorSet` pool default.** Vulkano's default
+>    persistent descriptor set pool is 32 sets. 16 is half — with
+>    two-descriptor-sets-per-call bookkeeping (unlikely, but
+>    possible if there's an internal set that shadows ours), that
+>    lines up.
+> 4. **Actual GPU-side pathology on the K=32-leapfrog shader on
+>    Ampere.** 16 dispatches × 32 iters = 512 dispatches of the
+>    inner loop; something at that scale hits GPU state that
+>    Kepler skates past.
+>
+> **Concrete asks (much cheaper than my earlier eprintln
+> instrumentation proposal — please ignore that):**
+>
+> 1. Instantiate `StandardCommandBufferAllocator` with **explicit**
+>    `StandardCommandBufferAllocatorCreateInfo { primary_buffer_count: 128, secondary_buffer_count: 0 }`
+>    at `ctx()` init. If the crash moves to ~128 calls, we've
+>    confirmed hypothesis 1 and pick a permanent value (or use a
+>    per-call allocator).
+> 2. If that doesn't help, set
+>    `StandardDescriptorSetAllocatorCreateInfo { set_count: 256 }`
+>    similarly.
+> 3. If neither helps, we're in hypothesis 4 territory — need to
+>    disable the K-loop (run one leapfrog step per NIF instead of
+>    32) and see whether the crash shifts to the 32nd-call
+>    boundary or stays at 16. That would distinguish
+>    "per-dispatch state accumulation" from "per-inner-iter state
+>    accumulation".
+>
+> **Repro on Ampere super-io** (unchanged):
+>
+> ```
+> cd ~/exmc-src/pymc/exmc
+> mix run research/ampere_nif_count.exs
+> ```
+>
+> Reports the exact call count on both success and crash. Kepler
+> should complete (crash count → 0, "COMPLETED after N").
+
+---
+
+# mac-248 — SUPERSEDED: Ampere DeviceLost after N NIF invocations (cb8d6ca partial on Ampere)
 
 > **Handoff 2026-07-10 latest from super-io.** `cb8d6ca` (queue.wait_idle +
 > signal_finished + explicit drop at 10 sites) **works on Kepler (36/36
