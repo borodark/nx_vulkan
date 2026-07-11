@@ -1,4 +1,127 @@
-# mac-248 — NEXT: bind future + `signal_finished()` (amend 516fe6b)
+# mac-248 — NEXT: Ampere DeviceLost after N NIF invocations (cb8d6ca partial on Ampere)
+
+> **Handoff 2026-07-10 latest from super-io.** `cb8d6ca` (queue.wait_idle +
+> signal_finished + explicit drop at 10 sites) **works on Kepler (36/36
+> nx_vulkan, 32/755 residual exmc failures — none of them NIF-related)**.
+> On Ampere super-io the reproduction test still panics after ~18s, but
+> the character of the failure has changed:
+>
+> - Not a resource-tracker error anymore (buffer access tracking IS
+>   getting released now — the queue.wait_idle vs device.wait_idle
+>   observation you nailed).
+> - Vulkano's `AccessError` chain is gone.
+> - What remains is **`DeviceLost`** — the actual GPU driver reporting
+>   device lost.
+>
+> **Panic backtrace:**
+>
+> ```
+> panicked at .../vulkano-0.34.2/src/command_buffer/traits.rs:447:52:
+> called `Result::unwrap()` on an `Err` value: DeviceLost
+>
+>  10: drop_in_place<CommandBufferExecFuture<NowFuture>>
+>  11: leapfrog_chain_synth_f64
+> ```
+>
+> Line 447 is the second `.unwrap()` inside `CommandBufferExecFuture::Drop`
+> (the `queue.wait_idle().unwrap()` in the fallback body). It fires
+> because our EXPLICIT `queue.wait_idle()` at nx_vulkan_vulkano/src/lib.rs:717
+> returned `Err(DeviceLost)`. The `?` propagates the error, so
+> `signal_finished()` and `drop(future)` are skipped. When the outer
+> closure returns Err, `future` drops implicitly with `finished == false`.
+> Drop takes the fallback branch, tries `queue.wait_idle().unwrap()`
+> again, hits the same DeviceLost, panics.
+>
+> So `DeviceLost` is the **root** error, not a Drop side-effect. Our
+> explicit wait_idle sees it FIRST. Drop's unwrap re-surfaces it as a
+> panic on the way out.
+>
+> **Why Kepler passes and Ampere doesn't.**
+> - Kepler dispatches are slow enough that per-call resource churn stays
+>   inside driver comfort. Ampere finishes each dispatch in ≪1 ms and
+>   accumulates state faster than the driver's tracker is happy with.
+> - The test takes ~18 s on Ampere before panicking. Ampere synth speed
+>   is ~1–5 ms/dispatch, so we're at O(3–10k) NIF calls before the
+>   DeviceLost surfaces. That points at **cumulative resource exhaustion
+>   or allocator fragmentation**, not a first-call incompatibility.
+>
+> **Hypotheses to investigate (in rough order of likelihood):**
+>
+> 1. **Memory allocator not releasing device-local pages after every
+>    NIF call.** `Buffer::from_iter(alloc, ...)` (in `upload_buffer` +
+>    `alloc_buffer`) returns a `Subbuffer<[u8]>`. When we drop it at
+>    end of scope, the `StandardMemoryAllocator` should recycle the
+>    backing pages. On Ampere with sub-ms dispatches, the recycler
+>    may not be running fast enough — pages accumulate until the
+>    driver kills the device on OOM.
+>    - Diagnostic: `eprintln!("vram={:?}", context.mem_allocator.stats())`
+>      before and after every NIF call for the first 100 calls.
+>    - Fix if confirmed: force explicit `Subbuffer::drop` before
+>      `queue.wait_idle` (already implied by scope), or replace
+>      `StandardMemoryAllocator` with `SubbufferAllocator` for the
+>      output buffers (they get read once then discarded).
+>
+> 2. **Descriptor set pool exhaustion.** `PersistentDescriptorSet::new`
+>    allocates from `context.set_allocator` (a
+>    `StandardDescriptorSetAllocator`). Not sure if it recycles fast
+>    enough. On Ampere at 3–10k dispatches, we may be exhausting the
+>    pool.
+>    - Diagnostic: same eprintln pattern for the descriptor allocator.
+>
+> 3. **Command buffer pool accumulation.** `AutoCommandBufferBuilder`
+>    allocates from `context.cmd_allocator` (a
+>    `StandardCommandBufferAllocator`). We build a fresh one every
+>    call. On Ampere, might accumulate.
+>
+> 4. **Actual GPU-side shader bug that only fires under sustained
+>    throughput.** The f64 synth chain shader uses `log_d`/`exp_d`
+>    boundary casts. Something in that path may be pathological on
+>    Ampere GA104 that Kepler GK107 skates past.
+>    - Diagnostic: run the exact same test with `Application.put_env(:exmc,
+>      :compiler, :none)` on super-io — if it passes, it's a shader
+>      issue; if it fails the same way, allocator is the culprit.
+>
+> **Concrete asks:**
+>
+> 1. Add a tick-counter eprintln (feature-gated behind a `debug-nif-alloc`
+>    Cargo feature so it's not on by default) that logs
+>    `StandardMemoryAllocator::stats()` every 100 NIF calls.
+> 2. Run the exmc reproduction on Kepler with the counter on — establish
+>    the baseline growth curve.
+> 3. Push a debug build to super-io; we run the same test on Ampere and
+>    compare the growth curves. If Ampere's is monotonic-up while
+>    Kepler's plateaus, allocator is the culprit and we know what to
+>    fix.
+>
+> Alternative if you have a hunch already: try `context.mem_allocator
+> = StandardMemoryAllocator::new_with_config(...)` with an aggressive
+> `garbage_collection_frequency` or equivalent. Vulkano 0.34's
+> `StandardMemoryAllocator` config knobs are limited; may need
+> `SubbufferAllocator` for the throwaway output buffers.
+>
+> **Repro on Ampere super-io** (unchanged):
+>
+> ```
+> cd ~/exmc-src/pymc/exmc
+> git checkout feat/nx-0.12
+> mix deps.compile nx_vulkan --force
+> RUST_BACKTRACE=full mix test test/trading_test.exs:75
+> ```
+>
+> ~18 s to `Err(DeviceLost)` reliably.
+
+---
+
+# mac-248 — DONE 2026-07-10: queue.wait_idle + signal_finished + drop (cb8d6ca)
+
+> Landed cleanly on Kepler — buffer access tracking releases correctly,
+> resource-conflict chain is closed. Kepler suite: 755 tests / 32
+> failures / 0 NIF panics. On Ampere the tracking is fixed but a
+> deeper `DeviceLost` fires after ~3–10k NIF calls; see NEXT above.
+>
+> Kept for provenance.
+
+# mac-248 — DONE (partial): bind future + `signal_finished()` (amend 516fe6b)
 
 > **Handoff 2026-07-10 latest from super-io.** `516fe6b`
 > (`then_execute` + `flush` + `device.wait_idle`, no FenceSignalFuture)
