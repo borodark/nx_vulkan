@@ -539,11 +539,14 @@ fn leapfrog_chain_synth<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
         unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        // Without this, download_buffer's buf.read() sees "resource in use".
+        drop(future);
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -711,11 +714,14 @@ fn leapfrog_chain_synth_f64<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
         unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        // Without this, download_buffer's buf.read() sees "resource in use".
+        drop(future);
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -877,11 +883,14 @@ fn leapfrog_chain_synth_batch<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
         unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        // Without this, download_buffer's buf.read() sees "resource in use".
+        drop(future);
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -1051,13 +1060,15 @@ fn concat_buffers<'a>(
         );
     }
 
-    if let Err(e) = unsafe { context.device.wait_idle() } {
+    if let Err(e) = context.queue.with(|mut q| q.wait_idle()) {
         return Ok(
             (atoms::error(), atoms::dispatch_failed(), format!("wait_idle: {e}")).encode(env),
         );
     }
 
-    // signal_finished skipped — buffer may be read by caller
+    // SAFETY: device.wait_idle guarantees the submission is done.
+    unsafe { future.signal_finished(); }
+    drop(future);
 
     let tensor = VulkanoTensor {
         buf: dst,
@@ -1178,11 +1189,13 @@ fn apply_binary<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
-        // signal_finished skipped — buffer may be read by caller
+        unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        drop(future);
 
         Ok(())
     })();
@@ -1257,11 +1270,13 @@ fn apply_unary<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
-        // signal_finished skipped — buffer may be read by caller
+        unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        drop(future);
 
         Ok(())
     })();
@@ -1352,11 +1367,13 @@ fn reduce_axis<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
-        // signal_finished skipped — buffer may be read by caller
+        unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        drop(future);
 
         Ok(())
     })();
@@ -1455,11 +1472,13 @@ fn transpose_2d<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
-        // signal_finished skipped — buffer may be read by caller
+        unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        drop(future);
 
         Ok(())
     })();
@@ -1563,11 +1582,13 @@ fn matmul<'a>(
         future.flush().map_err(|e| format!("flush: {e}"))?;
 
         // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        unsafe { context.device.wait_idle() }.map_err(|e| format!("wait_idle: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
 
         // SAFETY: device.wait_idle guarantees the submission is done.
         // signal_finished sets finished=true so Drop skips its fallback path.
-        // signal_finished skipped — buffer may be read by caller
+        unsafe { future.signal_finished(); }
+        // Drop the future to release vulkano's internal buffer access tracking.
+        drop(future);
 
         Ok(())
     })();
