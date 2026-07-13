@@ -235,9 +235,19 @@ fn ctx() -> Result<&'static VkContext, String> {
     let queue = queues.next().ok_or_else(|| "no queue".to_string())?;
 
     let mem_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+    // Ampere DeviceLost @ 16 dispatches — hypothesis 1 from
+    // HANDOFF_MAC248_AMPERE_DEVICELOST.md Thread 2. Default is 32 primary
+    // buffers per pool; on Ampere, SimultaneousUse command buffers don't
+    // get marked "returned" fast enough and we exhaust the pool at 16.
+    // Bump to 128 — if crash moves from 16 to ~128, hyp 1 confirmed and
+    // we pick a permanent value or switch to per-call allocator.
     let cmd_allocator = Arc::new(StandardCommandBufferAllocator::new(
         device.clone(),
-        StandardCommandBufferAllocatorCreateInfo::default(),
+        StandardCommandBufferAllocatorCreateInfo {
+            primary_buffer_count: 128,
+            secondary_buffer_count: 0,
+            ..Default::default()
+        },
     ));
     // Default 32-slot pool is fine *if* layouts are stable (which the
     // pipeline cache ensures). Bumping set_count regressed RTX 3060 Ti
