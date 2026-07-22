@@ -40,7 +40,7 @@ defmodule Nx.Vulkan.MixProject do
 
   defp deps do
     [
-      {:nx, "~> 0.10 or ~> 0.11 or ~> 0.12"},
+      {:nx, "~> 0.13"},
       # Pure-Rust vulkano NIF. Rustler manages NIF resource lifetimes so
       # tensor handles get freed when their Elixir reference is GC'd.
       # Pin to 0.36; 0.37.3 has a rustler-sys signature mismatch with
