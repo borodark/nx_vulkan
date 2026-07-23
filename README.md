@@ -26,9 +26,10 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 
 ## What works today
 
-- **24 native compute ops** — elementwise binary/unary (f32 + f64),
-  reductions (sum / max / min along any axis, leading, or trailing),
-  reshape / squeeze / transpose-2D, matmul (f32).
+- **24 native compute ops** — elementwise binary/unary, reductions
+  (sum / max / min along any axis, leading, or trailing),
+  reshape / squeeze / transpose-2D, matmul. Compute is **f64**; f32
+  inputs are accepted and cast to f64.
 - **Host fallback for the long tail** — slice, `as_type`, general
   `Nx.dot` axes, `Nx.LinAlg.SVD`/`QR`/`solve`/`cholesky` (via
   `Nx.Block.LinAlg`). Slow but correct.
@@ -58,7 +59,7 @@ Roadmap and future work: [`ROADMAP.md`](ROADMAP.md).
 | **Windows / WSL2** | partial via TF | ✗ | ✓ (Vulkan ships on Windows) |
 | **Op coverage** | full Nx surface (~200) | full Nx surface | 24 native, rest via host fallback |
 | **`Nx.Defn.grad` (autograd)** | full | full | **✓ free** (graph transformation) |
-| **fp64 compute** | full | none (Metal limit) | ✓ binary/unary/reduce |
+| **fp64 compute** | full | none (Metal limit) | ✓ f64-only compute (binary/unary/reduce/matmul) |
 
 ### The autograd insight
 
@@ -99,7 +100,7 @@ BEAM scheduler. Full bench: [`examples/full_bench.exs`](examples/full_bench.exs)
 # mix.exs
 def deps do
   [
-    {:nx, "~> 0.10"},
+    {:nx, "~> 0.13"},
     {:nx_vulkan, git: "https://github.com/borodark/nx_vulkan"}
   ]
 end

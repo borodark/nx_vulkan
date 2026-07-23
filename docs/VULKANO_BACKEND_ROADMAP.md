@@ -29,7 +29,7 @@ The C++ path is now legacy; new work targets the vulkano path because:
 | `VulkanoBackend` unary SPV ops (exp/log/sqrt/abs/neg/sigmoid/tanh/floor/ceil/sign) | ✓ |
 | `VulkanoBackend` reductions (sum/reduce_max/reduce_min) | ✓ |
 | `VulkanoBackend` movement (reshape, squeeze, 2D transpose) | ✓ |
-| `VulkanoBackend` matmul (rank-2 f32 fast path via SPV) | ✓ |
+| `VulkanoBackend` matmul (rank-2 f64 fast path via SPV) | ✓ |
 | `VulkanoBackend` comparison (host fallback) | ✓ |
 | `VulkanoBackend` sampler-host ops (pad/put_slice/indexed_put/indexed_add/broadcast/concatenate/gather/take, all host fallback, Tier 1) | ✓ |
 | Defn integration via Evaluator (works when global default = VulkanoBackend) | ✓ |
@@ -80,7 +80,7 @@ reduction to scalar). Then per-axis via `reduce_axis.spv`.
 (GPU-side broadcast shader for non-zero-stride cases), `transpose`,
 `slice`, `gather`.
 
-### Stage 5 — Linalg  *(PARTIAL — dot/matmul rank-2 f32 fast path on GPU; cholesky/solve/qr/svd via `block/4` host fallback; native SPV impls TODO)*
+### Stage 5 — Linalg  *(PARTIAL — dot/matmul rank-2 f64 fast path on GPU; cholesky/solve/qr/svd via `block/4` host fallback; native SPV impls TODO)*
 
 **Ops:** `dot/6` (matmul), `cholesky`, `solve`, `qr`, `svd`,
 `determinant`. Some of these need new shaders; matmul has multiple
@@ -128,9 +128,10 @@ half of EXLA's throughput on the same hardware where EXLA runs.
 
 ## Non-goals
 
-- f64 compute (vulkano supports it but most consumer GPUs are
-  ~32× slower at f64). Storage f64 is fine; compute defaults to
-  f32 with `as_type` cast.
+- ~~f64 compute~~ **(now shipped)** — the native shaders are f64 and
+  compute defaults to f64; f32 inputs are cast to f64. Consumer GPUs
+  are slower at f64, but correctness (EMLX-drop, f64-default) took
+  priority over the f32 speed path.
 - CUDA-specific features (tensor cores, mixed precision) — vulkano
   abstracts over them, but extracting them is out of scope until
   stages 1–10 are done.

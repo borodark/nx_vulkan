@@ -30,7 +30,7 @@ Kepler (GT 650M, GT 750M). D90 vulkano-only architecture merged
 | Cross-Kepler bit-determinism (GT 650M ≡ GT 750M) | ✓ |
 | Ampere `primary_buffer_count=128` cmd-buffer fix | ✓ |
 | Persistent buffer pool | mid-2026 |
-| f64 matmul | 2 weeks |
+| f64 matmul (`matmul_f64.spv`) | ✓ |
 | Scholar native linalg shaders (SVD/QR/cholesky/solve) | mid-2026 |
 | Polynomial f64 log/exp (behind config) — exmc side | ✓ (default: f32-cast) |
 | Custom `Nx.Defn` compiler | 2026 H2 |
@@ -57,9 +57,10 @@ through vulkano's `StandardMemoryAllocator`. Works but costs a
 millisecond per dispatch that an explicit pool could reclaim.
 Mid-2026 work.
 
-**f64 matmul.** `matmul.spv` is f32-only. f64 dot products fall
-back to host, which is slow for large tensors. ~2 weeks to add the
-f64 variant.
+**f64 matmul.** Done — `matmul_f64.spv` ships and rank-2 matmul runs
+natively in f64 (the backend is f64-only compute now; f32 inputs are
+cast). General `Nx.dot` axis configs outside rank-2×rank-2 still
+host-fall-back.
 
 **Scholar — linalg fast paths.** Linear regression (normal equation
 + SVD) now smoke-tests cleanly via a host-fallback `block/4`

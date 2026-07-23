@@ -13,24 +13,17 @@ conclusions from a Vulkan benchmark number.
 
 ## 1. Compute precision
 
-**What's true**: shaders are **f32-only**. Storage round-trips any
-numeric type (f32, f64, s8..s64, u8..u64) but the moment a shader
-dispatches, operands must be f32.
+> **Updated (post-f64 migration).** The f32-only limitation below is
+> historical. `VulkanoBackend` is now **f64-only compute**: the native
+> shaders (elementwise binary/unary, reductions, matmul, the leapfrog
+> chain synth) run in f64, and f32 inputs are accepted and cast to f64.
+> The Phase-3 "f32-only, f64 deferred" note is superseded.
 
-**Shortcut**: when the backend receives non-f32 operands for a compute
-op, it falls back to `Nx.BinaryBackend` via download → host op → upload.
-Three implications:
-  - Speed: each host-fallback op costs a full GPU↔host round-trip
-    (~50–200µs depending on size), serialized through the global
-    `SUBMIT_LOCK`.
-  - Correctness: the result is correct but produced on CPU.
-  - Precision contract: `Exmc.JIT.precision()` returns `:f32` for the
-    Vulkan path, matching MLX. Code that depends on f64 mass-matrix
-    accumulation must explicitly `Nx.as_type/2` between f64 and f32.
-
-**Proper fix (deferred)**: f64 elementwise/reduce shaders. Doubles the
-shader inventory and most consumer GPUs charge a 32× penalty for f64
-anyway, so this stays opt-in if it ever lands.
+**What's true**: compute shaders are **f64**. Storage round-trips any
+numeric type (f32, f64, s8..s64, u8..u64); f32 operands are accepted and
+cast to f64 at dispatch. `Exmc.JIT.precision()` returns `:f64` for the
+Vulkan path (EMLX, the f32-only backend, was dropped). The f64 shader
+inventory (`*_f64.spv`) is what ships in `priv/shaders/`.
 
 ---
 
@@ -86,7 +79,7 @@ the same constraints, inherited from `fused_elementwise.spv`:
 - **Two input buffers only.** Op chain operates on `a` (running
   register) and `b` (second operand for binary steps). A third tensor
   `c` cannot participate. `Nx.add(Nx.multiply(a, b), c)` doesn't fuse.
-- **f32 only.** Same as the rest of compute.
+- **f64.** Same as the rest of compute (see §1).
 - **Same shape only.** No broadcast within a chain. `a` and `b` must
   match.
 - **Up to 8 ops per dispatch.** Longer chains must be split (the user

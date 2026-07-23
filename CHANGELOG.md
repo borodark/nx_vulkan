@@ -4,6 +4,14 @@
 
 ### Changed
 
+- **f64-only compute.** Native shaders — elementwise binary/unary,
+  reductions, rank-2 matmul (`matmul_f64.spv`), and the leapfrog chain
+  synth — now run in **f64**; f32 inputs are accepted and cast to f64.
+  This supersedes 0.1.0's "elementwise f32 + f64 / matmul f32-only"
+  coverage: matmul is now native f64 (was host-fallback for f64), and
+  the eXMC precision contract is `:f64` (EMLX, the f32-only backend, was
+  dropped). Consumer GPUs are slower at f64, but correctness took
+  priority over the f32 speed path.
 - **Support Nx 0.13.** The `:nx` version constraint is now `{:nx, "~> 0.13"}`
   (was `~> 0.10 or ~> 0.11 or ~> 0.12`). `VulkanoBackend` and the f64
   chain-shader synthesis path run unchanged against nx 0.13's backend API.
