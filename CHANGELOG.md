@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Support Nx 0.13.** The `:nx` version constraint is now `{:nx, "~> 0.13"}`
+  (was `~> 0.10 or ~> 0.11 or ~> 0.12`). `VulkanoBackend` and the f64
+  chain-shader synthesis path run unchanged against nx 0.13's backend API.
+  Required for consumers on nx 0.13 — e.g. eXMC's vulkan milestone, which
+  references this repo from `mix` and could not resolve against the prior
+  sub-0.13 constraint.
+
 ## 0.1.0 (2026-05-20)
 
 First Hex release.
