@@ -373,7 +373,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  defp all_axes(shape), do: Enum.to_list(0..(tuple_size(shape) - 1))
+  # Explicit `//1` step: under Elixir's post-1.16 / nx-0.13 range semantics a
+  # bare `0..(n - 1)` with n == 0 becomes `0..-1` and defaults to a *descending*
+  # step (yielding [0, -1]) instead of the empty list. That corrupted the reduce
+  # axes for scalar/rank-0 shapes and hung do_reduce. `//1` restores the intended
+  # ascending-or-empty behaviour.
+  defp all_axes(shape), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
 
   # Classify the reduction shape:
   #   - All axes      → outer=1, reduce=product(shape), inner=1
@@ -385,10 +390,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
     dims = Tuple.to_list(in_shape)
 
     cond do
-      sorted == Enum.to_list(0..(rank - 1)) ->
+      sorted == Enum.to_list(0..(rank - 1)//1) ->
         {:ok, {1, Enum.reduce(dims, 1, &Kernel.*/2), 1}}
 
-      sorted == Enum.to_list(0..(length(sorted) - 1)) ->
+      sorted == Enum.to_list(0..(length(sorted) - 1)//1) ->
         reduced = Enum.take(dims, length(sorted))
         remaining = Enum.drop(dims, length(sorted))
         outer = 1
