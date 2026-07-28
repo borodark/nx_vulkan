@@ -57,12 +57,21 @@ round-off (< 1e-4); the f64 path is unchanged.
 - Well-conditioned random matmul: f64-acc error grows more slowly than naive —
   at K=4096, **2.7e-6 vs 4.7e-6**. The f64 accumulator is the right default.
 
-**Race** (`examples/f32_vs_f64_race.exs`): on llvmpipe/CPU, f32 ≈ f64
-(1.0–1.03×) — x86 does f64 natively and the shader still accumulates in f64, so
-only load bandwidth differs (negligible at these sizes). **This host cannot show
-the win**; on real GPU hardware f64 is rate-limited to ~1/24–1/32 of f32, where
-the f32 path is a large speedup. f32 also halves memory footprint regardless of
-device.
+**Race** (`examples/f32_vs_f64_race.exs`, now covers matmul/conv/elementwise/
+reductions), llvmpipe/CPU:
+
+| op | f32 speedup | why |
+|---|---|---|
+| elementwise add 1M | **2.0×** | bandwidth-bound → halving bytes halves time |
+| sum 1024² axis0 | **1.8×** | bandwidth-bound reduction |
+| sum 1M full, tanh 1M | ~1.2× | partly compute-bound |
+| matmul, conv | ~1.0× | compute-bound; f64 accumulator + native x86 f64 |
+
+So even on CPU, **bandwidth-bound ops already win ~2×** (half the memory
+traffic). The **compute-bound** ops (matmul/conv) show ~1× here only because x86
+does f64 natively and the kernels accumulate in f64 — on real GPU hardware,
+where f64 ALUs are rate-limited to ~1/24–1/32 of f32, those are exactly the ops
+that gain the most. f32 also halves memory footprint regardless of device.
 
 **Takeaway:** the mechanism (per-dtype shader dispatch + f64 accumulator) is
 correct and cleanly extensible; the payoff is hardware-gated, so f32 should be an
