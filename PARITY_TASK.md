@@ -1,94 +1,128 @@
-# PARITY_TASK — close the Nx.Backend gap in VulkanoBackend
+# PARITY_TASK — bring VulkanoBackend to full Nx.Backend parity
 
 **For:** the Claude instance running on **mac-247** (FreeBSD, GT 650M, Vulkan).
-**Branch:** `parity-tier1` (you are on it). Commit here; push to `nas` so the
-super-io box (249) can watch progress.
-**Brief written by:** Claude on super-io (249), 2026-07-27, from `d7ab05a`.
+**Branch:** `parity-tier1` (you are on it). Commit here; push to `nas` when it's
+back (currently DOWN — 249 syncs directly meanwhile).
+**Brief written by:** Claude on super-io (249). Updated 2026-07-27: **`conv` and
+`fft`/`ifft` are now in scope as native shaders** (see the classification rule).
 
 ---
 
 ## Objective
 
-Bring `Nx.Vulkan.VulkanoBackend` to full `Nx.Backend` parity **except** an
-intentional skip set, each op **verified against `BinaryBackend` on this host's
-real Vulkan**. Goal: downstream libraries (Scholar, Axon) stop crashing on
-missing callbacks. eXMC itself uses none of these, so the trader is not at risk.
+Bring `Nx.Vulkan.VulkanoBackend` to full `Nx.Backend` parity except a small
+permanent skip set — each op **verified against `BinaryBackend` on this host's
+real Vulkan**. Downstream libraries (Scholar, Axon) should stop crashing.
+eXMC itself uses none of these, so the trader is not at risk.
 
-## Read this first — the old analysis is STALE
+## The governing rule — classify every gap op before touching it
 
-`docs/NX_PARITY_RESEARCH.md` and `docs/nx_parity_gap.csv` are from **2026-05-25**
-and are out of date — a lot has been implemented since. **Do not work from that
-CSV.** Regenerate the real gap in Step 0.
+Sort each missing callback into exactly one bucket. The test is
+**incidental vs. hot-kernel**, NOT "is the shader hard."
 
-The host-fallback machinery **already exists** in
-`lib/nx_vulkan/vulkano_backend.ex` — reuse it, don't reinvent:
-`host_result/2`, `ensure_on_backend/1`, `binary_op_host_fallback/4`, the
-`for op <- [:all, :any]` reduction loop, and `block/4` (routes SVD/QR/LU through
-`BinaryBackend`). These are your templates.
+1. **Native shader (accelerate on the GPU).** The op *is* the workload's hot
+   kernel, so a CPU fallback would be a silent performance cliff — the caller
+   thinks they're on the GPU while the expensive part runs on the host. These
+   get real f64 Vulkan compute shaders. The 24 existing ops + the fused leapfrog
+   live here, and **`conv` + `fft`/`ifft` now join them** (Phase 2 below).
+
+2. **Host fallback (correct-but-CPU, and that's fine).** The op is *incidental*
+   — never the bottleneck: reductions, cumulative, shape, logic, sort, window,
+   and small linalg (a `cholesky` on a mass matrix once per warmup). A shader
+   wouldn't pay for itself; correct-but-CPU beats crashing. Phase 1 below.
+
+3. **Skip (permanent).** Nothing to shader or no supported type:
+   `from_pointer`/`to_pointer` (FFI handles — no computation; BinaryBackend
+   itself raises) and `phase` (complex — the shader path is f64-*real*, it has
+   no complex type to compute with).
+
+A hard-but-hot op (`conv`) gets a shader; an easy-but-incidental op (`window_sum`)
+gets a fallback. Do not skip an op just because its shader is hard.
 
 ## Step 0 — Baseline (commit before changing any op)
 
+The old `docs/NX_PARITY_RESEARCH.md` / `docs/nx_parity_gap.csv` (2026-05-25) are
+**stale** — ~75 callbacks and the host-fallback machinery already exist. Do NOT
+work from that CSV.
+
 1. `git checkout parity-tier1`
-2. Regenerate the **real** missing set (path-independent, run in `iex -S mix`):
+2. Regenerate the real missing set (path-independent, in `iex -S mix`):
    ```elixir
    impl = Nx.Vulkan.VulkanoBackend.__info__(:functions) |> Enum.map(&elem(&1, 0)) |> MapSet.new()
    cbs  = Nx.Backend.behaviour_info(:callbacks)          |> Enum.map(&elem(&1, 0)) |> MapSet.new()
-   MapSet.difference(cbs, impl) |> Enum.sort()   # <-- the actual worklist
+   MapSet.difference(cbs, impl) |> Enum.sort()
    ```
-   Write it to `docs/PARITY_STATUS.md` (fresh) with today's date.
-3. Snapshot the suite: `mix compile 2>&1 | grep -i warning` (note the dead
-   `all/3`, `any/3`, `to_batched/3` clauses) and `mix test`. Record pass/fail.
-4. Commit: `parity: baseline — regenerated gap + test/warning snapshot`.
+   Write it to `docs/PARITY_STATUS.md` with today's date, each op tagged with its
+   bucket (shader / fallback / skip).
+3. Snapshot: `mix compile 2>&1 | grep -i warning` (note the dead `all/3`,
+   `any/3`, `to_batched/3` clauses) and `mix test`. Record pass/fail.
+4. Commit: `parity: baseline — regenerated gap + bucket classification`.
 
-## The iteration loop — one callback (or one family) per commit
+## Phase 1 — host-fallback the incidental gap (quick wins first)
 
-Work **easy → hard**: reduction → cumulative → shape → logic → sort → window →
-linalg. For each callback still missing after Step 0:
+Reuse the existing machinery in `lib/nx_vulkan/vulkano_backend.ex`:
+`host_result/2`, `ensure_on_backend/1`, `binary_op_host_fallback/4`, the
+`for op <- [:all, :any]` loop, and `block/4` (routes SVD/QR/LU through
+BinaryBackend). Work easy → hard: reduction → cumulative → shape → logic →
+sort → window → small linalg. Per callback:
 
-1. Implement via the established host-fallback template:
-   ```elixir
-   @impl true
-   def <cb>(out, tensor, opts) do
-     bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-     host_result(out, apply(Nx, :<cb>, [bin, opts]))
-   end
-   ```
-   - **Multi-tensor ops** (`all_close`, `take_along_axis`, `solve`, …): transfer
-     each tensor argument to `BinaryBackend` first.
-   - **linalg** (`cholesky`, `determinant`, `eigh`, `lu`, `qr`, `svd`, `solve`,
-     `triangular_solve`): route through `BinaryBackend` / the existing `block/4`
-     path rather than writing GPU shaders.
-2. Add a focused test in `test/` comparing VulkanoBackend vs a `BinaryBackend`
-   reference for representative shapes, **in f64** (this backend is f64-first).
-   Assert with `Nx.all_close/3`.
-3. `mix test` — the new test plus the full suite must be green **on this host's
-   Vulkan** (that's the whole point — this is the correctness reference).
-4. Commit: `parity: <cb> host-fallback (verified vs BinaryBackend)`, then
-   `git push nas parity-tier1`.
+```elixir
+@impl true
+def <cb>(out, tensor, opts) do
+  bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
+  host_result(out, apply(Nx, :<cb>, [bin, opts]))
+end
+```
+Multi-tensor ops (`all_close`, `take_along_axis`, `solve`…): transfer each tensor
+arg. linalg: route through BinaryBackend / `block/4`. Add a focused test vs a
+BinaryBackend reference in **f64**, `Nx.all_close/3`; `mix test` green; commit
+`parity: <cb> host-fallback (verified vs BinaryBackend)`.
 
-## Cleanup (do this early)
+**Cleanup (do early):** delete the dead duplicate `all/3`, `any/3`,
+`to_batched/3` clauses the compiler flags, fix the `to_batched` unused var —
+land at zero warnings.
 
-Remove the **dead duplicate** `all/3`, `any/3`, `to_batched/3` clauses that the
-compiler flags as *"cannot match because a previous clause always matches,"* and
-fix the `to_batched` unused-variable warning. Land at zero warnings for these.
+## Phase 2 — native Vulkan shaders: `conv` + `fft`/`ifft` (in scope now)
 
-## Skip set — do NOT implement
+These are **real f64 Vulkan compute shaders, not host fallbacks** — a fallback
+here is the silent cliff from the rule above. Bigger effort than Phase 1 and it
+extends into the native-op / Spirit shader layer; land Phase 1 first, and give
+each its own series of commits.
 
-`fft`, `fft2`, `ifft`, `conv`, `phase`, `from_pointer`, `to_pointer`. These are
-out of scope (spectral / CNN / FFI / complex). Document them in `LIMITATIONS.md`
-as "falls back to EXLA / BinaryBackend."
+- **`conv`** — pragmatic path: **im2col + the existing matmul shader.** Unfold
+  the input patches into a matrix and reuse the native GEMM already on the GPU,
+  rather than writing a bespoke direct-conv kernel first. Honour full `Nx.conv`
+  semantics (strides, padding, input/kernel dilation, feature groups, batch).
+  Correctness first; a fused direct-conv shader can come later for memory.
+- **`fft`/`ifft`** — radix-2 Cooley–Tukey / Stockham butterfly in f64. Reference
+  VkFFT's approach: bit-reversal permutation + log2(N) butterfly stages. Start
+  with power-of-two 1-D, then generalise (mixed-radix, then `fft2`).
+- **Verify twice:** correct vs BinaryBackend (`Nx.all_close`, f64) **and**
+  confirm it actually dispatched on the GPU — i.e. it did *not* silently
+  round-trip to the host. A quick way: assert no BinaryBackend transfer on the
+  path, or check the dispatch log. GPU-correct AND on-GPU is the bar.
+
+## Skip (permanent) — do NOT implement
+
+`from_pointer`, `to_pointer` (FFI; nothing to compute), `phase` (complex; no
+complex type in the f64-real shader ISA). Document in `LIMITATIONS.md` as
+"falls back to EXLA / BinaryBackend."
+(`fft2` — 2-D FFT — is in scope but comes *after* 1-D `fft` lands, on the same
+machinery.)
 
 ## Definition of done
 
-- The Step-0 regeneration shows **only the skip set** remaining.
-- `mix test` **green on FreeBSD Vulkan** (this host).
-- The parity ops compile **warning-free**.
-- `LIMITATIONS.md` lists the intentional skips.
+- Regenerated gap shows **only the permanent skips** remaining.
+- Phase 1 ops: correct vs BinaryBackend; `mix test` green on FreeBSD Vulkan.
+- Phase 2: `conv` + `fft`/`ifft` run **on the GPU** (verified not falling back)
+  and correct vs BinaryBackend.
+- Compile warning-free for these ops; `LIMITATIONS.md` lists the true skips.
 
 ## Guardrails
 
-- Stay on `parity-tier1`; commit per callback/family; push to `nas` periodically.
-- Confine changes to `lib/nx_vulkan/vulkano_backend.ex`, `test/`, and the parity
-  docs. **Do not touch** the native shader ops or the fused leapfrog chain path.
-- Always run the real `mix test` on this host — never a mock. FreeBSD + Vulkan
-  is the reference the whole project is validated against.
+- Stay on `parity-tier1`; commit per op/family; push to `nas` when it returns.
+- **Phase 1** — confine to `vulkano_backend.ex`, `test/`, docs (pure Elixir).
+  **Phase 2** — expect to touch the native shader / Spirit layer for `conv`/`fft`;
+  that's intended, but keep it on this branch.
+- FreeBSD + Vulkan (this host) IS the reference the project is validated against.
+  Always run the real `mix test` here — never a mock.
