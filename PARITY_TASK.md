@@ -1,8 +1,10 @@
 # PARITY_TASK — bring VulkanoBackend to full Nx.Backend parity
 
 **For:** the Claude instance running on **mac-247** (FreeBSD, GT 650M, Vulkan).
-**Branch:** `parity-tier1` (you are on it). Commit here; push to `nas` when it's
-back (currently DOWN — 249 syncs directly meanwhile).
+**Branch:** `parity-tier1` (you are on it). Commit here; publish with
+`git push origin parity-tier1` — `origin` is the git server on **249**
+(`git@192.168.0.249:/home/git/repos/nx_vulkan.git`), which is up. That's how
+249 reviews your progress.
 **Brief written by:** Claude on super-io (249). Updated 2026-07-27: **`conv` and
 `fft`/`ifft` are now in scope as native shaders** (see the classification rule).
 
@@ -120,7 +122,8 @@ machinery.)
 
 ## Guardrails
 
-- Stay on `parity-tier1`; commit per op/family; push to `nas` when it returns.
+- Stay on `parity-tier1`; commit per op/family; `git push origin parity-tier1`
+  (the git server on 249) so 249 can review.
 - **Phase 1** — confine to `vulkano_backend.ex`, `test/`, docs (pure Elixir).
   **Phase 2** — expect to touch the native shader / Spirit layer for `conv`/`fft`;
   that's intended, but keep it on this branch.
