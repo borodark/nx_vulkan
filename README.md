@@ -8,6 +8,8 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 ✓ FreeBSD + NVIDIA GT 650M        (NVIDIA legacy driver)
 ```
 
+**Why this exists →** [`WHY.md`](WHY.md) — the f64 conviction, autograd-for-free, reach over peak FLOPS, and one-GPU-to-a-fleet.
+
 ## Goals
 
 - **Cover the FreeBSD gap.** Nx's existing GPU backends (EXLA on
