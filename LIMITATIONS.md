@@ -11,6 +11,36 @@ conclusions from a Vulkan benchmark number.
 
 ---
 
+## 0. Nx.Backend parity — current status (2026-07-28, nx 0.13)
+
+> **This section is authoritative for parity; the older per-op table in §2 is
+> historical** (it predates the host-fallback batch and lists ops as
+> "not implemented" that are now implemented). See `docs/PARITY_STATUS.md` for
+> the full regenerated gap and bucket classification.
+
+`VulkanoBackend` implements **every** `Nx.Backend` callback nx 0.13 declares —
+`MapSet.difference(callbacks, impl)` is empty. Ops are either native f64 Vulkan
+shaders (hot kernels) or correct host fallbacks through `BinaryBackend`
+(incidental ops). Verified against a `BinaryBackend` reference in f64 by
+`test/nx_vulkan/parity_fallback_test.exs`.
+
+### Permanent skips (never implemented — fall back to EXLA / BinaryBackend)
+
+| Op | Why it is skipped |
+|---|---|
+| `from_pointer/5` (callback) | FFI handle — no computation to accelerate; `BinaryBackend` itself raises. Delegated to `Nx.BinaryBackend.from_pointer`. |
+| `to_pointer/2` (callback) | FFI handle — nothing to compute; transfers to `BinaryBackend` and delegates. |
+| `phase` (not a callback) | `Nx.phase` composes from primitives; it only means anything for complex inputs, and the shader ISA is f64-**real** with no complex type. Nothing to implement or accelerate. |
+
+### In scope but not yet GPU-native (currently host fallback → Phase 2 shaders)
+
+`conv/4`, `fft/3`, `ifft/3` (and `fft2` after 1-D `fft`) are **hot kernels**, so
+a host fallback is a silent performance cliff. They currently host-materialize
+but are slated for real f64 Vulkan compute shaders (im2col+matmul for `conv`;
+Cooley–Tukey butterfly for `fft`/`ifft`). Until then they are correct-but-CPU.
+
+---
+
 ## 1. Compute precision
 
 > **Updated (post-f64 migration).** The f32-only limitation below is
