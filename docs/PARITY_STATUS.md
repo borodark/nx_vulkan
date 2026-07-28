@@ -1,0 +1,94 @@
+# PARITY_STATUS — regenerated Nx.Backend gap for VulkanoBackend
+
+**Date:** 2026-07-28
+**Host:** mac.247 (FreeBSD 15.0 Linux-compat layer), Vulkan via **llvmpipe (LLVM
+19.1.7)** — software rasteriser through the real vulkano stack. This is the
+correctness reference the project validates against.
+**nx:** 0.13.0 (note: `mix.lock` is gitignored; the committed `mix.exs` pins
+`~> 0.13`, so `mix deps.get` resolves 0.13.0 fresh on each host).
+**Supersedes:** `docs/NX_PARITY_RESEARCH.md` / `docs/nx_parity_gap.csv`
+(2026-05-25) — both stale, do not use.
+
+## Regenerated gap (path-independent)
+
+```elixir
+impl = Nx.Vulkan.VulkanoBackend.__info__(:functions) |> Enum.map(&elem(&1, 0)) |> MapSet.new()
+cbs  = Nx.Backend.behaviour_info(:callbacks)          |> Enum.map(&elem(&1, 0)) |> MapSet.new()
+MapSet.difference(cbs, impl) |> Enum.sort()
+#=> []      (nx 0.13.0 declares 115 callbacks; every one is implemented)
+```
+
+**The name-only gap is empty.** Every `Nx.Backend` callback in nx 0.13 has an
+implementation in `lib/nx_vulkan/vulkano_backend.ex`.
+
+### What changed under nx 0.13 (why the old worklist looks "done")
+
+nx 0.13 **removed** a batch of ops from the `Nx.Backend` behaviour. They are no
+longer dispatched as backend callbacks — Nx composes them from lower-level
+primitives or routes them through the `block/4` callback:
+
+| op(s) | how nx 0.13 dispatches now |
+|---|---|
+| `cholesky` `determinant` `solve` `qr` `lu` `svd` `eigh` `top_k` `cumulative_max/min/product` `all_close` | via **`block/4`** (a `Nx.Block.*` struct) → our `block/4` transfers to `BinaryBackend` |
+| `take` `take_along_axis` `logical_not` | composed from primitives (`gather` / `slice` / elementwise), which we implement |
+
+`triangular_solve/4` **remains** a real callback and stays implemented.
+
+The consequence: the module still *carries* `def cholesky/2`, `def take/4`,
+etc., each annotated `@impl true`, but nx 0.13 never calls them — they are dead
+clauses that emit `got "@impl true" ... but no behaviour specifies such
+callback` warnings. Phase 1 removes them; correctness is preserved by `block/4`
++ primitive composition (verified vs `BinaryBackend`).
+
+## Bucket classification (per the governing rule: incidental vs hot-kernel)
+
+### 1. Native shader — accelerated on the GPU (already landed)
+`add` `subtract` `multiply` `divide` `pow` `max` `min` (elementwise binary),
+`exp` `log` `sqrt` `abs` `negate` `sigmoid` `tanh` `floor` `ceil` `sign`
+(elementwise unary), `sum` `reduce_max` `reduce_min` (axis reductions),
+`dot` (2-D f64 matmul), `transpose` (2-D), `reshape` `squeeze` (zero-copy),
+`constant` `iota` `eye`, `concatenate` (outer axis), plus the fused leapfrog
+chain family.
+
+### 2. Native shader — IN SCOPE, not yet landed (Phase 2)
+`conv` `fft` `ifft` (and `fft2` after 1-D `fft`). **Currently host-fallback**
+(round-trip to `BinaryBackend`) — to be promoted to real f64 Vulkan compute
+shaders. A host fallback here is the silent-performance-cliff the rule warns
+against: `conv`/`fft` are hot kernels for Axon/Scholar workloads.
+
+### 3. Host fallback — incidental, correct-but-CPU (landed)
+Comparisons (`equal` … `greater_equal`), `select`, `all` `any`, bitwise/logical
+families, trig (`sin` `cos` …), `product`, `window_*` (7), `reduce`,
+`gather` `take` `take_along_axis`, `argmax` `argmin`, `sort` `argsort` `top_k`,
+`cumulative_*`, `clip`, `pad`, `put_slice`, `indexed_put` `indexed_add`,
+`broadcast`, `stack`, `slice`, `as_type`, `bitcast`, `reverse`, `to_batched`,
+`all_close`, `logical_not`, and small linalg (`cholesky` `qr` `lu` `svd` `eigh`
+`solve` `triangular_solve` `determinant`) via `block/4`.
+
+### 4. Skip — permanent (documented in LIMITATIONS.md)
+`from_pointer` `to_pointer` (FFI handles — nothing to compute; `BinaryBackend`
+itself raises) and `phase` (complex — the shader ISA is f64-**real**, no complex
+type). `fft`/`ifft`/`conv` are **no longer** in this bucket.
+
+## Snapshot (2026-07-28, pre-cleanup)
+
+**Compile warnings** (`mix compile 2>&1 | grep -i warning`): the 15 dead
+`@impl true`-on-non-callback clauses listed above, one `to_batched/3` unused
+`out` variable, and one pre-existing `native_v.ex` clause-grouping warning on
+`leapfrog_chain_synth_f64/6` (in the fused-leapfrog path — guardrailed, left
+untouched).
+
+**Tests** (`mix test`): the orphaned legacy `test/nx_vulkan_test.exs` and the
+`init/0`-based `test/nx_vulkan/pipeline_cache_test.exs` — both left broken by
+commit `bb94217` ("Drop spirit C++ backend"), referencing the deleted
+`Nx.Vulkan.Backend` / `Nx.Vulkan.Fuse` / `Nx.Vulkan.init/0` APIs — were removed.
+After removal: **78 tests, 0 failures** on this host's Vulkan.
+
+## Definition of done (from PARITY_TASK.md)
+
+- [x] Regenerated gap shows only permanent skips remaining (gap is empty; the
+      skip set falls back rather than being "missing").
+- [ ] Phase 1 ops correct vs `BinaryBackend`; `mix test` green; warning-free.
+- [ ] Phase 2 `conv` + `fft`/`ifft` run on the GPU (not falling back) and
+      correct vs `BinaryBackend`.
+- [ ] `LIMITATIONS.md` lists the true skips.
