@@ -135,6 +135,21 @@ defmodule Nx.Vulkan.NativeV do
   def fft(_out, _in, _n, _logn, _batch, _is_complex, _inverse, _bitrev_spv, _stage_spv),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  im2col unfold for conv (spatial rank <= 3, groups == 1), f64. Fills the
+  column matrix `col` (M×K = N*O_total × Cin*K_total) from `in`. `params` is a
+  21-int buffer of per-dim [D,O,K,stride,pad_lo,input_dil,kernel_dil].
+  """
+  def conv_im2col(_col, _in, _params, _n, _cin, _o_total, _k_total, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Conv GEMM: out{N,Cout,O_total} = im2col(A){M,K} · kernel{Cout,K}, written in
+  canonical output layout. f64.
+  """
+  def conv_gemm(_out, _col, _kernel, _n, _cout, _o_total, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # Chain shader NIFs — registered in Rust, must have stubs here for NIF loading.
   # f32 variant kept as stub only (unused); f64 is the active path.
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),

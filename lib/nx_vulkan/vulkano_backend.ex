@@ -274,14 +274,118 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # Multi-arg ops — host fallback
+  # conv — native f64 im2col + GEMM on the GPU for the common case; host
+  # fallback otherwise. Nx hands the backend fully-resolved strides, padding
+  # ({lo,hi} per spatial dim), input/kernel dilation, group sizes and
+  # permutations, plus an output template already in output-permutation layout.
+  @conv_im2col_spv Path.expand("../../priv/shaders/conv_im2col_f64.spv", __DIR__)
+  @conv_gemm_spv Path.expand("../../priv/shaders/conv_gemm_f64.spv", __DIR__)
+
   @impl true
   def conv(out, inp, kernel, opts) do
-    inp_bin = Nx.backend_transfer(ensure_on_backend(inp), Nx.BinaryBackend)
-    kernel_bin = Nx.backend_transfer(ensure_on_backend(kernel), Nx.BinaryBackend)
-    result = Nx.conv(inp_bin, kernel_bin, opts)
-    host_result(out, result)
+    i = ensure_on_backend(inp)
+    k = ensure_on_backend(kernel)
+
+    if conv_gpu_ok?(i, k, out, opts) do
+      gpu_conv(out, i, k, opts)
+    else
+      inp_bin = Nx.backend_transfer(i, Nx.BinaryBackend)
+      kernel_bin = Nx.backend_transfer(k, Nx.BinaryBackend)
+      host_result(out, Nx.conv(inp_bin, kernel_bin, opts))
+    end
   end
+
+  # GPU path covers: spatial rank 1..3, feature/batch groups == 1, identity
+  # permutations, f64 input/kernel/output. Any strides, padding and
+  # input/kernel dilation are honoured (folded into the im2col index math).
+  # Groups > 1, non-identity permutations, non-f64 and higher rank fall back.
+  defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, %T{type: ot}, opts) do
+    rank = tuple_size(ishape)
+    sr = rank - 2
+
+    match?(%__MODULE__{}, i.data) and match?(%__MODULE__{}, k.data) and
+      i.type == {:f, 64} and k.type == {:f, 64} and ot == {:f, 64} and
+      sr >= 1 and sr <= 3 and
+      Keyword.get(opts, :feature_group_size, 1) == 1 and
+      Keyword.get(opts, :batch_group_size, 1) == 1 and
+      identity_perm?(opts[:input_permutation], rank) and
+      identity_perm?(opts[:kernel_permutation], tuple_size(kshape)) and
+      identity_perm?(opts[:output_permutation], rank)
+  end
+
+  defp conv_gpu_ok?(_i, _k, _out, _opts), do: false
+
+  defp identity_perm?(nil, _rank), do: true
+  defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
+
+  defp gpu_conv(
+         out,
+         %T{shape: ishape, data: %__MODULE__{ref: in_ref}},
+         %T{shape: kshape, data: %__MODULE__{ref: k_ref}},
+         opts
+       ) do
+    rank = tuple_size(ishape)
+    sr = rank - 2
+    n = elem(ishape, 0)
+    cin = elem(ishape, 1)
+    cout = elem(kshape, 0)
+
+    spatial = fn shape -> for ax <- 0..(sr - 1)//1, do: elem(shape, 2 + ax) end
+    d = spatial.(ishape)
+    kdims = spatial.(kshape)
+    odims = spatial.(out.shape)
+    pad_lo = Enum.map(opts[:padding], fn {lo, _hi} -> lo end)
+
+    # Pad each per-dim list to length 3 with its identity default so the
+    # rank-3 shaders can treat rank 1/2 uniformly (unused dims size 1).
+    order = [
+      {d, 1},
+      {odims, 1},
+      {kdims, 1},
+      {opts[:strides], 1},
+      {pad_lo, 0},
+      {opts[:input_dilation], 1},
+      {opts[:kernel_dilation], 1}
+    ]
+
+    params_bin =
+      for {list, default} <- order, v <- pad3(list, default), into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params_bin)
+
+    o_total = Enum.product(odims)
+    k_total = Enum.product(kdims)
+    k_cols = cin * k_total
+    m = n * o_total
+
+    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(m * k_cols * 8)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_im2col(
+        col_ref,
+        in_ref,
+        params_ref,
+        n,
+        cin,
+        o_total,
+        k_total,
+        k_cols,
+        @conv_im2col_spv
+      )
+
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * cout * o_total * 8)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_gemm(out_ref, col_ref, k_ref, n, cout, o_total, k_cols, @conv_gemm_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: {:f, 64}})
+  end
+
+  defp pad3([a], d), do: [a, d, d]
+  defp pad3([a, b], d), do: [a, b, d]
+  defp pad3([a, b, c], _d), do: [a, b, c]
 
   # fft / ifft — native f64 Cooley-Tukey on the GPU for the common case;
   # host fallback otherwise. Nx resolves :length and :axis to concrete ints

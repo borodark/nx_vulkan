@@ -1757,6 +1757,161 @@ fn fft<'a>(
     }
 }
 
+// -- conv (im2col + GEMM) -------------------------------------------------
+//
+// Two shaders: conv_im2col unfolds the input into a column matrix A (M x K),
+// then conv_gemm multiplies A by the flattened kernel and writes the output in
+// canonical {N, Cout, O_total} layout. Covers spatial rank <= 3, feature and
+// batch groups == 1, identity permutations; the Elixir side gates this and
+// host-falls-back otherwise. Per-dim conv parameters ride in a 21-int params
+// buffer (see conv_im2col_f64.comp); scalars go in push constants.
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushConvIm2col {
+    n: u32,
+    cin: u32,
+    o_total: u32,
+    k_total: u32,
+    k: u32,
+}
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushConvGemm {
+    n: u32,
+    cout: u32,
+    o_total: u32,
+    k: u32,
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn conv_im2col<'a>(
+    env: Env<'a>,
+    col_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    cin: u32,
+    o_total: u32,
+    k_total: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, col_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let groups = (n * o_total).saturating_mul(k).div_ceil(64);
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushConvIm2col { n, cin, o_total, k_total, k },
+            groups,
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn conv_gemm<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    col_ref: ResourceArc<VulkanoTensor>,
+    kernel_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    cout: u32,
+    o_total: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, col_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, kernel_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let groups = (n * cout).saturating_mul(o_total).div_ceil(64);
+        run_single_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, groups)
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+// Shared single-dispatch helper: bind pipeline + descriptor set + push, run
+// one dispatch, wait for the queue to drain. Used by conv_im2col/conv_gemm.
+fn run_single_dispatch<P: BufferContents>(
+    context: &VkContext,
+    cached: &CachedPipeline,
+    set: Arc<PersistentDescriptorSet>,
+    push: P,
+    groups: u32,
+) -> Result<(), String> {
+    let mut cmd = AutoCommandBufferBuilder::primary(
+        &context.cmd_allocator,
+        context.queue.queue_family_index(),
+        CommandBufferUsage::SimultaneousUse,
+    )
+    .map_err(|e| format!("cmd builder: {e}"))?;
+
+    cmd.bind_pipeline_compute(cached.pipeline.clone())
+        .map_err(|e| format!("bind pipeline: {e}"))?
+        .bind_descriptor_sets(PipelineBindPoint::Compute, cached.layout.clone(), 0, set)
+        .map_err(|e| format!("bind descriptor: {e}"))?
+        .push_constants(cached.layout.clone(), 0, push)
+        .map_err(|e| format!("push_constants: {e}"))?
+        .dispatch([groups, 1, 1])
+        .map_err(|e| format!("dispatch: {e}"))?;
+
+    let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+    let future = sync::now(context.device.clone())
+        .then_execute(context.queue.clone(), cmd_buf)
+        .map_err(|e| format!("then_execute: {e}"))?;
+    future.flush().map_err(|e| format!("flush: {e}"))?;
+    context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
+    unsafe { future.signal_finished(); }
+    drop(future);
+    Ok(())
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -1780,6 +1935,8 @@ rustler::init!(
         transpose_2d,
         matmul,
         fft,
+        conv_im2col,
+        conv_gemm,
     ],
     load = load
 );
