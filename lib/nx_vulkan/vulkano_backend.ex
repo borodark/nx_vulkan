@@ -1014,21 +1014,30 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- linalg
 
   @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
+  # f32 matmul keeps data in f32 but accumulates the dot product in f64 (see
+  # F32_PLAN.md) — matches a f64-accumulating reference to f32 round-off while
+  # halving memory traffic. Opt-in via the tensor's dtype; f64 stays the default.
+  @matmul_f32_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+
+  defp matmul_spv({:f, 64}), do: @matmul_f64_spv
+  defp matmul_spv({:f, 32}), do: @matmul_f32_spv
+  defp matmul_spv(_), do: nil
 
   # Dot product (matmul) — Nx callback signature:
   #   dot(out, a, contracting_axes_a, batched_axes_a,
   #            b, contracting_axes_b, batched_axes_b)
   #
   # Fast path: rank-2 × rank-2, contracting [1] of a vs [0] of b
-  # (standard matmul A·B). f32 and f64 supported via separate SPVs.
-  # Everything else routes through BinaryBackend.
+  # (standard matmul A·B). f64 and f32 (f64-accumulator) run native shaders;
+  # everything else routes through BinaryBackend.
   @impl true
   def dot(%T{shape: out_shape, type: type} = out, a, axes_a, batched_a, b, axes_b, batched_b) do
     a_v = ensure_on_backend(a)
     b_v = ensure_on_backend(b)
+    spv = matmul_spv(type)
 
     fast_path =
-      type == {:f, 64} and a_v.type == type and b_v.type == type and
+      spv != nil and a_v.type == type and b_v.type == type and
         tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
         axes_a == [1] and axes_b == [0] and
         batched_a == [] and batched_b == []
@@ -1043,7 +1052,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       out_bytes = m * n * element_bytes(type)
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, @matmul_f64_spv)
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else
