@@ -572,7 +572,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- shape / movement
 
-  @transpose_spv Path.expand("../../priv/shaders/transpose.spv", __DIR__)
+  # The legacy transpose.spv is an f32 shader — it strides the buffer as
+  # 4-byte floats and silently corrupts f64 data. The f64-first backend uses
+  # transpose_f64.spv for the (only) GPU-accelerated case (2-D [1,0] f64);
+  # every other shape/type host-falls-back.
+  @transpose_f64_spv Path.expand("../../priv/shaders/transpose_f64.spv", __DIR__)
 
   # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
   # The buffer might be physically larger than the new shape implies
@@ -589,36 +593,26 @@ defmodule Nx.Vulkan.VulkanoBackend do
     put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
   end
 
-  # 2D transpose. Higher-rank transposes (axis permutations) fall back
-  # to BinaryBackend until we wire a general-rank shader.
+  # 2-D f64 transpose runs the f64 shader on the GPU. Higher-rank axis
+  # permutations, non-[1,0] axes and non-f64 types host-fall-back (correct,
+  # avoids the old raise and the f32-shader-on-f64 corruption).
   @impl true
   def transpose(
         %T{shape: out_shape, type: type} = out,
-        %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+        %T{shape: in_shape, data: %__MODULE__{ref: a_ref}} = tensor,
         axes
       ) do
-    rank = tuple_size(in_shape)
+    if type == {:f, 64} and tuple_size(in_shape) == 2 and axes == [1, 0] do
+      m = elem(in_shape, 0)
+      n = elem(in_shape, 1)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
 
-    case {rank, axes} do
-      {2, [1, 0]} ->
-        m = elem(in_shape, 0)
-        n = elem(in_shape, 1)
-        n_bytes = m * n * element_bytes(type)
-        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+      :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, @transpose_f64_spv)
 
-        :ok =
-          Nx.Vulkan.NativeV.transpose_2d(
-            out_ref,
-            a_ref,
-            m,
-            n,
-            @transpose_spv
-          )
-
-        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
-
-      _ ->
-        raise "transpose rank=#{rank} axes=#{inspect(axes)}: only 2D [1,0] supported in stage 4"
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+    else
+      t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+      host_result(out, Nx.transpose(t_bin, axes: axes))
     end
   end
 
