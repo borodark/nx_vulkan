@@ -39,13 +39,16 @@ defmodule Nx.Vulkan.TransposeTest do
     end
   end
 
-  describe "non-f64-2D transpose host-falls-back but stays correct" do
-    test "f32 falls back" do
-      {v, b} = both({4, 4}, {:f, 32})
-      refute match?(%VulkanoBackend{}, v.data)
+  describe "f32 2-D transpose runs on GPU and matches BinaryBackend" do
+    test "f32 non-square on GPU" do
+      {v, b} = both({5, 30}, {:f, 32})
+      assert match?(%VulkanoBackend{}, v.data)
+      assert Nx.type(v) == {:f, 32}
       assert maxdiff(v, b) == 0.0
     end
+  end
 
+  describe "unsupported transpose host-falls-back but stays correct" do
     test "rank-3 permutation falls back" do
       d = Enum.map(1..24, &(&1 * 1.0))
       v = Nx.tensor(d, type: {:f, 64}, backend: VulkanoBackend) |> Nx.reshape({2, 3, 4}) |> Nx.transpose(axes: [2, 0, 1])

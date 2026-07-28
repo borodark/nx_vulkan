@@ -1,0 +1,40 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// f32 conv GEMM with an f64 accumulator (same rationale as matmul_f32_f64acc):
+// out{N,Cout,O_total} = im2col(A){M,K} · kernel{Cout,K}, f32 storage, the
+// K-length dot accumulated in double and rounded to f32 only on store.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer W { float w[]; };
+layout(std430, binding = 2) writeonly buffer Out { float outp[]; };
+
+layout(push_constant) uniform Push {
+    uint N;
+    uint Cout;
+    uint O_total;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total = p.N * p.Cout * p.O_total;
+    if (gid >= total) return;
+
+    uint n = gid / (p.Cout * p.O_total);
+    uint rem = gid % (p.Cout * p.O_total);
+    uint oc = rem / p.O_total;
+    uint o = rem % p.O_total;
+
+    uint abase = (n * p.O_total + o) * p.K;
+    uint wbase = oc * p.K;
+
+    double acc = 0.0lf;
+    for (uint l = 0u; l < p.K; ++l) {
+        acc += double(a[abase + l]) * double(w[wbase + l]);
+    }
+
+    outp[gid] = float(acc);
+}

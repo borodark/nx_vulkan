@@ -78,14 +78,28 @@ defmodule Nx.Vulkan.ConvTest do
       assert max_abs_diff(got, ref) < 1.0e-10
     end
 
-    test "f32 inputs fall back but stay correct" do
-      iv = Nx.tensor(for(i <- 1..25, do: i * 0.1), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({1, 1, 5, 5})
-      kv = Nx.tensor(for(i <- 1..9, do: i * 0.2), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({1, 1, 3, 3})
+    test "rank>3 (spatial rank 4) falls back but stays correct" do
+      # 4 spatial dims -> sr=4 > 3, host fallback
+      i = gen({1, 1, 3, 3, 3, 3}, VulkanoBackend, 1)
+      k = gen({2, 1, 2, 2, 2, 2}, VulkanoBackend, 2)
+      got = Nx.conv(i, k)
+      refute match?(%VulkanoBackend{}, got.data)
+      ib = Nx.backend_copy(i, Nx.BinaryBackend)
+      kb = Nx.backend_copy(k, Nx.BinaryBackend)
+      assert max_abs_diff(got, Nx.conv(ib, kb)) < 1.0e-10
+    end
+  end
+
+  describe "f32 conv runs on the GPU and matches BinaryBackend" do
+    test "2d multichannel f32" do
+      iv = Nx.tensor(for(i <- 1..75, do: i * 0.1), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({1, 3, 5, 5})
+      kv = Nx.tensor(for(i <- 1..54, do: i * 0.05), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({2, 3, 3, 3})
       ib = Nx.backend_copy(iv, Nx.BinaryBackend)
       kb = Nx.backend_copy(kv, Nx.BinaryBackend)
       got = Nx.conv(iv, kv)
-      refute match?(%VulkanoBackend{}, got.data)
-      assert max_abs_diff(got, Nx.conv(ib, kb)) < 1.0e-5
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.type(got) == {:f, 32}
+      assert max_abs_diff(got, Nx.conv(ib, kb)) < 1.0e-4
     end
   end
 end

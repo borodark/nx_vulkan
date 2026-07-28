@@ -68,11 +68,36 @@ device.
 correct and cleanly extensible; the payoff is hardware-gated, so f32 should be an
 opt-in path, benchmarked on a real GPU before flipping any default.
 
-## Rollout order (beyond this prototype)
+## Rollout status
 
-1. matmul (this branch) → conv (same im2col + an f32-I/O/f64-acc GEMM).
-2. elementwise unary/binary f32 (fill the `binary_spv/unary_spv` `nil` arms).
-3. reductions f32 with f64 accumulator.
-4. movement ops (transpose/concat/slice) f32 — trivially safe.
-5. A `default_precision` / per-op precision policy config knob governing which
-   dtype each op computes in and the accumulator width.
+- [x] **matmul** — `matmul_f32_f64acc.spv`, dispatched by dtype in `dot`.
+- [x] **conv** — `conv_im2col_f32.spv` + `conv_gemm_f32.spv` (f64-acc GEMM);
+      `conv_spvs/1` selects by dtype, buffers sized by `element_bytes/1`.
+- [x] **elementwise** unary + binary — `elementwise_{unary,binary}_f32.spv`
+      (same spec-constant op-code convention); filled the `binary_spv/unary_spv`
+      `{:f,32}` arms.
+- [x] **reductions** (sum/max/min) — `reduce_axis_f32.spv` with an f64
+      accumulator for sum; `reduce_spv({:f,32})`.
+- [x] **transpose** (2-D) — `transpose_f32.spv`; `transpose_spv/1`. (concat is a
+      dtype-agnostic byte copy already; slice is host-fallback for all dtypes.)
+
+All verified vs `BinaryBackend` (`test/nx_vulkan/{f32_ops,matmul_f32}_test.exs`):
+algebraic/movement/reduction ops are exact, f32 transcendentals (exp/log/pow/
+tanh/sigmoid) agree to ~f32 ulp (≤1.4e-6). Full suite: 171 tests, 0 failures.
+
+### On item 5 (precision policy config)
+
+Deliberately **not** adding a separate `default_precision` knob: the dispatch is
+already keyed on the tensor's dtype, so the "f32 option" is simply *create f32
+tensors* — the idiomatic Nx control (`Nx.tensor(.., type: {:f, 32})` /
+`Nx.as_type(t, {:f, 32})`). Compute follows storage; f64 stays the default. A
+forced-override (compute f32 even for f64 storage, or a wider accumulator) can be
+layered on later via `init/1` opts if a real workload needs it, but it is not
+required for the f32 path itself.
+
+## Not converted (stay f64 / host, by design)
+
+Leapfrog/MCMC chain (needs f64 for HMC stability), linalg + `block/4` family
+(numerically sensitive, host-fallback), fft/ifft (f64 default; f32 spectral is a
+future opt-in), comparisons (u8 output). Broadcast binary ops host-fall-back for
+all dtypes (the broadcast shader is unwired).

@@ -134,8 +134,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                 "../../priv/shaders/elementwise_binary_f64.spv",
                                 __DIR__
                               )
+  @elementwise_binary_f32_spv Path.expand(
+                                "../../priv/shaders/elementwise_binary_f32.spv",
+                                __DIR__
+                              )
 
   defp binary_spv({:f, 64}), do: @elementwise_binary_f64_spv
+  defp binary_spv({:f, 32}), do: @elementwise_binary_f32_spv
   defp binary_spv(_), do: nil
 
   for {op, code} <- @binary_ops do
@@ -195,8 +200,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                "../../priv/shaders/elementwise_unary_f64.spv",
                                __DIR__
                              )
+  @elementwise_unary_f32_spv Path.expand(
+                               "../../priv/shaders/elementwise_unary_f32.spv",
+                               __DIR__
+                             )
 
   defp unary_spv({:f, 64}), do: @elementwise_unary_f64_spv
+  defp unary_spv({:f, 32}), do: @elementwise_unary_f32_spv
   defp unary_spv(_), do: nil
 
   for {op, code} <- @unary_ops do
@@ -274,12 +284,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # conv — native f64 im2col + GEMM on the GPU for the common case; host
-  # fallback otherwise. Nx hands the backend fully-resolved strides, padding
-  # ({lo,hi} per spatial dim), input/kernel dilation, group sizes and
-  # permutations, plus an output template already in output-permutation layout.
-  @conv_im2col_spv Path.expand("../../priv/shaders/conv_im2col_f64.spv", __DIR__)
-  @conv_gemm_spv Path.expand("../../priv/shaders/conv_gemm_f64.spv", __DIR__)
+  # conv — native im2col + GEMM on the GPU for the common case (f64, or f32 with
+  # an f64 accumulator in the GEMM); host fallback otherwise. Nx hands the
+  # backend fully-resolved strides, padding ({lo,hi} per spatial dim),
+  # input/kernel dilation, group sizes and permutations, plus an output template
+  # already in output-permutation layout.
+  @conv_im2col_f64_spv Path.expand("../../priv/shaders/conv_im2col_f64.spv", __DIR__)
+  @conv_gemm_f64_spv Path.expand("../../priv/shaders/conv_gemm_f64.spv", __DIR__)
+  @conv_im2col_f32_spv Path.expand("../../priv/shaders/conv_im2col_f32.spv", __DIR__)
+  @conv_gemm_f32_spv Path.expand("../../priv/shaders/conv_gemm_f32.spv", __DIR__)
+
+  defp conv_spvs({:f, 64}), do: {@conv_im2col_f64_spv, @conv_gemm_f64_spv}
+  defp conv_spvs({:f, 32}), do: {@conv_im2col_f32_spv, @conv_gemm_f32_spv}
+  defp conv_spvs(_), do: nil
 
   @impl true
   def conv(out, inp, kernel, opts) do
@@ -296,15 +313,16 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # GPU path covers: spatial rank 1..3, feature/batch groups == 1, identity
-  # permutations, f64 input/kernel/output. Any strides, padding and
-  # input/kernel dilation are honoured (folded into the im2col index math).
-  # Groups > 1, non-identity permutations, non-f64 and higher rank fall back.
+  # permutations, f64 or f32 input/kernel/output (all three must match). Any
+  # strides, padding and input/kernel dilation are honoured (folded into the
+  # im2col index math). Groups > 1, non-identity permutations, mixed/other
+  # dtypes and higher rank fall back.
   defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, %T{type: ot}, opts) do
     rank = tuple_size(ishape)
     sr = rank - 2
 
     match?(%__MODULE__{}, i.data) and match?(%__MODULE__{}, k.data) and
-      i.type == {:f, 64} and k.type == {:f, 64} and ot == {:f, 64} and
+      i.type == ot and k.type == ot and ot in [{:f, 64}, {:f, 32}] and
       sr >= 1 and sr <= 3 and
       Keyword.get(opts, :feature_group_size, 1) == 1 and
       Keyword.get(opts, :batch_group_size, 1) == 1 and
@@ -319,11 +337,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
 
   defp gpu_conv(
-         out,
+         %T{type: type} = out,
          %T{shape: ishape, data: %__MODULE__{ref: in_ref}},
          %T{shape: kshape, data: %__MODULE__{ref: k_ref}},
          opts
        ) do
+    {im2col_spv, gemm_spv} = conv_spvs(type)
+    ebytes = element_bytes(type)
     rank = tuple_size(ishape)
     sr = rank - 2
     n = elem(ishape, 0)
@@ -360,7 +380,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     k_cols = cin * k_total
     m = n * o_total
 
-    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(m * k_cols * 8)
+    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(m * k_cols * ebytes)
 
     :ok =
       Nx.Vulkan.NativeV.conv_im2col(
@@ -372,15 +392,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
         o_total,
         k_total,
         k_cols,
-        @conv_im2col_spv
+        im2col_spv
       )
 
-    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * cout * o_total * 8)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * cout * o_total * ebytes)
 
     :ok =
-      Nx.Vulkan.NativeV.conv_gemm(out_ref, col_ref, k_ref, n, cout, o_total, k_cols, @conv_gemm_spv)
+      Nx.Vulkan.NativeV.conv_gemm(out_ref, col_ref, k_ref, n, cout, o_total, k_cols, gemm_spv)
 
-    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: {:f, 64}})
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
   end
 
   defp pad3([a], d), do: [a, d, d]
@@ -467,8 +487,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- reductions
 
   @reduce_axis_f64_spv Path.expand("../../priv/shaders/reduce_axis_f64.spv", __DIR__)
+  @reduce_axis_f32_spv Path.expand("../../priv/shaders/reduce_axis_f32.spv", __DIR__)
 
   defp reduce_spv({:f, 64}), do: @reduce_axis_f64_spv
+  defp reduce_spv({:f, 32}), do: @reduce_axis_f32_spv
   defp reduce_spv(_), do: nil
 
   @impl true
@@ -577,6 +599,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # transpose_f64.spv for the (only) GPU-accelerated case (2-D [1,0] f64);
   # every other shape/type host-falls-back.
   @transpose_f64_spv Path.expand("../../priv/shaders/transpose_f64.spv", __DIR__)
+  @transpose_f32_spv Path.expand("../../priv/shaders/transpose_f32.spv", __DIR__)
+
+  defp transpose_spv({:f, 64}), do: @transpose_f64_spv
+  defp transpose_spv({:f, 32}), do: @transpose_f32_spv
+  defp transpose_spv(_), do: nil
 
   # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
   # The buffer might be physically larger than the new shape implies
@@ -602,12 +629,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
         %T{shape: in_shape, data: %__MODULE__{ref: a_ref}} = tensor,
         axes
       ) do
-    if type == {:f, 64} and tuple_size(in_shape) == 2 and axes == [1, 0] do
+    spv = transpose_spv(type)
+
+    if spv != nil and tuple_size(in_shape) == 2 and axes == [1, 0] do
       m = elem(in_shape, 0)
       n = elem(in_shape, 1)
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
 
-      :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, @transpose_f64_spv)
+      :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else

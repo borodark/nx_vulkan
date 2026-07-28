@@ -1,0 +1,76 @@
+#version 450
+
+// f32 im2col unfold for conv (spatial rank <= 3). Identical index math to
+// conv_im2col_f64.comp — im2col is pure data movement (a gather with padding/
+// dilation), so f32 in/out is exact, no accumulator needed. The params buffer
+// stays int (dims/strides/padding); only the sample data is f32.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer In { float inp[]; };
+layout(std430, binding = 1) writeonly buffer Col { float col[]; };
+layout(std430, binding = 2) readonly buffer Params { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint N;
+    uint Cin;
+    uint O_total;
+    uint K_total;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint M = p.N * p.O_total;
+    uint total = M * p.K;
+    if (gid >= total) return;
+
+    uint r = gid / p.K;
+    uint c = gid % p.K;
+
+    uint O0 = uint(prm[3]), O1 = uint(prm[4]), O2 = uint(prm[5]);
+    uint K0 = uint(prm[6]), K1 = uint(prm[7]), K2 = uint(prm[8]);
+
+    uint n = r / p.O_total;
+    uint orem = r % p.O_total;
+    uint o0 = orem / (O1 * O2);
+    uint o1 = (orem / O2) % O1;
+    uint o2 = orem % O2;
+
+    uint ci = c / p.K_total;
+    uint krem = c % p.K_total;
+    uint t0 = krem / (K1 * K2);
+    uint t1 = (krem / K2) % K1;
+    uint t2 = krem % K2;
+
+    int D[3];  D[0] = prm[0];  D[1] = prm[1];  D[2] = prm[2];
+    int S[3];  S[0] = prm[9];  S[1] = prm[10]; S[2] = prm[11];
+    int Pl[3]; Pl[0] = prm[12]; Pl[1] = prm[13]; Pl[2] = prm[14];
+    int ID[3]; ID[0] = prm[15]; ID[1] = prm[16]; ID[2] = prm[17];
+    int KD[3]; KD[0] = prm[18]; KD[1] = prm[19]; KD[2] = prm[20];
+
+    int oo[3]; oo[0] = int(o0); oo[1] = int(o1); oo[2] = int(o2);
+    int tt[3]; tt[0] = int(t0); tt[1] = int(t1); tt[2] = int(t2);
+
+    bool valid = true;
+    int src[3];
+    for (uint i = 0u; i < 3u; ++i) {
+        int pos = oo[i] * S[i] + tt[i] * KD[i] - Pl[i];
+        if (pos < 0 || ID[i] <= 0 || (pos % ID[i]) != 0) {
+            valid = false;
+        } else {
+            int s = pos / ID[i];
+            if (s >= D[i]) valid = false; else src[i] = s;
+        }
+    }
+
+    float val = 0.0;
+    if (valid) {
+        uint dd0 = uint(D[0]), dd1 = uint(D[1]), dd2 = uint(D[2]);
+        uint in_idx =
+            (((n * p.Cin + ci) * dd0 + uint(src[0])) * dd1 + uint(src[1])) * dd2 + uint(src[2]);
+        val = inp[in_idx];
+    }
+
+    col[gid] = val;
+}
