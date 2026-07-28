@@ -102,12 +102,38 @@ After removal: **78 tests, 0 failures** on this host's Vulkan.
   `block/4` and via primitive composition) plus the retained fallbacks against
   a `BinaryBackend` reference in f64. Full suite: **106 tests, 0 failures**.
 
+## Phase 2 outcome (2026-07-28) — native GPU shaders
+
+**`fft` / `ifft`** (commit d644bc4): real f64 radix-2 Cooley-Tukey on the GPU —
+bit-reversed complex load + log2(n) butterfly stages in one auto-synchronised
+command buffer, twiddles precomputed in Rust f64. GPU-covered: last axis,
+power-of-two length == axis size, real-f64 or complex-f64 input, c128 output.
+Verified on-GPU (result stays on VulkanoBackend) and bit-identical to
+BinaryBackend (maxerr 0.0; ifft∘fft roundtrip ~2e-16). fft2/mixed-radix/other
+axes/padded lengths/f32→c64 host-fall-back, still correct.
+
+**`conv`** (commit f1df6d1): real f64 im2col + GEMM on the GPU. im2col shader
+unfolds the input (stride, low padding, input & kernel dilation folded into the
+index math); a conv-GEMM shader multiplies by the flattened kernel and writes
+canonical {N,Cout,O_total} output directly. GPU-covered: spatial rank 1..3,
+feature/batch groups == 1, identity permutations, f64. Verified on-GPU and
+bit-identical to BinaryBackend across strides/padding/dilation/multichannel/
+batch/1d/2d/3d (maxerr 0.0). Groups>1, non-identity permutations, non-f64 and
+rank>3 host-fall-back, still correct.
+
+Both use `glslangValidator`-compiled shaders in `priv/shaders/` and dispatch via
+new `NativeV` NIFs (`fft`, `conv_im2col`, `conv_gemm`) in the vulkano lib.rs.
+
 ## Definition of done (from PARITY_TASK.md)
 
 - [x] Regenerated gap shows only permanent skips remaining (gap is empty; the
       skip set falls back rather than being "missing").
 - [x] Phase 1 ops correct vs `BinaryBackend`; `mix test` green; the parity
       module compiles warning-free.
-- [ ] Phase 2 `conv` + `fft`/`ifft` run on the GPU (not falling back) and
-      correct vs `BinaryBackend`.
-- [ ] `LIMITATIONS.md` lists the true skips.
+- [x] Phase 2 `conv` + `fft`/`ifft` run on the GPU (verified: result stays on
+      VulkanoBackend for the covered case) and correct vs `BinaryBackend`.
+      fft2 / mixed-radix fft / grouped & permuted conv remain correct via host
+      fallback (documented follow-ons, `LIMITATIONS.md`).
+- [x] `LIMITATIONS.md` lists the true skips.
+
+Full suite after Phase 2: **130 tests, 0 failures** on this host's Vulkan.

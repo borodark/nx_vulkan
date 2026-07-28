@@ -32,12 +32,19 @@ shaders (hot kernels) or correct host fallbacks through `BinaryBackend`
 | `to_pointer/2` (callback) | FFI handle — nothing to compute; transfers to `BinaryBackend` and delegates. |
 | `phase` (not a callback) | `Nx.phase` composes from primitives; it only means anything for complex inputs, and the shader ISA is f64-**real** with no complex type. Nothing to implement or accelerate. |
 
-### In scope but not yet GPU-native (currently host fallback → Phase 2 shaders)
+### Native GPU shaders (Phase 2, landed) — with correct host-fallback tails
 
-`conv/4`, `fft/3`, `ifft/3` (and `fft2` after 1-D `fft`) are **hot kernels**, so
-a host fallback is a silent performance cliff. They currently host-materialize
-but are slated for real f64 Vulkan compute shaders (im2col+matmul for `conv`;
-Cooley–Tukey butterfly for `fft`/`ifft`). Until then they are correct-but-CPU.
+`conv/4`, `fft/3`, `ifft/3` now run **real f64 Vulkan compute shaders** on the
+GPU for the common case, and host-fall-back (still correct) for the rest:
+
+| Op | On GPU | Host fallback (correct) |
+|---|---|---|
+| `fft` / `ifft` | last axis, power-of-two length == axis size, real-f64/complex-f64 input → c128 | other axes, padded/sliced/non-pow2 length, f32/int → c64, `fft2` |
+| `conv` | spatial rank 1–3, feature/batch groups == 1, identity permutations, f64 | groups > 1 (incl. depthwise), non-identity permutations, non-f64, rank > 3 |
+
+Follow-on GPU work (all currently correct via fallback): native 2-D `fft2`,
+mixed-radix (non-power-of-two) FFT, grouped/depthwise conv, and channels-last
+(permuted) conv. `phase` stays a permanent skip (complex-only).
 
 ---
 
