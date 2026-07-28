@@ -283,18 +283,70 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  @impl true
-  def fft(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.fft(t_bin, opts)
-    host_result(out, result)
-  end
+  # fft / ifft — native f64 Cooley-Tukey on the GPU for the common case;
+  # host fallback otherwise. Nx resolves :length and :axis to concrete ints
+  # before dispatch and sets out.type = to_complex(input) (f64 -> c128).
+  @fft_bitrev_spv Path.expand("../../priv/shaders/fft_bitrev_load_f64.spv", __DIR__)
+  @fft_stage_spv Path.expand("../../priv/shaders/fft_stage_f64.spv", __DIR__)
 
   @impl true
-  def ifft(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.ifft(t_bin, opts)
-    host_result(out, result)
+  def fft(out, tensor, opts), do: do_fft(out, tensor, opts, false)
+
+  @impl true
+  def ifft(out, tensor, opts), do: do_fft(out, tensor, opts, true)
+
+  defp do_fft(out, tensor, opts, inverse?) do
+    t = ensure_on_backend(tensor)
+    length = Keyword.fetch!(opts, :length)
+    axis = Keyword.fetch!(opts, :axis)
+    rank = tuple_size(t.shape)
+
+    if fft_gpu_ok?(t, out, axis, length, rank) do
+      gpu_fft(out, t, length, inverse?)
+    else
+      op = if inverse?, do: :ifft, else: :fft
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      host_result(out, apply(Nx, op, [t_bin, opts]))
+    end
+  end
+
+  # GPU path covers: last axis, no pad/slice (length == that axis's size),
+  # power-of-two length >= 2, real-f64 or complex-f64 input, c128 output.
+  # Everything else (other axes, padded/sliced/non-pow2 lengths, f32/int
+  # inputs that map to c64) falls back to BinaryBackend, still correct.
+  defp fft_gpu_ok?(%T{shape: shape, type: type} = t, %T{type: {:c, 128}}, axis, length, rank) do
+    match?(%__MODULE__{}, t.data) and rank >= 1 and axis == rank - 1 and
+      elem(shape, axis) == length and pow2?(length) and length >= 2 and
+      type in [{:f, 64}, {:c, 128}]
+  end
+
+  defp fft_gpu_ok?(_t, _out, _axis, _length, _rank), do: false
+
+  defp pow2?(n), do: n > 0 and Bitwise.band(n, n - 1) == 0
+
+  defp gpu_fft(out, %T{shape: shape, type: type, data: %__MODULE__{ref: in_ref}}, length, inverse?) do
+    n = length
+    logn = trunc(:math.log2(n))
+    batch = div(byte_size_of(shape), n)
+    is_complex = if type == {:c, 128}, do: 1, else: 0
+    inv = if inverse?, do: 1, else: 0
+    out_bytes = batch * n * element_bytes({:c, 128})
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.fft(
+        out_ref,
+        in_ref,
+        n,
+        logn,
+        batch,
+        is_complex,
+        inv,
+        @fft_bitrev_spv,
+        @fft_stage_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: {:c, 128}})
   end
 
   @impl true
@@ -941,6 +993,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp element_bytes({:u, 32}), do: 4
   defp element_bytes({:u, 64}), do: 8
   defp element_bytes({:bf, 16}), do: 2
+  defp element_bytes({:c, 64}), do: 8
+  defp element_bytes({:c, 128}), do: 16
 
   defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
   defp encode_scalar(s, {:f, 64}), do: <<s / 1.0::float-64-native>>

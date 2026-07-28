@@ -1609,6 +1609,154 @@ fn matmul<'a>(
     }
 }
 
+// -- FFT ------------------------------------------------------------------
+//
+// Radix-2 Cooley-Tukey (decimation-in-time), power-of-two length, over the
+// last axis, batched. Two shaders: a bit-reversed complex load, then log2(n)
+// in-place butterfly stages. Twiddles are computed here in f64 (GLSL fp64 has
+// no sin/cos) and uploaded as a table of n/2 complex entries reused across
+// stages. The whole transform is recorded into a single command buffer so
+// vulkano's AutoCommandBufferBuilder inserts the compute-compute barriers
+// between dependent stages automatically.
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushFftBitrev {
+    n: u32,
+    logn: u32,
+    batch: u32,
+    is_complex: u32,
+    inverse: u32,
+}
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushFftStage {
+    n: u32,
+    half_: u32,
+    batch: u32,
+    stride: u32,
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn fft<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    logn: u32,
+    batch: u32,
+    is_complex: u32,
+    inverse: u32,
+    bitrev_spv: String,
+    stage_spv: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        if n < 2 || (n & (n - 1)) != 0 {
+            return Err(format!("fft length must be a power of two >= 2, got {n}"));
+        }
+
+        // Twiddle table: n/2 complex entries, tw[t] = exp(sgn*2*pi*i*t/n).
+        // Forward DFT uses sgn = -1; inverse uses +1 (the 1/n scale is folded
+        // into the bit-reversed load).
+        let sgn = if inverse == 1 { 1.0f64 } else { -1.0f64 };
+        let half = (n / 2) as usize;
+        let mut tw_bytes: Vec<u8> = Vec::with_capacity(half * 16);
+        for t in 0..half {
+            let ang = sgn * std::f64::consts::TAU * (t as f64) / (n as f64);
+            tw_bytes.extend_from_slice(&ang.cos().to_le_bytes());
+            tw_bytes.extend_from_slice(&ang.sin().to_le_bytes());
+        }
+        let tw_buf = upload_buffer(
+            context.mem_allocator.clone(),
+            &tw_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+        )?;
+
+        let bitrev = get_or_create_pipeline(&bitrev_spv, None)?;
+        let stage = get_or_create_pipeline(&stage_spv, None)?;
+
+        let mut cmd = AutoCommandBufferBuilder::primary(
+            &context.cmd_allocator,
+            context.queue.queue_family_index(),
+            CommandBufferUsage::SimultaneousUse,
+        )
+        .map_err(|e| format!("cmd builder: {e}"))?;
+
+        // Stage 0: bit-reversed load, in_ref -> out_ref (complex).
+        let load_set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            bitrev.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("load descriptor set: {e}"))?;
+
+        let load_groups = (batch * n).div_ceil(64);
+        cmd.bind_pipeline_compute(bitrev.pipeline.clone())
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, bitrev.layout.clone(), 0, load_set)
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(bitrev.layout.clone(), 0, PushFftBitrev { n, logn, batch, is_complex, inverse })
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch([load_groups, 1, 1])
+            .map_err(|e| format!("dispatch: {e}"))?;
+
+        // Stages 1..=logn: in-place butterflies on out_ref.
+        let stage_groups = (batch * (n / 2)).div_ceil(64);
+        for s in 1..=logn {
+            let stage_half = 1u32 << (s - 1);
+            let m = 1u32 << s;
+            let stride = n / m;
+
+            let set = PersistentDescriptorSet::new(
+                &context.set_allocator,
+                stage.layout.set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, out_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(1, tw_buf.clone()),
+                ],
+                [],
+            )
+            .map_err(|e| format!("stage descriptor set: {e}"))?;
+
+            cmd.bind_pipeline_compute(stage.pipeline.clone())
+                .map_err(|e| format!("bind pipeline: {e}"))?
+                .bind_descriptor_sets(PipelineBindPoint::Compute, stage.layout.clone(), 0, set)
+                .map_err(|e| format!("bind descriptor: {e}"))?
+                .push_constants(stage.layout.clone(), 0, PushFftStage { n, half_: stage_half, batch, stride })
+                .map_err(|e| format!("push_constants: {e}"))?
+                .dispatch([stage_groups, 1, 1])
+                .map_err(|e| format!("dispatch: {e}"))?;
+        }
+
+        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let future = sync::now(context.device.clone())
+            .then_execute(context.queue.clone(), cmd_buf)
+            .map_err(|e| format!("then_execute: {e}"))?;
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
+        unsafe { future.signal_finished(); }
+        drop(future);
+        drop(tw_buf);
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -1631,6 +1779,7 @@ rustler::init!(
         reduce_axis,
         transpose_2d,
         matmul,
+        fft,
     ],
     load = load
 );

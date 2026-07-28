@@ -123,6 +123,18 @@ defmodule Nx.Vulkan.NativeV do
   def matmul(_out, _a, _b, _m, _n, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Radix-2 Cooley-Tukey FFT (power-of-two, last-axis, batched) in f64.
+
+  `out` is a complex buffer of `batch*n*16` bytes (interleaved re/im f64).
+  `in` is either real f64 (`batch*n*8` bytes, `is_complex = 0`) or complex
+  (`batch*n*16`, `is_complex = 1`). `logn = log2(n)`. `inverse = 1` applies the
+  1/n normalisation and the conjugate twiddle. Two shaders: bit-reversed load
+  then log2(n) butterfly stages.
+  """
+  def fft(_out, _in, _n, _logn, _batch, _is_complex, _inverse, _bitrev_spv, _stage_spv),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # Chain shader NIFs — registered in Rust, must have stubs here for NIF loading.
   # f32 variant kept as stub only (unused); f64 is the active path.
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
