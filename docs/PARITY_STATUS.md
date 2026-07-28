@@ -84,11 +84,30 @@ commit `bb94217` ("Drop spirit C++ backend"), referencing the deleted
 `Nx.Vulkan.Backend` / `Nx.Vulkan.Fuse` / `Nx.Vulkan.init/0` APIs — were removed.
 After removal: **78 tests, 0 failures** on this host's Vulkan.
 
+## Phase 1 outcome (2026-07-28)
+
+- Removed the 15 dead `@impl true`-on-non-callback clauses (cholesky,
+  determinant, solve, qr, lu, svd, eigh, take, take_along_axis, top_k,
+  cumulative_max/min/product, all_close, logical_not) and the duplicate
+  explicit `all/3`/`any/3` (the `for op <- [:all, :any]` loop remains).
+- Fixed a **latent `to_batched/3` bug**: the fallback read `opts[:batch_size]`,
+  but nx 0.13 encodes batch size in the `out` template's leading dim (opts
+  carries only `:leftover`) — every `Nx.to_batched` call would have crashed.
+  Now derived from `out.shape`.
+- `vulkano_backend.ex` compiles **warning-free**. One pre-existing warning
+  remains in `native_v.ex` (`leapfrog_chain_synth_f64/6` clause grouping) — it
+  is in the guardrailed fused-leapfrog path and is not a parity op, so left
+  untouched.
+- New `test/nx_vulkan/parity_fallback_test.exs` verifies all removed ops (via
+  `block/4` and via primitive composition) plus the retained fallbacks against
+  a `BinaryBackend` reference in f64. Full suite: **106 tests, 0 failures**.
+
 ## Definition of done (from PARITY_TASK.md)
 
 - [x] Regenerated gap shows only permanent skips remaining (gap is empty; the
       skip set falls back rather than being "missing").
-- [ ] Phase 1 ops correct vs `BinaryBackend`; `mix test` green; warning-free.
+- [x] Phase 1 ops correct vs `BinaryBackend`; `mix test` green; the parity
+      module compiles warning-free.
 - [ ] Phase 2 `conv` + `fft`/`ifft` run on the GPU (not falling back) and
       correct vs `BinaryBackend`.
 - [ ] `LIMITATIONS.md` lists the true skips.

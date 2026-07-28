@@ -686,17 +686,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  # take: pick along a single axis. Common in trajectory selection.
-  # The Nx.Backend.take/4 callback's 4th arg is a keyword (e.g.
-  # `[axis: 0]`), NOT a bare integer — forward it through verbatim.
-  @impl true
-  def take(out, tensor, indices, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.take(t_bin, i_bin, opts)
-    host_result(out, result)
-  end
-
   # argmax / argmin: indices of extrema along an axis. Used by
   # credible-interval extraction and PyMC-style posterior summaries.
   # Tier 1 host fallback — no GPU shader yet.
@@ -726,34 +715,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  # --- Tier 1 parity batch (2026-05-26) — see docs/NX_PARITY_RESEARCH.md ---
-  # Each implements the Nx.Backend callback via Nx.BinaryBackend (download,
-  # invoke Nx.<op>, return on BinaryBackend per Tier 1 contract). No
-  # GPU acceleration yet; can be promoted to compute shaders later when
-  # profiling justifies (top candidates per family in research doc).
-
-  # all_close: pairwise tolerance check. Returns a 0-arity boolean tensor.
-  @impl true
-  def all_close(out, a, b, opts) do
-    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
-    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
-    result = Nx.all_close(a_bin, b_bin, opts)
-    host_result(out, result)
-  end
+  # --- Tier 1 parity batch — host-fallback Nx.Backend callbacks ---
+  # Each downloads to BinaryBackend, invokes Nx.<op>, returns on
+  # BinaryBackend (host_result contract). No GPU shader yet; promotable
+  # later when profiling justifies. (nx 0.13 note: all_close, logical_not,
+  # cumulative_*, top_k, take_along_axis and the small-linalg family are no
+  # longer Nx.Backend callbacks — Nx routes them through block/4 or composes
+  # them from primitives, so they need no explicit clause here.)
 
   # product: multiplicative reduction. Same shape as sum but with *.
   @impl true
   def product(out, tensor, opts) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     result = Nx.product(t_bin, opts)
-    host_result(out, result)
-  end
-
-  # logical_not: elementwise boolean inversion. Returns u8 tensor.
-  @impl true
-  def logical_not(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.logical_not(t_bin)
     host_result(out, result)
   end
 
@@ -766,31 +740,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  # cumulative_max / cumulative_min / cumulative_product: prefix scans.
-  # cumulative_sum already passes via Nx composition; the others need
-  # explicit callbacks.
-  @impl true
-  def cumulative_max(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_max(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def cumulative_min(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_min(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def cumulative_product(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_product(t_bin, opts)
-    host_result(out, result)
-  end
-
-  # sort / argsort / top_k / take_along_axis — sort family
+  # sort / argsort — sort family (both still Nx.Backend callbacks)
   @impl true
   def sort(out, tensor, opts) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
@@ -805,36 +755,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  @impl true
-  def top_k(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.top_k(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def take_along_axis(out, tensor, indices, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.take_along_axis(t_bin, i_bin, opts)
-    host_result(out, result)
-  end
-
-  # all / any — boolean reductions
-  @impl true
-  def all(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.all(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def any(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.any(t_bin, opts)
-    host_result(out, result)
-  end
-
   # bitcast: reinterpret bytes as different type without conversion
   @impl true
   def bitcast(out, tensor) do
@@ -844,74 +764,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # to_batched: split leading axis into chunks. Returns a stream of tensors.
+  # nx 0.13 encodes the batch size in the `out` template's leading dim (opts
+  # carries only :leftover), so derive it from there — reading opts[:batch_size]
+  # yields nil and crashes Nx.to_batched/3.
   @impl true
-  def to_batched(out, tensor, opts) do
+  def to_batched(%T{shape: out_shape}, tensor, opts) do
+    batch_size = elem(out_shape, 0)
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    Nx.to_batched(t_bin, opts[:batch_size], opts)
+    Nx.to_batched(t_bin, batch_size, opts)
   end
 
-  # --- Round 2: linalg family (8 callbacks, all delegate to Nx.LinAlg) ---
-  # Most return a SINGLE tensor; lu/qr/svd/eigh return a tuple. The tuple
-  # cases skip host_result/2 (which takes a single tensor) and rebuild
-  # each component as a BinaryBackend tensor explicitly.
-
-  @impl true
-  def cholesky(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.LinAlg.cholesky(t_bin)
-    host_result(out, result)
-  end
-
-  @impl true
-  def determinant(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.LinAlg.determinant(t_bin)
-    host_result(out, result)
-  end
-
-  @impl true
-  def solve(out, a, b) do
-    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
-    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
-    result = Nx.LinAlg.solve(a_bin, b_bin)
-    host_result(out, result)
-  end
-
+  # --- linalg: triangular_solve is the only remaining Nx.Backend callback ---
+  # nx 0.13 dropped cholesky/determinant/solve/qr/lu/svd/eigh from the
+  # behaviour and routes each through the block/4 callback (a Nx.Block.LinAlg.*
+  # struct); our block/4 transfers to BinaryBackend, so those ops need no
+  # explicit clause here. triangular_solve stayed a callback.
   @impl true
   def triangular_solve(out, a, b, opts) do
     a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
     b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
     result = Nx.LinAlg.triangular_solve(a_bin, b_bin, opts)
     host_result(out, result)
-  end
-
-  # Tuple-return decompositions — each element rebuilt as BinaryBackend.
-  @impl true
-  def qr({q_out, r_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {q, r} = Nx.LinAlg.qr(t_bin, opts)
-    {host_result(q_out, q), host_result(r_out, r)}
-  end
-
-  @impl true
-  def lu({p_out, l_out, u_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {p, l, u} = Nx.LinAlg.lu(t_bin, opts)
-    {host_result(p_out, p), host_result(l_out, l), host_result(u_out, u)}
-  end
-
-  @impl true
-  def svd({u_out, s_out, vt_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {u, s, vt} = Nx.LinAlg.svd(t_bin, opts)
-    {host_result(u_out, u), host_result(s_out, s), host_result(vt_out, vt)}
-  end
-
-  @impl true
-  def eigh({eigenvals_out, eigenvecs_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {evals, evecs} = Nx.LinAlg.eigh(t_bin, opts)
-    {host_result(eigenvals_out, evals), host_result(eigenvecs_out, evecs)}
   end
 
   # --- Round 2: window family (7 callbacks) ---
