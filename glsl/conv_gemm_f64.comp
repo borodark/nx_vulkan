@@ -1,18 +1,16 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
 
-// Convolution GEMM: multiply the im2col matrix A (M x K) by the flattened
-// kernel W (Cout x K) and write straight into the output's canonical layout
-// {N, Cout, O_total}, so no post-transpose/permute is needed.
+// Tiled f64 conv GEMM. Computes C = A·Wᵀ over (M = N·O_total rows, Cout cols):
+// out[n,oc,o] = sum_l im2col(A)[(n·O_total+o)·K + l] · kernel[oc·K + l], written
+// straight into canonical {N,Cout,O_total} layout.
 //
-//   A row  = n*O_total + o          (from conv_im2col)
-//   W row  = oc,  W[oc*K + l]        (kernel {Cout, Cin, K...} flattened)
-//   out[((n*Cout + oc)*O_total) + o] = sum_l A[(n*O_total+o)*K + l] * W[oc*K + l]
-//
-// One invocation per output element; the linear id already equals the output
-// flat index because it is decoded in (n, oc, o) order.
+// 16×16 shared-memory tiling: each workgroup stages a 16×16 tile of A and of W
+// (the kernel, Cout×K) through shared memory, reusing every global load 16×.
+// Boundary-safe for shapes not a multiple of 16. Dispatch: global x over Cout,
+// global y over M, local 16×16 (see conv_gemm NIF).
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(std430, binding = 0) readonly buffer A { double a[]; };
 layout(std430, binding = 1) readonly buffer W { double w[]; };
@@ -25,24 +23,39 @@ layout(push_constant) uniform Push {
     uint K;
 } p;
 
+const uint T = 16u;
+shared double As[T][T];
+shared double Ws[T][T];
+
 void main() {
-    uint gid = gl_GlobalInvocationID.x;
-    uint total = p.N * p.Cout * p.O_total;
-    if (gid >= total) return;
-
-    uint n = gid / (p.Cout * p.O_total);
-    uint rem = gid % (p.Cout * p.O_total);
-    uint oc = rem / p.O_total;
-    uint o = rem % p.O_total;
-
-    uint arow = n * p.O_total + o;
-    uint abase = arow * p.K;
-    uint wbase = oc * p.K;
+    uint M = p.N * p.O_total;
+    uint row = gl_GlobalInvocationID.y;
+    uint oc = gl_GlobalInvocationID.x;
+    uint ly = gl_LocalInvocationID.y;
+    uint lx = gl_LocalInvocationID.x;
 
     double acc = 0.0lf;
-    for (uint l = 0u; l < p.K; ++l) {
-        acc += a[abase + l] * w[wbase + l];
+    uint tiles = (p.K + T - 1u) / T;
+
+    for (uint t = 0u; t < tiles; ++t) {
+        uint aCol = t * T + lx;
+        As[ly][lx] = (row < M && aCol < p.K) ? a[row * p.K + aCol] : 0.0lf;
+
+        uint wCol = t * T + ly;
+        Ws[ly][lx] = (oc < p.Cout && wCol < p.K) ? w[oc * p.K + wCol] : 0.0lf;
+
+        barrier();
+
+        for (uint i = 0u; i < T; ++i) {
+            acc += As[ly][i] * Ws[i][lx];
+        }
+
+        barrier();
     }
 
-    outp[gid] = acc;
+    if (row < M && oc < p.Cout) {
+        uint n = row / p.O_total;
+        uint o = row % p.O_total;
+        outp[(n * p.Cout + oc) * p.O_total + o] = acc;
+    }
 }

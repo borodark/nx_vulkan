@@ -1827,7 +1827,7 @@ fn conv_im2col<'a>(
             &cached,
             set,
             PushConvIm2col { n, cin, o_total, k_total, k },
-            groups,
+            [groups, 1, 1],
         )
     })();
 
@@ -1869,8 +1869,12 @@ fn conv_gemm<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        let groups = (n * cout).saturating_mul(o_total).div_ceil(64);
-        run_single_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, groups)
+        // Tiled conv GEMM: C = A·Wᵀ over (M = N·O_total rows, Cout cols), 16×16
+        // workgroups. global x over Cout, global y over M.
+        let m = n.saturating_mul(o_total);
+        let gx = cout.div_ceil(16);
+        let gy = m.div_ceil(16);
+        run_single_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, [gx, gy, 1])
     })();
 
     match result {
@@ -1886,7 +1890,7 @@ fn run_single_dispatch<P: BufferContents>(
     cached: &CachedPipeline,
     set: Arc<PersistentDescriptorSet>,
     push: P,
-    groups: u32,
+    groups: [u32; 3],
 ) -> Result<(), String> {
     let mut cmd = AutoCommandBufferBuilder::primary(
         &context.cmd_allocator,
@@ -1901,7 +1905,7 @@ fn run_single_dispatch<P: BufferContents>(
         .map_err(|e| format!("bind descriptor: {e}"))?
         .push_constants(cached.layout.clone(), 0, push)
         .map_err(|e| format!("push_constants: {e}"))?
-        .dispatch([groups, 1, 1])
+        .dispatch(groups)
         .map_err(|e| format!("dispatch: {e}"))?;
 
     let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;

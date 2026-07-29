@@ -1,11 +1,16 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
 
-// f32 conv GEMM with an f64 accumulator (same rationale as matmul_f32_f64acc):
-// out{N,Cout,O_total} = im2col(A){M,K} · kernel{Cout,K}, f32 storage, the
-// K-length dot accumulated in double and rounded to f32 only on store.
+// Tiled f32 conv GEMM with an f64 accumulator — accuracy-safe default of the
+// conv accumulator policy (:f64). Same tiled C = A·Wᵀ structure as
+// conv_gemm_f32_f32acc, but the dot product is accumulated in double and
+// rounded to f32 only on store. Tiles are stored f32; only accumulation is f64.
+//
+// out[n,oc,o] = sum_l im2col(A)[(n·O_total+o)·K + l] · kernel[oc·K + l], written
+// into canonical {N,Cout,O_total} layout. Dispatch: global x over Cout, global
+// y over M = N·O_total, local 16×16.
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(std430, binding = 0) readonly buffer A { float a[]; };
 layout(std430, binding = 1) readonly buffer W { float w[]; };
@@ -18,23 +23,39 @@ layout(push_constant) uniform Push {
     uint K;
 } p;
 
+const uint T = 16u;
+shared float As[T][T];
+shared float Ws[T][T];
+
 void main() {
-    uint gid = gl_GlobalInvocationID.x;
-    uint total = p.N * p.Cout * p.O_total;
-    if (gid >= total) return;
-
-    uint n = gid / (p.Cout * p.O_total);
-    uint rem = gid % (p.Cout * p.O_total);
-    uint oc = rem / p.O_total;
-    uint o = rem % p.O_total;
-
-    uint abase = (n * p.O_total + o) * p.K;
-    uint wbase = oc * p.K;
+    uint M = p.N * p.O_total;
+    uint row = gl_GlobalInvocationID.y;
+    uint oc = gl_GlobalInvocationID.x;
+    uint ly = gl_LocalInvocationID.y;
+    uint lx = gl_LocalInvocationID.x;
 
     double acc = 0.0lf;
-    for (uint l = 0u; l < p.K; ++l) {
-        acc += double(a[abase + l]) * double(w[wbase + l]);
+    uint tiles = (p.K + T - 1u) / T;
+
+    for (uint t = 0u; t < tiles; ++t) {
+        uint aCol = t * T + lx;
+        As[ly][lx] = (row < M && aCol < p.K) ? a[row * p.K + aCol] : 0.0;
+
+        uint wCol = t * T + ly;
+        Ws[ly][lx] = (oc < p.Cout && wCol < p.K) ? w[oc * p.K + wCol] : 0.0;
+
+        barrier();
+
+        for (uint i = 0u; i < T; ++i) {
+            acc += double(As[ly][i]) * double(Ws[i][lx]);
+        }
+
+        barrier();
     }
 
-    outp[gid] = float(acc);
+    if (row < M && oc < p.Cout) {
+        uint n = row / p.O_total;
+        uint o = row % p.O_total;
+        outp[(n * p.Cout + oc) * p.O_total + o] = float(acc);
+    }
 }

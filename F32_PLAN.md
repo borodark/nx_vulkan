@@ -184,6 +184,14 @@ reopens the device-aware-default question with a much stronger, size-stable case
 — **re-run `RACE_TODO_SUPER_IO.md` on Ampere to confirm the tiled kernel scales
 there** before deciding.
 
+**Conv GEMM tiled too.** All three conv-GEMM shaders (`conv_gemm_f64`,
+`conv_gemm_f32_f64acc`, `conv_gemm_f32_f32acc`) now use the same 16×16 tiling —
+conv's GEMM is `C = A·Wᵀ` (kernel `Cout×K`) written to the permuted
+`{N,Cout,O_total}` layout, so the `conv_gemm` NIF now dispatches 2-D (Cout × M).
+Boundary-safe (verified with Cout=7/13, M=25). On the GT 650M via `Nx.conv`,
+larger convs: `{8,32,28,28}·{64,32,3,3}` → `:f32acc` **1.98×**;
+`{4,64,16,16}·{128,64,3,3}` → **1.37×** (f64 exact, f32 err ≤7e-7).
+
 ## Not converted (stay f64 / host, by design)
 
 Leapfrog/MCMC chain (needs f64 for HMC stability), linalg + `block/4` family
