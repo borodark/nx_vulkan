@@ -3,7 +3,7 @@
 # Times three matmul shaders head-to-head:
 #   * matmul_f64            — f64 storage + f64 accumulator (the default)
 #   * matmul_f32_f64acc     — f32 storage + f64 accumulator (accuracy-safe f32)
-#   * matmul_f32_naive      — f32 storage + f32 accumulator (fast f32)
+#   * matmul_f32_f32acc      — f32 storage + f32 accumulator (fast f32)
 #
 #   mix run examples/matmul_accumulator_race.exs
 #
@@ -20,7 +20,7 @@ alias Nx.Vulkan.NativeV
 
 f64_spv = Path.expand("priv/shaders/matmul_f64.spv")
 f32acc_spv = Path.expand("priv/shaders/matmul_f32_f64acc.spv")
-f32naive_spv = Path.expand("priv/shaders/matmul_f32_naive.spv")
+f32naive_spv = Path.expand("priv/shaders/matmul_f32_f32acc.spv")
 
 rnd = fn n -> for i <- 1..n, do: :math.sin(i * 0.01) end
 

@@ -1,7 +1,7 @@
 # Why the f32 matmul uses an f64 accumulator.
 #
 # Compares two f32 matmul shaders against an f64 ground truth:
-#   * matmul_f32_naive     — accumulates the dot product in f32
+#   * matmul_f32_f32acc     — accumulates the dot product in f32
 #   * matmul_f32_f64acc    — accumulates in f64 (what the backend ships)
 #
 #   mix run examples/f32_accumulator.exs
@@ -10,7 +10,7 @@ Application.ensure_all_started(:nx_vulkan)
 alias Nx.Vulkan.VulkanoBackend
 alias Nx.Vulkan.NativeV
 
-naive_spv = Path.expand("priv/shaders/matmul_f32_naive.spv")
+naive_spv = Path.expand("priv/shaders/matmul_f32_f32acc.spv")
 f64acc_spv = Path.expand("priv/shaders/matmul_f32_f64acc.spv")
 
 # run an f32 matmul with a chosen shader, return the result as a flat f64 list

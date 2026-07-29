@@ -1043,13 +1043,35 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- linalg
 
   @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
-  # f32 matmul keeps data in f32 but accumulates the dot product in f64 (see
-  # F32_PLAN.md) — matches a f64-accumulating reference to f32 round-off while
-  # halving memory traffic. Opt-in via the tensor's dtype; f64 stays the default.
-  @matmul_f32_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+  # f32 matmul keeps data in f32; the accumulator width is a policy (see
+  # F32_PLAN.md). Default :f64 matches a f64-accumulating reference to f32
+  # round-off; :f32 is 1.4-1.7x faster on f64-rate-limited GPUs (Kepler/consumer
+  # Ampere) at the cost of precision that degrades with K. Opt into the f32 path
+  # via the tensor's dtype; f64 storage stays the default.
+  @matmul_f32_f64acc_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+  @matmul_f32_f32acc_spv Path.expand("../../priv/shaders/matmul_f32_f32acc.spv", __DIR__)
+
+  @doc """
+  Accumulator width for the f32 matmul GPU path: `:f64` (default, accuracy-safe)
+  or `:f32` (fast on f64-rate-limited GPUs). Set with
+  `put_f32_matmul_accumulator/1` or `config :nx_vulkan, :f32_matmul_accumulator`.
+  """
+  def f32_matmul_accumulator, do: Application.get_env(:nx_vulkan, :f32_matmul_accumulator, :f64)
+
+  @doc "Set the f32 matmul accumulator policy (`:f64` | `:f32`). See `f32_matmul_accumulator/0`."
+  def put_f32_matmul_accumulator(width) when width in [:f32, :f64] do
+    Application.put_env(:nx_vulkan, :f32_matmul_accumulator, width)
+  end
 
   defp matmul_spv({:f, 64}), do: @matmul_f64_spv
-  defp matmul_spv({:f, 32}), do: @matmul_f32_spv
+
+  defp matmul_spv({:f, 32}) do
+    case f32_matmul_accumulator() do
+      :f32 -> @matmul_f32_f32acc_spv
+      _ -> @matmul_f32_f64acc_spv
+    end
+  end
+
   defp matmul_spv(_), do: nil
 
   # Dot product (matmul) — Nx callback signature:

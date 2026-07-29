@@ -125,15 +125,27 @@ All verified vs `BinaryBackend` (`test/nx_vulkan/{f32_ops,matmul_f32}_test.exs`)
 algebraic/movement/reduction ops are exact, f32 transcendentals (exp/log/pow/
 tanh/sigmoid) agree to ~f32 ulp (≤1.4e-6). Full suite: 171 tests, 0 failures.
 
-### On item 5 (precision policy config)
+### Item 5 — accumulator policy (implemented for matmul)
 
-Deliberately **not** adding a separate `default_precision` knob: the dispatch is
-already keyed on the tensor's dtype, so the "f32 option" is simply *create f32
-tensors* — the idiomatic Nx control (`Nx.tensor(.., type: {:f, 32})` /
-`Nx.as_type(t, {:f, 32})`). Compute follows storage; f64 stays the default. A
-forced-override (compute f32 even for f64 storage, or a wider accumulator) can be
-layered on later via `init/1` opts if a real workload needs it, but it is not
-required for the f32 path itself.
+**Which dtype to compute in** stays keyed on the tensor's dtype — the "f32
+option" is simply *create f32 tensors* (`Nx.tensor(.., type: {:f, 32})` /
+`Nx.as_type`), compute follows storage, f64 is the default.
+
+**Accumulator width**, however, is a genuine policy the GT 650M data forced (a
+f64 accumulator makes compute-bound f32 matmul *slower* than f64 on rate-limited
+GPUs). Implemented for matmul as a runtime setting, default `:f64`:
+
+```elixir
+Nx.Vulkan.VulkanoBackend.f32_matmul_accumulator()          #=> :f64  (default, accuracy-safe)
+Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)  # fast on f64-starved GPUs
+# or: config :nx_vulkan, :f32_matmul_accumulator, :f32
+```
+
+`:f64` → `matmul_f32_f64acc.spv` (matches BinaryBackend to f32 round-off).
+`:f32` → `matmul_f32_f32acc.spv` (1.4–1.7× faster on Kepler/Ampere; precision
+degrades with K). Verified both dispatch on GPU and the ill-conditioned accuracy
+gap (`test/nx_vulkan/matmul_f32_test.exs`). The same knob extends naturally to
+conv's GEMM next (a `conv_gemm_f32_f32acc` variant).
 
 ## Not converted (stay f64 / host, by design)
 

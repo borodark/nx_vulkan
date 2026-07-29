@@ -1,10 +1,11 @@
 #version 450
 
-// f32 matmul with a naive f32 accumulator — the baseline that motivates the
-// f64-accumulator variant. Kept ONLY for the accuracy experiment
-// (examples/f32_accumulator.exs); the backend dispatches the f64-accumulator
-// shader. As K grows the f32 accumulator loses precision (catastrophic
-// cancellation), diverging from a f64-accumulating reference.
+// f32 matmul with a pure f32 accumulator — the fast variant of the f32 matmul
+// accumulator policy (see F32_PLAN.md). Selected when
+// :f32_matmul_accumulator is set to :f32; the default :f64 uses
+// matmul_f32_f64acc. On f64-rate-limited GPUs (Kepler/consumer Ampere) this is
+// 1.4-1.7x faster than f64, at the cost of precision that degrades as K grows
+// (catastrophic cancellation on ill-conditioned dot products).
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
