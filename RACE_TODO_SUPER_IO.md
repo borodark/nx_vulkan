@@ -13,12 +13,27 @@ run is to validate it on Ampere and decide the default.
 > shares the policy; the step-4 snippet is fixed; the JSON records the
 > accumulator.
 >
-> **Round 2 ask:** the 1024³ `:f32acc` cliff you found is **fixed** — both f32
-> matmul shaders are now **16×16 shared-memory tiled**. On the GT 650M `:f32acc`
-> went 1.72×→**2.68×** at 512³ and holds **2.66× at 1024³** (was ~1.1× on your
-> card). **Re-run steps 3–4 on the RTX 3060 Ti** and confirm the tiled kernel
-> scales flat (no 1024 cliff) on Ampere too. If it does, the device-aware-default
-> question is worth reopening with a size-stable ~2.5× — note that in your report.
+> **Round 2 ask — re-race the tiled kernels on the RTX 3060 Ti.** Since round 1,
+> **every GEMM is now 16×16 shared-memory tiled**: both f32 matmul shaders, all
+> three conv-GEMM shaders, and the f64 matmul. On the GT 650M this fixed the
+> 1024³ `:f32acc` cliff (1.72×→**2.68×** at 512³, holds **2.66× at 1024³**, was
+> ~1.1× on your card), gave conv `:f32acc` **1.4–2.0×** on larger convs, and made
+> f64 matmul ~1.35–1.4× faster (still f64-exact). Please, on Ampere:
+>
+> 1. `sh scripts/race.sh` + `mix run examples/matmul_accumulator_race.exs` +
+>    step-4 (below) — but **add n=1024 and n=2048** to the size sweep to confirm
+>    the cliff is gone and see where (if anywhere) it reappears.
+> 2. Race **conv** `:f64acc` vs `:f32acc` on a couple of real layers, e.g.
+>    `{8,32,28,28}·{64,32,3,3}` and `{4,64,16,16}·{128,64,3,3}`.
+> 3. Note the **f64 matmul** speedup from tiling (compare against round 1's f64
+>    numbers in `AMPERE_SUPER_IO_RESULTS.md`).
+> 4. Commit an `AMPERE_SUPER_IO_RESULTS_R2.md` with the tables + verdict.
+>
+> **The decision this reopens:** if tiled `:f32acc` is a size-stable ~2–2.5× on
+> Ampere across 512–2048, is a device-aware default (`:f32` on detected
+> f64-rate-limited cards) now worth it? And is a larger tile / register-blocked
+> (e.g. 32×32 or 8×8-per-thread) kernel worth chasing for another step? Your call
+> with the data.
 
 ## Why
 

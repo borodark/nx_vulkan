@@ -192,6 +192,14 @@ Boundary-safe (verified with Cout=7/13, M=25). On the GT 650M via `Nx.conv`,
 larger convs: `{8,32,28,28}·{64,32,3,3}` → `:f32acc` **1.98×**;
 `{4,64,16,16}·{128,64,3,3}` → **1.37×** (f64 exact, f32 err ≤7e-7).
 
+**f64 matmul tiled too — every GEMM is now tiled.** `matmul_f64.spv` (the
+f64-tensor path) also got 16×16 tiling. It stays f64-exact (err ~4e-16 incl.
+30×17×23 / 100×50×70) and is ~1.35–1.4× faster from removing the bandwidth
+component (GT 650M: 512³ 21→15.8ms, 1024³ 145→105ms); the f64-ALU rate is the
+remaining ceiling. So the full GEMM inventory — matmul {f64, f32/f64acc,
+f32/f32acc} and conv-GEMM {f64, f32/f64acc, f32/f32acc} — is tiled and
+boundary-safe.
+
 ## Not converted (stay f64 / host, by design)
 
 Leapfrog/MCMC chain (needs f64 for HMC stability), linalg + `block/4` family
