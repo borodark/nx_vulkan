@@ -158,12 +158,31 @@ across two GPU generations — `:f64acc ≤ f64 ≤ :f32acc`. Through `Nx.dot`, 
 `bench_results/AMPERE_SUPER_IO_RESULTS.md`.
 
 **Decision (their recommendation, adopted): keep the default `:f64`; `:f32` stays
-opt-in.** The win is real but narrow and size-dependent (1.09× at n=1024 vs 1.86×
-at 512³), not worth silently trading a correctness property for on a device
-probe. Open follow-up before revisiting a device-aware default: the **1024³
-`:f32acc` scaling cliff** (naive kernel likely hits a bandwidth/occupancy wall —
-worth a tiling pass). Measurement note: time with ≥5 warm-ups, ≥20 iters, and
-configs interleaved — single-shot config-ordered runs mis-report by ~3×.
+opt-in.** Measurement note: time with ≥5 warm-ups, ≥20 iters, and configs
+interleaved — single-shot config-ordered runs mis-report by ~3×.
+
+### 1024 cliff — fixed by tiling the f32 GEMM
+
+The `:f32acc` win was narrow/size-dependent (1.09× at 1024 on Ampere) because the
+naive one-thread-per-output kernel hit a bandwidth/occupancy wall. Both f32
+matmul shaders now use **16×16 shared-memory tiling** (each workgroup stages
+16×16 tiles of A and B through shared memory, reusing every global load 16×;
+boundary-safe for non-multiple-of-16 shapes; block summation also improves
+accuracy). Re-raced on the GT 650M via `Nx.dot`:
+
+```
+             before (naive)      after (tiled)
+512³ :f32acc   1.72×               2.68×
+1024³ :f32acc  ~1.1× (Ampere)      2.66×   ← cliff gone; scales flat
+```
+
+`:f32acc` now holds ~2.7× at both 512³ and 1024³ on Kepler (and is faster than
+the naive kernel at 512 too). `:f64acc` also improved slightly (0.55→0.66× at
+512, tiling removed its bandwidth component; the f64-ALU rate still caps it).
+Correctness unchanged (err ~1e-7 across shapes incl. 30×17×23, 100×50×70). This
+reopens the device-aware-default question with a much stronger, size-stable case
+— **re-run `RACE_TODO_SUPER_IO.md` on Ampere to confirm the tiled kernel scales
+there** before deciding.
 
 ## Not converted (stay f64 / host, by design)
 

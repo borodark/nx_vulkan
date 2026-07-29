@@ -1,12 +1,19 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
 
-// f32 matmul with an f64 accumulator. C = A·B where A is M×K row-major, B is
-// K×N row-major, all stored as 32-bit floats. The K-length dot product is
-// accumulated in `double` and rounded to f32 only on store — this is nearly
-// free (the kernel is bound by f32 memory bandwidth, not the accumulator) and
-// keeps the result matching a f64-accumulating reference to f32 round-off,
-// avoiding the precision loss a pure-f32 accumulator suffers as K grows.
+// Tiled f32 matmul with an f64 accumulator — the accuracy-safe default of the
+// f32 matmul accumulator policy (:f64). f32 storage, but the dot product is
+// accumulated in double and rounded to f32 only on store, matching a
+// f64-accumulating reference to f32 round-off.
+//
+// Shared-memory tiling (16x16): each workgroup stages 16x16 tiles of A and B
+// through workgroup-shared memory so every global load is reused 16x, cutting
+// global-memory traffic. The tiles are stored f32; only the accumulation is
+// f64. On f64-rate-limited GPUs the f64 MACs still dominate this variant (that
+// is why :f32 exists), but tiling removes the bandwidth component.
+//
+// C = A*B, A is MxK row-major, B is KxN row-major. Dispatch matches the matmul
+// NIF: global x over N, global y over M, local 16x16.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -18,16 +25,38 @@ layout(push_constant) uniform Push {
     uint m;
     uint n;
     uint k;
-} push;
+} p;
+
+const uint T = 16u;
+shared float As[T][T];
+shared float Bs[T][T];
 
 void main() {
     uint row = gl_GlobalInvocationID.y;
     uint col = gl_GlobalInvocationID.x;
-    if (row >= push.m || col >= push.n) return;
+    uint ly = gl_LocalInvocationID.y;
+    uint lx = gl_LocalInvocationID.x;
 
     double acc = 0.0lf;
-    for (uint i = 0u; i < push.k; ++i) {
-        acc += double(a[row * push.k + i]) * double(b[i * push.n + col]);
+    uint tiles = (p.k + T - 1u) / T;
+
+    for (uint t = 0u; t < tiles; ++t) {
+        uint aCol = t * T + lx;
+        As[ly][lx] = (row < p.m && aCol < p.k) ? a[row * p.k + aCol] : 0.0;
+
+        uint bRow = t * T + ly;
+        Bs[ly][lx] = (bRow < p.k && col < p.n) ? b[bRow * p.n + col] : 0.0;
+
+        barrier();
+
+        for (uint i = 0u; i < T; ++i) {
+            acc += double(As[ly][i]) * double(Bs[i][lx]);
+        }
+
+        barrier();
     }
-    o[row * push.n + col] = float(acc);
+
+    if (row < p.m && col < p.n) {
+        o[row * p.n + col] = float(acc);
+    }
 }

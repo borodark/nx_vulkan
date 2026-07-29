@@ -7,14 +7,18 @@ has an **Ampere GPU** (consumer RTX → f64 rate-limited to ~1/32 of f32).
 **Updated:** 2026-07-29 — the f32 **accumulator policy** is now implemented; this
 run is to validate it on Ampere and decide the default.
 
-> **STATUS: DONE.** super-io ran this on an RTX 3060 Ti — see
-> `bench_results/AMPERE_SUPER_IO_RESULTS.md`. Pattern confirmed
-> (`:f64acc ≤ f64 ≤ :f32acc`); **decision: keep default `:f64`, `:f32` stays
-> opt-in** (win is 1.09–1.86×, size-dependent, not worth silently changing
-> numerical semantics). conv-GEMM now has the same policy. Open follow-up: the
-> 1024³ `:f32acc` scaling cliff (drops to 1.09×) — investigate before revisiting
-> a device-aware default. The snippet in step 4 below has been corrected per
-> their feedback; the JSON now records the accumulator in effect.
+> **STATUS: DONE (round 1); PLEASE RE-RACE round 2.** super-io ran this on an
+> RTX 3060 Ti — see `bench_results/AMPERE_SUPER_IO_RESULTS.md`. Pattern confirmed
+> (`:f64acc ≤ f64 ≤ :f32acc`); default kept `:f64`, `:f32` opt-in. conv-GEMM now
+> shares the policy; the step-4 snippet is fixed; the JSON records the
+> accumulator.
+>
+> **Round 2 ask:** the 1024³ `:f32acc` cliff you found is **fixed** — both f32
+> matmul shaders are now **16×16 shared-memory tiled**. On the GT 650M `:f32acc`
+> went 1.72×→**2.68×** at 512³ and holds **2.66× at 1024³** (was ~1.1× on your
+> card). **Re-run steps 3–4 on the RTX 3060 Ti** and confirm the tiled kernel
+> scales flat (no 1024 cliff) on Ampere too. If it does, the device-aware-default
+> question is worth reopening with a size-stable ~2.5× — note that in your report.
 
 ## Why
 
