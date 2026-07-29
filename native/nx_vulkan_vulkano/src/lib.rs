@@ -171,6 +171,8 @@ struct VkContext {
     mem_allocator: Arc<StandardMemoryAllocator>,
     cmd_allocator: Arc<StandardCommandBufferAllocator>,
     set_allocator: Arc<StandardDescriptorSetAllocator>,
+    device_name: String,
+    device_type: String,
 }
 
 static CTX: OnceLock<VkContext> = OnceLock::new();
@@ -203,11 +205,10 @@ fn ctx() -> Result<&'static VkContext, String> {
         })
         .ok_or_else(|| "no compute-capable Vulkan device".to_string())?;
 
-    eprintln!(
-        "[nx_vulkan_vulkano] device: {} ({:?})",
-        physical.properties().device_name,
-        physical.properties().device_type
-    );
+    let device_name = physical.properties().device_name.clone();
+    let device_type = format!("{:?}", physical.properties().device_type);
+
+    eprintln!("[nx_vulkan_vulkano] device: {device_name} ({device_type})");
 
     // Enable shaderFloat64 if the device supports it; required by the
     // _f64.spv shaders. Falls back gracefully on devices without it
@@ -264,6 +265,8 @@ fn ctx() -> Result<&'static VkContext, String> {
         mem_allocator,
         cmd_allocator,
         set_allocator,
+        device_name,
+        device_type,
     };
 
     let _ = CTX.set(ctx);
@@ -1912,6 +1915,16 @@ fn run_single_dispatch<P: BufferContents>(
     Ok(())
 }
 
+/// Physical device name + type, for labelling benchmark/parity reports across
+/// hosts (e.g. "NVIDIA GeForce GT 650M" vs "llvmpipe (...)").
+#[rustler::nif]
+fn device_name(env: Env) -> NifResult<Term> {
+    match ctx() {
+        Ok(c) => Ok((atoms::ok(), c.device_name.clone(), c.device_type.clone()).encode(env)),
+        Err(e) => Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    }
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -1937,6 +1950,7 @@ rustler::init!(
         fft,
         conv_im2col,
         conv_gemm,
+        device_name,
     ],
     load = load
 );

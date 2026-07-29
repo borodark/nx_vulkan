@@ -150,6 +150,13 @@ defmodule Nx.Vulkan.NativeV do
   def conv_gemm(_out, _col, _kernel, _n, _cout, _o_total, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Physical Vulkan device name + type, e.g.
+  `{:ok, "NVIDIA GeForce GT 650M", "DiscreteGpu"}`. Used to label
+  benchmark/parity reports per host.
+  """
+  def device_name, do: :erlang.nif_error(:nif_not_loaded)
+
   # Chain shader NIFs — registered in Rust, must have stubs here for NIF loading.
   # f32 variant kept as stub only (unused); f64 is the active path.
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
