@@ -69,9 +69,40 @@ reductions), llvmpipe/CPU:
 
 So even on CPU, **bandwidth-bound ops already win ~2×** (half the memory
 traffic). The **compute-bound** ops (matmul/conv) show ~1× here only because x86
-does f64 natively and the kernels accumulate in f64 — on real GPU hardware,
-where f64 ALUs are rate-limited to ~1/24–1/32 of f32, those are exactly the ops
-that gain the most. f32 also halves memory footprint regardless of device.
+does f64 natively and the kernels accumulate in f64.
+
+### Real GPU results — NVIDIA GeForce GT 650M (Kepler), 2026-07-29
+
+Ran `scripts/race.sh` on the actual GT 650M (f64 rate-limited to ~1/24 of f32).
+`bench_results/f32_race_mac_970cb1a.json`:
+
+| op | f32 speedup | notes |
+|---|---|---|
+| elementwise add 1M | **4.14×** | bandwidth-bound; bigger than CPU |
+| tanh 1M | **1.95×** | f32 transcendentals, no f64 |
+| sum 1M / sum axis0 | **1.9× / 1.81×** | bandwidth-bound reductions |
+| conv | 1.08–1.35× | im2col f32 helps; GEMM capped by f64 accumulator |
+| **matmul** | **0.55–0.72× (SLOWER)** | the f64 accumulator is the bottleneck |
+
+**Key finding — the f64 accumulator negates the compute-bound f32 win.** On a
+device where f64 is rate-limited, `matmul_f32_f64acc` does the same slow f64 MACs
+as `matmul_f64` (plus f32→f64 conversions), so it is *slower* than f64. Direct
+3-way race (`examples/matmul_accumulator_race.exs`) on the GT 650M, 512³:
+
+```
+f64 = 21.1ms   f32/f64acc = 38.2ms (0.55x)   f32/f32acc = 12.7ms (1.67x)
+```
+
+A **pure f32 accumulator makes matmul 1.4–1.7× faster**; the accuracy-safe f64
+accumulator makes it 0.55×. Conclusion, refined per family:
+
+- **Bandwidth-bound** (elementwise, reductions): keep the f64 accumulator — it's
+  cheap relative to memory and f32 still wins 1.8–4.1×. Ship as-is.
+- **Compute-bound** (matmul, conv GEMM): the accumulator must be a **policy**.
+  Default to f64 for accuracy, but offer a pure-f32 (or blocked/pairwise-f64)
+  accumulator mode to actually get the speedup on f64-rate-limited GPUs. This is
+  plan item 5 (precision policy), now justified by hardware data rather than
+  omitted — the `matmul_f32_naive.spv` shader already exists as the fast variant.
 
 **Takeaway:** the mechanism (per-dtype shader dispatch + f64 accumulator) is
 correct and cleanly extensible; the payoff is hardware-gated, so f32 should be an
