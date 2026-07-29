@@ -292,10 +292,24 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @conv_im2col_f64_spv Path.expand("../../priv/shaders/conv_im2col_f64.spv", __DIR__)
   @conv_gemm_f64_spv Path.expand("../../priv/shaders/conv_gemm_f64.spv", __DIR__)
   @conv_im2col_f32_spv Path.expand("../../priv/shaders/conv_im2col_f32.spv", __DIR__)
-  @conv_gemm_f32_spv Path.expand("../../priv/shaders/conv_gemm_f32.spv", __DIR__)
+  # conv's GEMM is a matmul, so it honours the same f32 accumulator policy
+  # (f32_matmul_accumulator/0): :f64 accumulator by default, :f32 for speed on
+  # f64-rate-limited GPUs. im2col is pure f32 movement (no accumulator).
+  @conv_gemm_f32_f64acc_spv Path.expand("../../priv/shaders/conv_gemm_f32_f64acc.spv", __DIR__)
+  @conv_gemm_f32_f32acc_spv Path.expand("../../priv/shaders/conv_gemm_f32_f32acc.spv", __DIR__)
 
   defp conv_spvs({:f, 64}), do: {@conv_im2col_f64_spv, @conv_gemm_f64_spv}
-  defp conv_spvs({:f, 32}), do: {@conv_im2col_f32_spv, @conv_gemm_f32_spv}
+
+  defp conv_spvs({:f, 32}) do
+    gemm =
+      case f32_matmul_accumulator() do
+        :f32 -> @conv_gemm_f32_f32acc_spv
+        _ -> @conv_gemm_f32_f64acc_spv
+      end
+
+    {@conv_im2col_f32_spv, gemm}
+  end
+
   defp conv_spvs(_), do: nil
 
   @impl true
@@ -1052,13 +1066,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @matmul_f32_f32acc_spv Path.expand("../../priv/shaders/matmul_f32_f32acc.spv", __DIR__)
 
   @doc """
-  Accumulator width for the f32 matmul GPU path: `:f64` (default, accuracy-safe)
-  or `:f32` (fast on f64-rate-limited GPUs). Set with
-  `put_f32_matmul_accumulator/1` or `config :nx_vulkan, :f32_matmul_accumulator`.
+  Accumulator width for the f32 GPU GEMM path — governs both `dot`/matmul **and**
+  conv's GEMM: `:f64` (default, accuracy-safe) or `:f32` (faster on f64-rate-
+  limited GPUs, precision degrades ~√K). Set with `put_f32_matmul_accumulator/1`
+  or `config :nx_vulkan, :f32_matmul_accumulator`.
   """
   def f32_matmul_accumulator, do: Application.get_env(:nx_vulkan, :f32_matmul_accumulator, :f64)
 
-  @doc "Set the f32 matmul accumulator policy (`:f64` | `:f32`). See `f32_matmul_accumulator/0`."
+  @doc "Set the f32 GEMM accumulator policy (`:f64` | `:f32`). See `f32_matmul_accumulator/0`."
   def put_f32_matmul_accumulator(width) when width in [:f32, :f64] do
     Application.put_env(:nx_vulkan, :f32_matmul_accumulator, width)
   end

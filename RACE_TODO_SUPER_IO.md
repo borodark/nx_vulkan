@@ -7,6 +7,15 @@ has an **Ampere GPU** (consumer RTX → f64 rate-limited to ~1/32 of f32).
 **Updated:** 2026-07-29 — the f32 **accumulator policy** is now implemented; this
 run is to validate it on Ampere and decide the default.
 
+> **STATUS: DONE.** super-io ran this on an RTX 3060 Ti — see
+> `bench_results/AMPERE_SUPER_IO_RESULTS.md`. Pattern confirmed
+> (`:f64acc ≤ f64 ≤ :f32acc`); **decision: keep default `:f64`, `:f32` stays
+> opt-in** (win is 1.09–1.86×, size-dependent, not worth silently changing
+> numerical semantics). conv-GEMM now has the same policy. Open follow-up: the
+> 1024³ `:f32acc` scaling cliff (drops to 1.09×) — investigate before revisiting
+> a device-aware default. The snippet in step 4 below has been corrected per
+> their feedback; the JSON now records the accumulator in effect.
+
 ## Why
 
 Real GT 650M (Kepler) numbers showed the **f64 accumulator negates the
@@ -50,21 +59,32 @@ large bandwidth-bound win.
    sh scripts/race.sh                              # all families -> bench_results/*.json
    mix run examples/matmul_accumulator_race.exs    # 3-way: f64 vs f32/f64acc vs f32/f32acc
    ```
-4. **Validate the policy through the real `Nx.dot` path** (this is the new bit):
+4. **Validate the policy through the real `Nx.dot` path** (this is the new bit).
+   Use enough warm-up + iterations and **interleave** the three configs across
+   rounds — a single-shot, config-ordered measurement is noise (the f64 path on
+   these cards is jittery). This form allocates tensors once and averages 20
+   timed iters after 5 warm-ups:
    ```sh
    mix run -e '
      Application.ensure_all_started(:nx_vulkan)
      alias Nx.Vulkan.VulkanoBackend, as: V
      rnd = fn n -> for i <- 1..n, do: :math.sin(i*0.01) end
-     t = fn ty -> a = Nx.tensor(rnd.(512*512), type: ty, backend: V) |> Nx.reshape({512,512})
-                  b = Nx.tensor(rnd.(512*512), type: ty, backend: V) |> Nx.reshape({512,512})
-                  Nx.dot(a,b); {us,_}=:timer.tc(fn -> for _<-1..4, do: Nx.dot(a,b) end); us/4/1000 end
-     f64 = t.({:f,64})
-     V.put_f32_matmul_accumulator(:f64); a64 = t.({:f,32})
-     V.put_f32_matmul_accumulator(:f32); a32 = t.({:f,32})
-     IO.puts("f64=#{f64}  f32[:f64acc]=#{a64} (#{f64/a64}x)  f32[:f32acc]=#{a32} (#{f64/a32}x)")
+     mk = fn ty -> a = Nx.tensor(rnd.(512*512), type: ty, backend: V) |> Nx.reshape({512,512})
+                   b = Nx.tensor(rnd.(512*512), type: ty, backend: V) |> Nx.reshape({512,512}); {a,b} end
+     time = fn {a,b} -> for _<-1..5, do: Nx.dot(a,b)
+                        {us,_}=:timer.tc(fn -> for _<-1..20, do: Nx.dot(a,b) end); us/20/1000 end
+     f = mk.({:f,64}); g = mk.({:f,32})
+     for r <- 1..3 do
+       f64 = time.(f)
+       V.put_f32_matmul_accumulator(:f64); a64 = time.(g)
+       V.put_f32_matmul_accumulator(:f32); a32 = time.(g)
+       IO.puts("round #{r}: f64=#{Float.round(f64,3)}  :f64acc=#{Float.round(a64,3)} (#{Float.round(f64/a64,2)}x)  :f32acc=#{Float.round(a32,3)} (#{Float.round(f64/a32,2)}x)")
+     end
    '
    ```
+   Expect `:f32acc` ≈ 1.5–2× at 512³ and `:f64acc` < 1× (both differing ~3×,
+   proving the policy is honoured). If a config-ordered single run shows a
+   `:f32acc` regression, that's the measurement, not the shader.
 5. Sanity: `mix test` should be green on Ampere Vulkan (expect **174 tests, 0
    failures**; f64 shaders need `shaderFloat64`, which Ampere supports).
 

@@ -1,0 +1,43 @@
+#version 450
+
+// f32 conv GEMM with a pure f32 accumulator — the fast variant of the f32 GEMM
+// accumulator policy (see F32_PLAN.md), selected when :f32_matmul_accumulator is
+// :f32. Faster on f64-rate-limited GPUs (Kepler/consumer Ampere) than the
+// f64-accumulator variant, at the cost of precision that degrades with K
+// (= Cin * kernel spatial size). The default :f64 uses conv_gemm_f32_f64acc.
+//
+// out{N,Cout,O_total} = im2col(A){M,K} · kernel{Cout,K}, f32 storage/accumulate.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer W { float w[]; };
+layout(std430, binding = 2) writeonly buffer Out { float outp[]; };
+
+layout(push_constant) uniform Push {
+    uint N;
+    uint Cout;
+    uint O_total;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total = p.N * p.Cout * p.O_total;
+    if (gid >= total) return;
+
+    uint n = gid / (p.Cout * p.O_total);
+    uint rem = gid % (p.Cout * p.O_total);
+    uint oc = rem / p.O_total;
+    uint o = rem % p.O_total;
+
+    uint abase = (n * p.O_total + o) * p.K;
+    uint wbase = oc * p.K;
+
+    float acc = 0.0;
+    for (uint l = 0u; l < p.K; ++l) {
+        acc += a[abase + l] * w[wbase + l];
+    }
+
+    outp[gid] = acc;
+}

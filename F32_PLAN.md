@@ -141,11 +141,29 @@ Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)  # fast on f64-starved
 # or: config :nx_vulkan, :f32_matmul_accumulator, :f32
 ```
 
-`:f64` → `matmul_f32_f64acc.spv` (matches BinaryBackend to f32 round-off).
-`:f32` → `matmul_f32_f32acc.spv` (1.4–1.7× faster on Kepler/Ampere; precision
-degrades with K). Verified both dispatch on GPU and the ill-conditioned accuracy
-gap (`test/nx_vulkan/matmul_f32_test.exs`). The same knob extends naturally to
-conv's GEMM next (a `conv_gemm_f32_f32acc` variant).
+One knob governs **both** GEMM kernels — matmul and conv:
+- matmul: `:f64` → `matmul_f32_f64acc.spv`, `:f32` → `matmul_f32_f32acc.spv`.
+- conv GEMM: `:f64` → `conv_gemm_f32_f64acc.spv`, `:f32` → `conv_gemm_f32_f32acc.spv`
+  (im2col is pure f32 movement, always exact).
+
+Verified both dispatch on GPU under each policy and the ill-conditioned accuracy
+gap (`test/nx_vulkan/{matmul_f32,conv}_test.exs`).
+
+### Validated on Ampere (RTX 3060 Ti), decision: keep `:f64` default
+
+super-io ran the brief on an RTX 3060 Ti (GA104, f64 ~1/32). Pattern confirmed
+across two GPU generations — `:f64acc ≤ f64 ≤ :f32acc`. Through `Nx.dot`, 512³:
+`:f32acc` is **1.5–2.0×** faster, `:f64acc` is 0.6–0.7× (slower); rel-err of
+`:f32acc` ~1–3e-6, growing ~√K (textbook f32 GEMM). Full details:
+`bench_results/AMPERE_SUPER_IO_RESULTS.md`.
+
+**Decision (their recommendation, adopted): keep the default `:f64`; `:f32` stays
+opt-in.** The win is real but narrow and size-dependent (1.09× at n=1024 vs 1.86×
+at 512³), not worth silently trading a correctness property for on a device
+probe. Open follow-up before revisiting a device-aware default: the **1024³
+`:f32acc` scaling cliff** (naive kernel likely hits a bandwidth/occupancy wall —
+worth a tiling pass). Measurement note: time with ≥5 warm-ups, ≥20 iters, and
+configs interleaved — single-shot config-ordered runs mis-report by ~3×.
 
 ## Not converted (stay f64 / host, by design)
 

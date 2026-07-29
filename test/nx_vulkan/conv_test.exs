@@ -91,15 +91,26 @@ defmodule Nx.Vulkan.ConvTest do
   end
 
   describe "f32 conv runs on the GPU and matches BinaryBackend" do
-    test "2d multichannel f32" do
+    setup do
+      prev = VulkanoBackend.f32_matmul_accumulator()
+      on_exit(fn -> VulkanoBackend.put_f32_matmul_accumulator(prev) end)
+      :ok
+    end
+
+    test "2d multichannel f32, both accumulator policies on GPU + correct" do
       iv = Nx.tensor(for(i <- 1..75, do: i * 0.1), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({1, 3, 5, 5})
       kv = Nx.tensor(for(i <- 1..54, do: i * 0.05), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({2, 3, 3, 3})
       ib = Nx.backend_copy(iv, Nx.BinaryBackend)
       kb = Nx.backend_copy(kv, Nx.BinaryBackend)
-      got = Nx.conv(iv, kv)
-      assert match?(%VulkanoBackend{}, got.data)
-      assert Nx.type(got) == {:f, 32}
-      assert max_abs_diff(got, Nx.conv(ib, kb)) < 1.0e-4
+      ref = Nx.conv(ib, kb)
+
+      for policy <- [:f64, :f32] do
+        VulkanoBackend.put_f32_matmul_accumulator(policy)
+        got = Nx.conv(iv, kv)
+        assert match?(%VulkanoBackend{}, got.data), "#{policy} should stay on GPU"
+        assert Nx.type(got) == {:f, 32}
+        assert max_abs_diff(got, ref) < 1.0e-4
+      end
     end
   end
 end

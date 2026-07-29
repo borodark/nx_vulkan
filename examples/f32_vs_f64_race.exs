@@ -96,11 +96,19 @@ commit =
     _ -> "unknown"
   end
 
+# The f32 GEMM accumulator policy in effect for these matmul/conv rows. The race
+# uses whatever is configured (default :f64) — recorded so the matmul f32 rows,
+# which read as losses under :f64acc on f64-rate-limited GPUs, aren't misread as
+# the f32 matmul ceiling. See examples/matmul_accumulator_race.exs for the full
+# picture, and F32_PLAN.md for the policy.
+accumulator = Nx.Vulkan.VulkanoBackend.f32_matmul_accumulator()
+
 report = %{
   hostname: hostname,
   device: device,
   device_type: dtype,
   commit: commit,
+  f32_gemm_accumulator: accumulator,
   timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
   otp: :erlang.system_info(:otp_release) |> to_string(),
   results: results
@@ -108,6 +116,7 @@ report = %{
 
 # ---- console table ----
 IO.puts("\n  Device: #{device} (#{dtype})   host=#{hostname}   commit=#{commit}")
+IO.puts("  f32 GEMM accumulator: #{accumulator}  (matmul/conv f32 rows use this)")
 IO.puts("  op                        f64 ms     f32 ms   speedup   on_gpu")
 IO.puts("  " <> String.duplicate("-", 66))
 
