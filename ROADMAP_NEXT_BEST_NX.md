@@ -47,13 +47,23 @@ suite. That is thrust 0.
 
 ## The thrusts (prioritised)
 
-### 0. Run Nx's conformance suite (validation foundation) — DO FIRST
-Add `test_helper` default-backend wiring + `doctest Nx` + `doctest Nx.LinAlg`
-against VulkanoBackend, plus mirror Torchx's `nx_test`/`nx_linalg_test`/
-`nx_block_test`. Triage failures into: real bugs (fix), and documented `:except`
-(rounding/inspect, the LIMITATIONS skip set). Deliverable: a conformance number
-("passes N of Nx's M doctests") — the credibility metric for a validated
-backend, and a bug-finder our hand-rolled tests miss.
+### 0. Run Nx's conformance suite (validation foundation) — LANDED
+`test/nx_vulkan/nx_doctest_test.exs` runs `doctest Nx` with VulkanoBackend as
+default. **839 / 954 pass**; 115 excepted, bucketed: `@rounding` (native-shader
+last-ULP inspect diffs), `@unsupported` (complex, f8/f16), `@backlog` (real bugs,
+below). It immediately found + we fixed two real bugs hand-rolled tests missed:
+slice with dynamic tensor indices, and composed fallbacks leaking the default
+backend (`with_binary_backend/1`). Verified across the fleet (247/248/249).
+
+**Remaining thrust-0 backlog (real bugs, tracked):**
+- `encode_scalar/2` missing dtype clauses (f16 etc.) → breaks `reflect`,
+  `concatenate` under those dtypes. Also `{:bf,16}` currently encodes as IEEE f16
+  (wrong format) — latent.
+- f8/f16 tensors inspect as `<unreadable>` (to_binary/inspect dtype gap).
+- `deserialize` round-trip of unsupported dtypes; residual `slice` /
+  `window_scatter_*` edge cases.
+- Still TODO: `doctest Nx.LinAlg` + mirror torchx's `nx_test`/`nx_linalg_test`/
+  `nx_block_test`/`defn_test`.
 
 ### 1. Measure the gap to EXLA
 Stand up EXLA-CUDA on super-io (249, Linux + RTX 3060 Ti) and benchmark
