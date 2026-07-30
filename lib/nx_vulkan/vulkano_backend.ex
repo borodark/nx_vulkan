@@ -751,8 +751,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   def slice(out, tensor, start_indices, lengths, strides) do
     # Delegate to Nx-level slice on BinaryBackend; result stays on host
     # (Tier 1 of SHAPE_C_PLAN.md — avoid the upload-back round trip).
+    # start_indices may be dynamic (scalar tensors); they must ride to
+    # BinaryBackend too, else Nx.slice calls BinaryBackend.to_binary on a
+    # VulkanoBackend index tensor and crashes (found via `doctest Nx`).
     bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-    bin_result = Nx.slice(bin_in, start_indices, lengths, strides: strides)
+    bin_idx = Enum.map(start_indices, &maybe_transfer_idx/1)
+    bin_result = Nx.slice(bin_in, bin_idx, lengths, strides: strides)
     host_result(out, bin_result)
   end
 
@@ -1024,7 +1028,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
     iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
-    result = Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts)
+    result = with_binary_backend(fn -> Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts) end)
     host_result(out, result)
   end
 
@@ -1033,7 +1037,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
     iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
-    result = Nx.window_scatter_min(t_bin, s_bin, iv_bin, dimensions, opts)
+    result = with_binary_backend(fn -> Nx.window_scatter_min(t_bin, s_bin, iv_bin, dimensions, opts) end)
     host_result(out, result)
   end
 
@@ -1150,6 +1154,22 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # downstream, and any op that genuinely needs GPU will transfer
   # lazily on first touch.
   defp host_result(%T{} = out, %T{} = result), do: %{out | data: result.data}
+
+  # Run a composed Nx fallback with BinaryBackend as the *process default* so any
+  # intermediate tensors Nx materialises inside the composition (constants, iota,
+  # broadcasts) land on BinaryBackend. Without this, when VulkanoBackend is the
+  # default backend (the normal way the backend is used), those intermediates
+  # leak onto VulkanoBackend and Nx crashes mixing them with our BinaryBackend
+  # inputs. Surfaced by `doctest Nx` (window_scatter_*, reflect, …).
+  defp with_binary_backend(fun) do
+    prev = Nx.default_backend(Nx.BinaryBackend)
+
+    try do
+      fun.()
+    after
+      Nx.default_backend(prev)
+    end
+  end
 
   defp byte_size_of(shape) when is_tuple(shape) do
     shape |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
