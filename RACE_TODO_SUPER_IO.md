@@ -7,6 +7,15 @@ has an **Ampere GPU** (consumer RTX → f64 rate-limited to ~1/32 of f32).
 **Updated:** 2026-07-29 — the f32 **accumulator policy** is now implemented; this
 run is to validate it on Ampere and decide the default.
 
+> **STATUS: round 2 DONE — see `bench_results/AMPERE_SUPER_IO_RESULTS_R2.md`.**
+> Ampere, tiled: the 1024³ cliff is gone, `:f32acc` is 2.18×→2.47×→2.97× across
+> 512/1024/2048, conv `:f32acc` 2.46–3.06×. But tiling the **f64** matmul is only
+> ~1.15× at 512³ and a wash at 1024³ here (not Kepler's 1.35–1.4×), and this card
+> jitters ±40% on the f64 path — use medians. Answers: **don't** wire a
+> device-aware default (irreproducible across hosts); either flip `:f32` uniformly
+> or keep the status quo. Register blocking **is** worth chasing — we're at ~3% of
+> f32 peak.
+>
 > **STATUS: DONE (round 1); PLEASE RE-RACE round 2.** super-io ran this on an
 > RTX 3060 Ti — see `bench_results/AMPERE_SUPER_IO_RESULTS.md`. Pattern confirmed
 > (`:f64acc ≤ f64 ≤ :f32acc`); default kept `:f64`, `:f32` opt-in. conv-GEMM now
