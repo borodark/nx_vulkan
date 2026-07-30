@@ -124,6 +124,14 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Register-blocked matmul dispatch (32-wide output tiles) for the *_rb32 shaders.
+  Benchmark-only — the register-blocked kernels regressed on Kepler; used by
+  examples/matmul_rb_race.exs to evaluate them on other GPUs. See F32_PLAN.md.
+  """
+  def matmul32(_out, _a, _b, _m, _n, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Radix-2 Cooley-Tukey FFT (power-of-two, last-axis, batched) in f64.
 
   `out` is a complex buffer of `batch*n*16` bytes (interleaved re/im f64).

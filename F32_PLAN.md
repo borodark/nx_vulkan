@@ -200,6 +200,26 @@ remaining ceiling. So the full GEMM inventory — matmul {f64, f32/f64acc,
 f32/f32acc} and conv-GEMM {f64, f32/f64acc, f32/f32acc} — is tiled and
 boundary-safe.
 
+### Register blocking (32×32) — tried, regressed on Kepler, kept for eval
+
+Next step tried: 32×32 output tiles with 2×2-per-thread register blocking (16×16
+workgroup) to raise arithmetic intensity. **It regressed on the GT 650M** — the
+larger tiles + per-thread registers cut occupancy on Kepler, which was already
+near-optimal with plain tiling:
+
+```
+GT 650M 512³ / 1024³       f32/f32acc          f64
+plain 16×16 tiling          2.68× / 2.66×        15.8ms / 105ms
+register-blocked 32×32       1.78× / 2.15×        22.5ms / 127ms
+```
+
+Register blocking is a modern-GPU optimization (more registers/better
+occupancy), so **the default was reverted to plain tiling** (measured-best on
+Kepler) and the RB kernels kept as `matmul_*_rb32.spv` (correct: f64 exact, f32
+within ulp incl. non-mult-32 shapes), dispatched by a benchmark-only `matmul32`
+NIF. Evaluate with `examples/matmul_rb_race.exs` on other GPUs (Ampere) before
+considering adoption — if RB wins there, it becomes a device-aware kernel choice.
+
 ## Not converted (stay f64 / host, by design)
 
 Leapfrog/MCMC chain (needs f64 for HMC stability), linalg + `block/4` family

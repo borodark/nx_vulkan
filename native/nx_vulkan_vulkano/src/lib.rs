@@ -1612,6 +1612,54 @@ fn matmul<'a>(
     }
 }
 
+// Register-blocked matmul dispatch: identical bindings/push to `matmul` but
+// dispatches 32-wide output tiles (gx=ceil(N/32), gy=ceil(M/32)) for the
+// *_rb32 shaders (16×16 workgroup computes a 32×32 tile, 2×2 per thread). Not
+// wired as the backend default — the register-blocked kernels regressed on
+// Kepler; this NIF exists so `examples/matmul_rb_race.exs` can benchmark them
+// against the tiled default on other GPUs (e.g. Ampere). See F32_PLAN.md.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn matmul32<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    m: u32,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let gx = (n + 31) / 32;
+        let gy = (m + 31) / 32;
+        run_single_dispatch(context, &cached, set, PushMatmul { m, n, k }, [gx, gy, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 // -- FFT ------------------------------------------------------------------
 //
 // Radix-2 Cooley-Tukey (decimation-in-time), power-of-two length, over the
@@ -1951,6 +1999,7 @@ rustler::init!(
         reduce_axis,
         transpose_2d,
         matmul,
+        matmul32,
         fft,
         conv_im2col,
         conv_gemm,
