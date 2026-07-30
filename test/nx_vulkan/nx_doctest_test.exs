@@ -28,19 +28,19 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # the doctest's `inspect` string doesn't match (values are within tolerance).
   @rounding [exp: 1, tanh: 1, sigmoid: 1, sqrt: 1, log: 1, add: 2]
 
-  # Dtypes / ops the f64-real backend does not represent: complex (skip set),
-  # and exotic float widths (f8/f16) that inspect as "unreadable".
+  # Dtypes the f64-real, byte-addressed backend does not represent: complex
+  # (skip set), f8 special values (e.g. :infinity in :f8_e4m3fn), and sub-byte
+  # types (u2/u4/s4 — a non-byte-aligned bitstring can't upload to a GPU buffer).
   @unsupported [complex: 2, real: 1, imag: 1, conjugate: 1, phase: 1,
-                tensor: 2, to_binary: 2, to_flat_list: 2, bit_size: 1,
-                sigil_VEC: 2, sigil_MAT: 2]
+                tensor: 2, bit_size: 1]
 
-  # REAL bugs the conformance run found — tracked in ROADMAP thrust 0, not waived:
-  #   reflect/concatenate  -> encode_scalar/2 missing dtype clauses
-  #   deserialize          -> round-trip of an unsupported dtype
-  #   slice / window_scatter_* -> one residual edge case each (dynamic-index /
-  #                               composed-fallback fixes cleared the rest)
-  @backlog [reflect: 2, concatenate: 2, deserialize: 2,
-            slice: 4, window_scatter_min: 5, window_scatter_max: 5]
+  # REAL bugs still open — tracked in ROADMAP thrust 0, not waived. These three
+  # share one systemic root: Nx composes them (dynamic-index slice,
+  # select_and_scatter) and materialises scalar indices on the *default* backend;
+  # when VulkanoBackend is default, Nx's own BinaryBackend.select_and_scatter
+  # then calls to_binary on a VulkanoBackend scalar and crashes. Needs a deeper
+  # default-backend-isolation fix than with_binary_backend covers.
+  @backlog [slice: 4, window_scatter_min: 5, window_scatter_max: 5]
 
   doctest Nx, except: [:moduledoc] ++ @rounding ++ @unsupported ++ @backlog
 end

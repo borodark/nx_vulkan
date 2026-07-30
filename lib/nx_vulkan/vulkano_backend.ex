@@ -53,21 +53,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref}, shape: shape, type: type}, _limit) do
+  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type}, limit) do
     {:ok, bin} = Nx.Vulkan.NativeV.buf_download(ref)
-    expected = byte_size_of(shape) * element_bytes(type)
-
-    cond do
-      byte_size(bin) == expected -> bin
-      byte_size(bin) > expected -> binary_part(bin, 0, expected)
-      true -> bin
-    end
+    # `limit` is the number of ELEMENTS Nx wants (already capped by Nx, and for
+    # vectorized tensors it counts the vectorized axes too — so don't clamp to
+    # `shape`). The download may carry slack from over-allocation; return exactly
+    # the first `limit` elements' bytes. (Previously the limit was ignored, so
+    # Nx.to_binary(t, k) returned the whole tensor — found via `doctest Nx`.)
+    want = limit * element_bytes(type)
+    binary_part(bin, 0, min(want, byte_size(bin)))
   end
 
   @impl true
   def backend_copy(%T{} = tensor, target_backend, opts) do
-    expected = byte_size_of(tensor.shape) * element_bytes(tensor.type)
-    bin = to_binary(tensor, expected)
+    # to_binary/2's limit is an element count — pass the full element count.
+    bin = to_binary(tensor, byte_size_of(tensor.shape))
     target_backend.from_binary(tensor, bin, opts)
   end
 
@@ -96,11 +96,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- creation
 
   @impl true
-  def constant(%T{shape: shape, type: type} = tensor, scalar, _opts) do
-    n = byte_size_of(shape)
-    bin = :binary.copy(encode_scalar(scalar, type), n)
-    {:ok, ref} = Nx.Vulkan.NativeV.buf_upload(bin)
-    put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  def constant(%T{shape: shape, type: type} = tensor, scalar, opts) do
+    case encode_scalar(scalar, type) do
+      :error ->
+        # dtypes without a native encoder (bf16/f8/complex) build on BinaryBackend
+        host_result(tensor, with_binary_backend(fn -> Nx.BinaryBackend.constant(tensor, scalar, opts) end))
+
+      bin when is_binary(bin) ->
+        n = byte_size_of(shape)
+        {:ok, ref} = Nx.Vulkan.NativeV.buf_upload(:binary.copy(bin, n))
+        put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    end
   end
 
   @impl true
@@ -830,12 +836,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @impl true
   def concatenate(out, tensors, axis) do
     cond do
-      axis == 0 and all_vulkano?(tensors) ->
+      # GPU byte-append is only valid when every input already has the output
+      # type — a raw concat can't cast. Mixed-type concat (e.g. f32+u8+s64) must
+      # host-fall-back so Nx casts to the merged type first (found via doctest Nx).
+      axis == 0 and all_vulkano?(tensors) and Enum.all?(tensors, &(&1.type == out.type)) ->
         concat_vulkano(out, tensors)
 
       true ->
         bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
-        result = Nx.concatenate(bins, axis: axis)
+        result = with_binary_backend(fn -> Nx.concatenate(bins, axis: axis) end)
         host_result(out, result)
     end
   end
@@ -1185,10 +1194,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp element_bytes({:u, 16}), do: 2
   defp element_bytes({:u, 32}), do: 4
   defp element_bytes({:u, 64}), do: 8
+  defp element_bytes({:f, 16}), do: 2
+  defp element_bytes({:f, 8}), do: 1
   defp element_bytes({:bf, 16}), do: 2
   defp element_bytes({:c, 64}), do: 8
   defp element_bytes({:c, 128}), do: 16
 
+  defp encode_scalar(s, {:f, 16}), do: <<s / 1.0::float-16-native>>
   defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
   defp encode_scalar(s, {:f, 64}), do: <<s / 1.0::float-64-native>>
   defp encode_scalar(s, {:s, 8}), do: <<trunc(s)::signed-8>>
@@ -1199,5 +1211,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp encode_scalar(s, {:u, 16}), do: <<trunc(s)::unsigned-16-native>>
   defp encode_scalar(s, {:u, 32}), do: <<trunc(s)::unsigned-32-native>>
   defp encode_scalar(s, {:u, 64}), do: <<trunc(s)::unsigned-64-native>>
-  defp encode_scalar(s, {:bf, 16}), do: <<s / 1.0::float-16-native>>
+  # bf16 / f8 / complex: no correct native bitstring encoder (bf16 ≠ IEEE f16),
+  # so signal fallback — constant/3 builds these via BinaryBackend.
+  defp encode_scalar(_s, _type), do: :error
 end
