@@ -65,7 +65,19 @@ backend (`with_binary_backend/1`). Verified across the fleet (247/248/249).
 - Still TODO: `doctest Nx.LinAlg` + mirror torchx's `nx_test`/`nx_linalg_test`/
   `nx_block_test`/`defn_test`.
 
-### 1. Measure the gap to EXLA
+### 1. Measure the gap to EXLA — harness ready, EXLA blocked on 249
+`examples/backend_baseline.exs` races BinaryBackend / VulkanoBackend / EXLA
+(EXLA optional; picked up when the project depends on it) on matmul/conv/tanh/
+sum/mlp-fwd, with correctness checked vs BinaryBackend. **Interim (GT 650M vs
+pure-Elixir Binary):** matmul 428×, conv 82×, mlp 106×, tanh 2.4× (exact); sum
+0.93× (dispatch-bound). **EXLA three-way blocked:** on super-io the built
+`libexla.so` (xla-0.10.0 / exla-0.13.0, CUDA 12) fails to `dlopen` at runtime
+("EXLA.NIF is not available") — a library-path/CUDA env fix on that box (cf. the
+`_nx-exla-fix` checkout). Once EXLA loads, run the harness in an exla-enabled
+project for the real head-to-head. **Do NOT add exla to nx_vulkan's committed
+mix.exs** — it would break the CUDA-less Kepler boxes' `mix compile`.
+
+### 1b. (original) Measure the gap to EXLA
 Stand up EXLA-CUDA on super-io (249, Linux + RTX 3060 Ti) and benchmark
 VulkanoBackend vs EXLA vs BinaryBackend on representative Nx + DL workloads
 (matmul/conv sweeps, a small MLP/CNN forward+grad, a softmax/layernorm chain).
