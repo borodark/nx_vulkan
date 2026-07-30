@@ -213,12 +213,26 @@ plain 16×16 tiling          2.68× / 2.66×        15.8ms / 105ms
 register-blocked 32×32       1.78× / 2.15×        22.5ms / 127ms
 ```
 
-Register blocking is a modern-GPU optimization (more registers/better
-occupancy), so **the default was reverted to plain tiling** (measured-best on
-Kepler) and the RB kernels kept as `matmul_*_rb32.spv` (correct: f64 exact, f32
-within ulp incl. non-mult-32 shapes), dispatched by a benchmark-only `matmul32`
-NIF. Evaluate with `examples/matmul_rb_race.exs` on other GPUs (Ampere) before
-considering adoption — if RB wins there, it becomes a device-aware kernel choice.
+**The default was reverted to plain tiling** and the RB kernels kept as
+`matmul_*_rb32.spv` (correct: f64 exact, f32 within ulp), dispatched by a
+benchmark-only `matmul32` NIF, measured via `examples/matmul_rb_race.exs` on all
+three GPUs (rb/tiled ratio; >1 = RB faster):
+
+```
+                GT 650M      GT 750M      RTX 3060 Ti
+f32/f32acc 512³   0.75×        0.75×        0.73×      ← RB regresses the fast path
+f32/f32acc 1024³  0.93×        0.93×        0.82×        on every card
+f32/f64acc 512³   ~            1.19×        1.52×      ← RB only helps the f64-bound
+f64        512³   0.74×        0.74×        1.02×        f64acc variant
+```
+
+**Conclusion: the 2×2 / 32×32 register blocking is not a win for the fast path on
+any tested GPU** (Kepler *or* Ampere) — it only speeds the f64-ALU-bound
+`f32/f64acc` variant, which isn't the speed path. Plain 16×16 tiling stays the
+universal default. A real RB win would need a more aggressive design (4×4 or 8×8
+per thread, double-buffered shared loads, vectorised f32) — a separate effort,
+tracked but not pursued here. `:f32acc` speed comes from the accumulator policy +
+tiling, which already delivers 1.8–3.0×.
 
 ## Not converted (stay f64 / host, by design)
 
