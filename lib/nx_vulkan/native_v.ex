@@ -84,6 +84,15 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Broadcasting elementwise binary op (rank <= 4). Bindings a/b/out/params;
+  `params` is [rank, out[4], a[4], b[4]] int32; `n` = output element count.
+  Keeps bias-add / scaling / relu-via-max on the GPU. op codes: 0=add 1=mul
+  2=sub 3=div 5=max 6=min (pow excluded — fp64 has no pow).
+  """
+  def apply_binary_broadcast(_out, _a, _b, _params, _n, _rank, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Elementwise unary op. `op_code` selects:
 
       0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu

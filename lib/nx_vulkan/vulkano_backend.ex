@@ -149,6 +149,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp binary_spv({:f, 32}), do: @elementwise_binary_f32_spv
   defp binary_spv(_), do: nil
 
+  # Broadcasting elementwise binary (rank <= 4) — keeps bias-add / scaling /
+  # relu-via-max on the GPU instead of host-falling-back.
+  @bcast_binary_f64_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f64.spv", __DIR__)
+  @bcast_binary_f32_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f32.spv", __DIR__)
+
+  defp bcast_binary_spv({:f, 64}), do: @bcast_binary_f64_spv
+  defp bcast_binary_spv({:f, 32}), do: @bcast_binary_f32_spv
+  defp bcast_binary_spv(_), do: nil
+
   for {op, code} <- @binary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a, b) do
@@ -172,10 +181,47 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
       else
-        binary_op_host_fallback(unquote(op), out, a_v, b_v)
+        bspv = bcast_binary_spv(type)
+
+        if bspv != nil and unquote(code) != 4 and bcast_ok?(a_v, b_v, out) do
+          gpu_bcast_binary(out, a_v, b_v, unquote(code), bspv)
+        else
+          binary_op_host_fallback(unquote(op), out, a_v, b_v)
+        end
       end
     end
   end
+
+  # Broadcast GPU path is valid when both operands are on this backend, match the
+  # output type, and the output rank is 1..4 (Nx guarantees a,b broadcast to
+  # out.shape). pow is excluded above (fp64 has no pow).
+  defp bcast_ok?(%T{type: t} = a, %T{type: t} = b, %T{shape: os, type: t}) do
+    match?(%__MODULE__{}, a.data) and match?(%__MODULE__{}, b.data) and
+      tuple_size(os) >= 1 and tuple_size(os) <= 4
+  end
+
+  defp bcast_ok?(_a, _b, _out), do: false
+
+  defp gpu_bcast_binary(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
+    rank = tuple_size(out.shape)
+    outl = Tuple.to_list(out.shape)
+    al = pad_left(Tuple.to_list(a.shape), rank)
+    bl = pad_left(Tuple.to_list(b.shape), rank)
+
+    params =
+      for v <- [rank] ++ pad4(outl) ++ pad4(al) ++ pad4(bl), into: <<>>, do: <<v::signed-32-little>>
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(out.type))
+
+    :ok = Nx.Vulkan.NativeV.apply_binary_broadcast(out_ref, a_ref, b_ref, params_ref, n, rank, code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
+  end
+
+  defp pad_left(list, rank), do: List.duplicate(1, rank - length(list)) ++ list
+  defp pad4(list), do: (list ++ [1, 1, 1, 1]) |> Enum.take(4)
 
   defp binary_op_host_fallback(op, out, a, b) do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)

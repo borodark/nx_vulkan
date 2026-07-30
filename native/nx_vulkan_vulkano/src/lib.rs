@@ -1219,6 +1219,59 @@ fn apply_binary<'a>(
     }
 }
 
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushBcast {
+    n: u32,
+    rank: u32,
+}
+
+/// Broadcasting elementwise binary op. Bindings: a, b, out, params (shapes) at
+/// 0..3. Push: {n, rank}. `op_code` spec constant selects the op. Keeps
+/// broadcast ops (bias-add, scaling, relu) on the GPU instead of host-falling-
+/// back. n = output element count.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_binary_broadcast<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise unary op. `op_code` selects:
 ///   0=exp 1=log 2=sqrt 3=abs 4=neg 5=sigmoid 6=tanh 7=relu
 ///   8=ceil 9=floor 10=sign 11=reciprocal 12=square
@@ -1995,6 +2048,7 @@ rustler::init!(
         buf_upload_into,
         concat_buffers,
         apply_binary,
+        apply_binary_broadcast,
         apply_unary,
         reduce_axis,
         transpose_2d,
