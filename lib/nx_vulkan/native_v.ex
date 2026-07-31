@@ -117,6 +117,16 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Gather (leading-prefix axes). Bindings in/out/indices/params; params is
+  [K, ews, idx_words, count, stride[4]] int32 (ews = value_bytes/4, idx_words =
+  index_bytes/4, count = product of trailing non-indexed dims); `n` = output
+  element count, `k` = number of indexed leading axes. Keeps the common gather
+  (default all-axes / leading-prefix axes) on the GPU.
+  """
+  def apply_gather(_out, _in, _idx, _params, _n, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Broadcasting select: out = pred ? t : f. Bindings pred/t/f/out/params; params
   is [rank, out[4], pred[4], t[4], f[4]] int32; `n` = output element count. pred
   is u8 (read as u32 words in the shader). Keeps masking / where / relu-grad on

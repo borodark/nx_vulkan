@@ -1456,6 +1456,50 @@ fn apply_pad<'a>(
     }
 }
 
+/// Gather (leading-prefix axes). Bindings: in 0, out 1, indices 2, params 3.
+/// Push: {n, K} where n = output element count, K = number of indexed leading
+/// axes. Params carry element word count + index word count + inner block size
+/// + per-leading-axis strides. Keeps gather on the GPU for the common case.
+#[rustler::nif(schedule = "DirtyIo")]
+fn apply_gather<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    idx_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, idx_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise dtype cast (e.g. f32<->f64). Bindings: in at 0, out at 1 (which
 /// may have a different element size). Push: uint n (element count). The shader
 /// determines the source/dest types; no op_code.
@@ -2273,6 +2317,7 @@ rustler::init!(
         cast,
         apply_slice,
         apply_pad,
+        apply_gather,
         apply_select,
         apply_compare,
         apply_binary_broadcast,

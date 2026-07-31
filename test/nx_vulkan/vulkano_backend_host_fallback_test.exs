@@ -99,11 +99,13 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [11.0, 10.0, 13.0]
     end
 
-    test "gather result is on BinaryBackend" do
+    # gather now runs a GPU type-generic copy shader (thrust 2) for the common
+    # leading-prefix / default-all-axes case — stays on VulkanoBackend.
+    test "gather (default axes, f32) stays on VulkanoBackend and is correct" do
       a = v(f32([10.0, 20.0, 30.0, 40.0]))
-      idx = Nx.tensor([[0], [2], [3]], type: :s64, backend: Nx.BinaryBackend)
+      idx = v(Nx.tensor([[0], [2], [3]], type: :s64, backend: Nx.BinaryBackend))
       r = Nx.gather(a, idx)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [10.0, 30.0, 40.0]
     end
 

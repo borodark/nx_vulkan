@@ -1,0 +1,53 @@
+#version 450
+
+// Gather (leading-prefix axes case) as a type-generic copy. The tensor's first
+// K axes are indexed; each index row selects a leading multi-coord and copies
+// the contiguous trailing block of `count` elements (count = product of the
+// non-indexed trailing dims). One thread per OUTPUT element:
+//   row   = gid / count           (which index row)
+//   inner = gid % count           (offset within the copied block)
+//   base  = Σ_j idx[row,j] * stride[j]
+//   src   = base + inner
+// copies `ews` u32 words. Works for any 4/8-byte value dtype; indices are read
+// as their low u32 word (idx_words = index_bytes/4: 1 for s32, 2 for s64).
+// Assumes valid non-negative indices (matches BinaryBackend, which does not
+// clamp gather). Only the leading-prefix-axes case reaches here; anything else
+// host-falls-back.
+//
+// Params: [K, ews, idx_words, count, stride[4]] where stride[j] = product of
+// source dims after axis j (row-major), for j in 0..K-1.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; };
+layout(std430, binding = 2) readonly buffer Idx { uint idxb[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    uint idxw = uint(prm[2]);
+    uint count = uint(prm[3]);
+
+    uint row = gid / count;
+    uint inner = gid % count;
+
+    uint base = 0u;
+    for (uint j = 0u; j < p.K; ++j) {
+        uint w = idxb[(row * p.K + j) * idxw];   // low word of index j
+        base += w * uint(prm[4 + int(j)]);
+    }
+
+    uint src = base + inner;
+    for (uint w = 0u; w < ews; ++w) {
+        o[gid * ews + w] = inp[src * ews + w];
+    }
+}

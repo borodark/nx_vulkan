@@ -1149,11 +1149,65 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # gather: pick elements at given index tuples. Underpins take/
   # take_diagonal in Nx 0.10's lowering.
   @impl true
+  @gather_spv Path.expand("../../priv/shaders/gather.spv", __DIR__)
+
   def gather(out, tensor, indices, opts \\ []) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.gather(t_bin, i_bin, opts)
-    host_result(out, result)
+    t = ensure_on_backend(tensor)
+    idx = ensure_on_backend(indices)
+    ishape = t.shape
+    rank = tuple_size(ishape)
+    idx_rank = tuple_size(idx.shape)
+    k = if idx_rank > 0, do: elem(idx.shape, idx_rank - 1), else: 0
+
+    axes =
+      case opts[:axes] do
+        nil -> if k > 0, do: Enum.to_list(0..(k - 1)), else: []
+        given -> Nx.Shape.normalize_axes(ishape, given, t.names)
+      end
+
+    eb = element_bytes(t.type)
+    ib = element_bytes(idx.type)
+
+    # GPU path: the indexed axes are a leading prefix [0..K-1] (no transpose
+    # needed — includes the default all-axes gather), value + index dtypes are
+    # 4/8-byte, rank 1..4, both operands GPU-resident.
+    if match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, idx.data) and
+         axes == Enum.to_list(0..(k - 1)) and rem(eb, 4) == 0 and rem(ib, 4) == 0 and
+         rank >= 1 and rank <= 4 and k >= 1 do
+      gpu_gather(out, t, idx, k, eb, ib)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      i_bin = Nx.backend_transfer(idx, Nx.BinaryBackend)
+      host_result(out, with_binary_backend(fn -> Nx.gather(t_bin, i_bin, opts) end))
+    end
+  end
+
+  defp gpu_gather(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, idx, k, eb, ib) do
+    dims = Tuple.to_list(sshape)
+    ews = div(eb, 4)
+    idx_words = div(ib, 4)
+    # count = product of the trailing (non-indexed) dims; per-leading-axis
+    # stride = product of dims after that axis (row-major).
+    count = dims |> Enum.drop(k) |> Enum.reduce(1, &(&1 * &2))
+
+    strides =
+      for j <- 0..(k - 1) do
+        dims |> Enum.drop(j + 1) |> Enum.reduce(1, &(&1 * &2))
+      end
+
+    params =
+      for v <- [k, ews, idx_words, count] ++ pad4(strides), into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+    %__MODULE__{ref: idx_ref} = idx.data
+
+    :ok = Nx.Vulkan.NativeV.apply_gather(out_ref, in_ref, idx_ref, params_ref, n, k, @gather_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # argmax / argmin: indices of extrema along an axis. Used by
