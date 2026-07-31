@@ -77,14 +77,65 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
-  describe "unsupported graphs fall back to the Evaluator (still correct)" do
-    test "reduction (sum) falls back" do
+  describe "reductions fall back to the eager path by default (faster than serial fused reduce)" do
+    test "full sum falls back but is correct" do
       a = bin([1.0, 2.0, 3.0, 4.0])
       b = bin([1.0, 1.0, 1.0, 1.0])
       got = jit(fn x, y -> Nx.sum(Nx.multiply(x, y)) end).(a, b)
       refute match?(%VulkanoBackend{}, got.data)
       assert Nx.to_number(got) == 10.0
     end
+
+    test "single-axis sum falls back but is correct" do
+      m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), {2, 3})
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == [6.0, 15.0]
+    end
+  end
+
+  describe "NXV_FUSE_REDUCE=1 opt-in — fused reduce runs on the GPU, still correct" do
+    setup do
+      System.put_env("NXV_FUSE_REDUCE", "1")
+      on_exit(fn -> System.delete_env("NXV_FUSE_REDUCE") end)
+      :ok
+    end
+
+    test "full sum of a product" do
+      a = bin([1.0, 2.0, 3.0, 4.0])
+      b = bin([0.5, 1.5, 2.5, 3.5])
+      got = jit(fn x, y -> Nx.sum(Nx.multiply(x, y)) end).(a, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.sum(Nx.multiply(a, b)))
+    end
+
+    test "reduce_max of a product" do
+      a = bin([1.0, 2.0, 3.0, 4.0])
+      b = bin([0.5, 1.5, 2.5, 3.5])
+      got = jit(fn x, y -> Nx.reduce_max(Nx.multiply(x, y)) end).(a, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.reduce_max(Nx.multiply(a, b)))
+    end
+
+    test "single-axis sum (both axes), elementwise fused in" do
+      m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), {2, 3})
+      g0 = jit(fn x -> Nx.sum(x, axes: [0]) end).(m)
+      g1 = jit(fn x -> Nx.sum(Nx.multiply(x, 2.0), axes: [1]) end).(m)
+      assert match?(%VulkanoBackend{}, g0.data)
+      assert match?(%VulkanoBackend{}, g1.data)
+      assert Nx.to_flat_list(g0) == [5.0, 7.0, 9.0]
+      assert Nx.to_flat_list(g1) == [12.0, 30.0]
+    end
+
+    test "multi-axis reduction still falls back" do
+      m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), {2, 2, 2})
+      got = jit(fn x -> Nx.sum(x, axes: [0, 2]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.sum(m, axes: [0, 2]))
+    end
+  end
+
+  describe "unsupported graphs fall back to the Evaluator (still correct)" do
 
     test "tuple output falls back" do
       a = bin([1.0, 2.0])

@@ -136,6 +136,15 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Generic JIT fused-reduce dispatch (thrust 3). Runtime-generated shader that
+  fuses an elementwise chain into a reduction: inputs at bindings 0..k-1, output
+  at k, push {outer, reduce_size, inner}. One invocation per output slot; the
+  reduce op (sum f64-acc / max / min) is baked into the generated shader.
+  """
+  def dispatch_generated_reduce(_out, _in_refs, _outer, _reduce_size, _inner, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Broadcasting select: out = pred ? t : f. Bindings pred/t/f/out/params; params
   is [rank, out[4], pred[4], t[4], f[4]] int32; `n` = output element count. pred
   is u8 (read as u32 words in the shader). Keeps masking / where / relu-grad on

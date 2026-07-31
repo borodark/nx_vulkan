@@ -139,6 +139,105 @@ defmodule Nx.Vulkan.Codegen do
     {glsl, %{param_order: param_order, n_inputs: k}}
   end
 
+  # Reduce ops we fuse: op -> {glsl accumulator init, combine}. `sum` uses an
+  # f64 accumulator to match BinaryBackend's summation order/precision.
+  @reduce_ops [:sum, :reduce_max, :reduce_min]
+
+  @doc "True if `op` is a reduction this module can fuse an elementwise inner into."
+  def reduce_op?(op), do: op in @reduce_ops
+
+  @doc """
+  Emit a GLSL shader that fuses an elementwise `inner` chain into a reduction
+  over the (outer, reduce_size, inner_stride) view. One invocation per output
+  slot loops the reduce axis, evaluating the fused body at each index. Returns
+  `{glsl, %{param_order: [...], n_inputs: k}}`.
+  """
+  def emit_fused_reduce(%T{} = inner, reduce_op, _dims) when reduce_op in @reduce_ops do
+    param_order = inner |> collect_param_indices(MapSet.new()) |> Enum.sort()
+    binding_of = param_order |> Enum.with_index() |> Map.new()
+    body = emit_expr(inner, binding_of)
+    k = length(param_order)
+
+    decls =
+      param_order
+      |> Enum.with_index()
+      |> Enum.map(fn {_pidx, b} ->
+        "layout(std430, binding = #{b}) readonly buffer In#{b} { float buf#{b}[]; };"
+      end)
+      |> Enum.join("\n")
+
+    # load each input at the running reduce index `idx`
+    loads =
+      param_order
+      |> Enum.with_index()
+      |> Enum.map(fn {_pidx, b} -> "        float v#{b} = buf#{b}[idx];" end)
+      |> Enum.join("\n")
+
+    accum =
+      case reduce_op do
+        :sum ->
+          """
+          double acc = 0.0lf;
+          for (uint r = 0u; r < pc.reduce_size; ++r) {
+              uint idx = base + r * pc.inner;
+          #{loads}
+              acc += double(#{body});
+          }
+          out_buf[gid] = float(acc);
+          """
+
+        :reduce_max ->
+          reduce_minmax(loads, body, "max", "-1.0/0.0")
+
+        :reduce_min ->
+          reduce_minmax(loads, body, "min", "1.0/0.0")
+      end
+
+    glsl = """
+    #version 450
+    #extension GL_ARB_gpu_shader_fp64 : require
+
+    layout(local_size_x = 256) in;
+
+    layout(push_constant) uniform Push {
+        uint outer;
+        uint reduce_size;
+        uint inner;
+        uint op;
+    } pc;
+
+    #{decls}
+    layout(std430, binding = #{k}) writeonly buffer Out { float out_buf[]; };
+
+    #{helper_functions()}
+
+    void main() {
+        uint gid = gl_GlobalInvocationID.x;
+        uint slots = pc.outer * pc.inner;
+        if (gid >= slots) return;
+        uint outr = gid / pc.inner;
+        uint inr = gid % pc.inner;
+        uint base = outr * pc.reduce_size * pc.inner + inr;
+
+        #{accum}
+    }
+    """
+
+    {glsl, %{param_order: param_order, n_inputs: k}}
+  end
+
+  defp reduce_minmax(loads, body, fun, init) do
+    """
+    float acc = #{init};
+    for (uint r = 0u; r < pc.reduce_size; ++r) {
+        uint idx = base + r * pc.inner;
+    #{loads}
+        acc = #{fun}(acc, #{body});
+    }
+    out_buf[gid] = acc;
+    """
+  end
+
   # ---- expression -> GLSL string ---------------------------------------
 
   defp emit_expr(%T{data: %Expr{op: :parameter}} = t, binding_of) do

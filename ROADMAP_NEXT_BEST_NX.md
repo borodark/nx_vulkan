@@ -128,8 +128,19 @@ Measured **3.62x** over eager per-op on a 10-op chain (GT 650M, n=1e6). Use:
 `Nx.Defn.jit(&fun/2, compiler: Nx.Vulkan.Compiler)`. `NXV_FUSE_DEBUG=1` logs the
 path per defn.
 
-Next increments: (a) fused elementwise→reduce (the `sum`/`mean` case — the old
-`emit_fused_reduce` in `9a9e3ad` codegen is the template, retarget to NativeV);
+**Increment 2 — fused elementwise→reduce: implemented but DISABLED by default.**
+`Codegen.emit_fused_reduce` + `dispatch_generated_reduce` NIF exist and are
+correct (opt in with `NXV_FUSE_REDUCE=1`), but the one-invocation-per-output-slot
+shader loops the reduce axis serially with an f64 accumulator — `reduce_size`x
+fewer threads than the eager path's fully-parallel elementwise stage — and
+measured **0.3–0.6x (slower)** in every regime on the Kepler fleet (full,
+per-axis, tall-skinny). So reductions stay on the faster eager path. The real
+fix is a **shared-memory parallel tree reduction** (workgroup reduce, two-pass or
+atomic for full reductions) — that's the actual thrust-3-reduce work; the current
+codegen is the scaffold for it.
+
+Next increments: (a) the parallel tree fused-reduce above (closes EXLA's `sum`
+5.6x gap — the last measured eager loss);
 (b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
 (c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
 on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.
