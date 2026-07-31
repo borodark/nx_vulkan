@@ -21,6 +21,12 @@ see `ROADMAP_NEXT_BEST_NX.md` thrust 0). The suite found + we fixed two real bug
 (slice dynamic indices, composed-fallback default-backend leak). **The backend is
 validated identically across Kepler and Ampere.**
 
+**Re-validated after thrust-2 (2026-07-31, all on-GPU changes) at the latest
+branch commit:** GT 650M, GT 750M, and RTX 3060 Ti each pass **863 doctests, 199
+tests, 0 failures**. The broadcast/select/compare/cast shaders, the `cast`/
+`apply_{binary_broadcast,select,compare}` NIFs, `robust_buffer_access`, and the
+u8-packing/byte-extract tricks all work identically across Kepler and Ampere.
+
 ## Race (f32 vs f64, per GPU) — headlines
 
 Full per-host reports: `f32_race_*_*.json`, `MAC248_GT750M_RESULTS.md`,
