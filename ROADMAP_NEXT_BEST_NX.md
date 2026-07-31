@@ -85,18 +85,26 @@ Establishes *how far from best* and prioritises everything below. Demonstrable,
 leverages the fleet + race infra. **Lead candidate.**
 
 ### 2. Kill the host-fallback round-trips — in progress
-**Done:** broadcasting elementwise binary (bias-add / relu-via-max / softmax-sub
-/ scaling) on the GPU (new `elementwise_binary_bcast_{f32,f64}` +
-`apply_binary_broadcast` NIF); `clip` composed from GPU broadcast min/max;
-`as_type` f32<->f64 via cast shaders (`cast` NIF). **Result: an entire f32
-mlp + softmax forward now stays on the GPU with zero host round-trips**
-(`nn_gpu_coverage_test.exs`); the whole f32/f64 numeric surface (matmul, conv,
-elementwise, broadcast, reductions, transpose, clip, cast) is on-device.
+**Done:**
+- broadcasting elementwise binary (bias-add / relu-via-max / softmax-sub /
+  scaling) — `elementwise_binary_bcast_{f32,f64}` + `apply_binary_broadcast`.
+- `clip` composed from GPU broadcast min/max.
+- `as_type` f32<->f64 via cast shaders (`cast` NIF).
+- `select` (masking / where / relu-grad value) — `select_{f32,f64}` +
+  `apply_select`, 3-way broadcast, u8 `pred` read as u32 (enabled
+  `robust_buffer_access`).
+- comparison ops `equal/ne/lt/le/gt/ge` -> u8 — `compare_{f32,f64}` +
+  `apply_compare`, results packed into u32 words (no 8-bit-storage needed).
 
-**Remaining (harder):** comparison ops (u8 output — needs 8-bit storage or a
-pack step), `select`/`where` (3-input broadcast; relu-grad / masking), `gather`,
-on-device `pad`/`slice`, and the mixed-dtype scalar broadcast (f64 tensor + f32
-scalar). Original notes:
+**Result:** a full f32 mlp + softmax **forward** and the relu-grad **mask chain**
+(`x > 0` -> `select`) now run entirely on the GPU (`nn_gpu_coverage_test`,
+`compare_test`). The f32/f64 numeric surface — matmul, conv, elementwise,
+broadcast, reductions, transpose, clip, cast, select, compare — is on-device.
+
+**Remaining (harder):** `gather`/`take` (indexing/embeddings), on-device
+`pad`/`slice`, `argmax`/`argmin`, and the mixed-dtype scalar broadcast (f64
+tensor + f32 scalar literal — currently host-falls-back on the type mismatch).
+Original notes:
 
 
 Profile the DL examples; the ops that bounce to host (broadcast binary, gather/
