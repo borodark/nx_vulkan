@@ -108,6 +108,14 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Broadcasting comparison -> u8 (packed as u32). Bindings a/b/out/params; op codes
+  0=eq 1=ne 2=lt 3=le 4=gt 5=ge. `out` buffer must be padded to a 4-byte multiple
+  (ceil(n/4) u32 words). Keeps mask-producing ops on the GPU.
+  """
+  def apply_compare(_out, _a, _b, _params, _n, _rank, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Elementwise unary op. `op_code` selects:
 
       0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu

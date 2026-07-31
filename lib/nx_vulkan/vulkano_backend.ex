@@ -741,21 +741,59 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # Comparison ops — host-fallback. The elementwise_binary.spv catalog
-  # has op codes 7/8/9 (equal/less/greater) but its output is f32, not
-  # u8 (the type Nx expects from a comparison). Routing through
-  # BinaryBackend keeps the Nx type contract correct. Scholar uses
-  # comparison + select heavily; this unblocks the classical-ML target.
-  for op <- [:equal, :not_equal, :less, :less_equal, :greater, :greater_equal] do
+  # Comparison ops — GPU broadcast -> u8 (packed as u32 words in the shader) when
+  # both operands share an f32/f64 type; host fallback otherwise. Same-type
+  # f32 comparisons (e.g. x > 0.0) keep the relu-grad mask on the GPU.
+  @compare_ops [equal: 0, not_equal: 1, less: 2, less_equal: 3, greater: 4, greater_equal: 5]
+  @compare_f32_spv Path.expand("../../priv/shaders/compare_f32.spv", __DIR__)
+  @compare_f64_spv Path.expand("../../priv/shaders/compare_f64.spv", __DIR__)
+
+  defp compare_spv({:f, 32}), do: @compare_f32_spv
+  defp compare_spv({:f, 64}), do: @compare_f64_spv
+  defp compare_spv(_), do: nil
+
+  for {op, code} <- @compare_ops do
     @impl true
     def unquote(op)(out, a, b) do
       a_v = ensure_on_backend(a)
       b_v = ensure_on_backend(b)
-      a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
-      b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
-      result = apply(Nx, unquote(op), [a_bin, b_bin])
-      host_result(out, result)
+      it = a_v.type
+      spv = compare_spv(it)
+
+      if spv != nil and b_v.type == it and match?(%__MODULE__{}, a_v.data) and
+           match?(%__MODULE__{}, b_v.data) and tuple_size(out.shape) >= 1 and
+           tuple_size(out.shape) <= 4 do
+        gpu_compare(out, a_v, b_v, unquote(code), spv)
+      else
+        a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+        b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+        host_result(out, apply(Nx, unquote(op), [a_bin, b_bin]))
+      end
     end
+  end
+
+  defp gpu_compare(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
+    rank = tuple_size(out.shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(pad_left(Tuple.to_list(a.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(b.shape), rank)),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    # u8 output written as u32 words — pad the buffer to a 4-byte multiple.
+    padded = div(n + 3, 4) * 4
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(padded)
+
+    :ok = Nx.Vulkan.NativeV.apply_compare(out_ref, a_ref, b_ref, params_ref, n, rank, code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # select(pred, on_true, on_false) — GPU broadcast select (masking / where /

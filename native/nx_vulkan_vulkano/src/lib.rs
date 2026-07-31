@@ -1277,6 +1277,52 @@ fn apply_binary_broadcast<'a>(
     }
 }
 
+/// Broadcasting comparison -> u8 (packed as u32). Bindings: a, b, out, params
+/// at 0..3. Push: {n, rank}. `op_code` spec constant selects eq/ne/lt/le/gt/ge.
+/// One thread per output u32 word (4 u8 results); dispatch ceil(n/4) threads.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_compare<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let nwords = n.div_ceil(4);
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [nwords.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Broadcasting select: out = pred ? t : f. Bindings: pred, t, f, out, params
 /// at 0..4. Push: {n, rank}. pred is a u8 tensor read as u32 words in the shader
 /// (needs robust_buffer_access for the tail). Keeps masking / where / relu-grad
@@ -2140,6 +2186,7 @@ rustler::init!(
         apply_binary,
         cast,
         apply_select,
+        apply_compare,
         apply_binary_broadcast,
         apply_unary,
         reduce_axis,
