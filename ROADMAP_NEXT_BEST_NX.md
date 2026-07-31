@@ -84,7 +84,21 @@ VulkanoBackend vs EXLA vs BinaryBackend on representative Nx + DL workloads
 Establishes *how far from best* and prioritises everything below. Demonstrable,
 leverages the fleet + race infra. **Lead candidate.**
 
-### 2. Kill the host-fallback round-trips (biggest real-workload win)
+### 2. Kill the host-fallback round-trips — in progress
+**Done:** broadcasting elementwise binary (bias-add / relu-via-max / softmax-sub
+/ scaling) on the GPU (new `elementwise_binary_bcast_{f32,f64}` +
+`apply_binary_broadcast` NIF); `clip` composed from GPU broadcast min/max;
+`as_type` f32<->f64 via cast shaders (`cast` NIF). **Result: an entire f32
+mlp + softmax forward now stays on the GPU with zero host round-trips**
+(`nn_gpu_coverage_test.exs`); the whole f32/f64 numeric surface (matmul, conv,
+elementwise, broadcast, reductions, transpose, clip, cast) is on-device.
+
+**Remaining (harder):** comparison ops (u8 output — needs 8-bit storage or a
+pack step), `select`/`where` (3-input broadcast; relu-grad / masking), `gather`,
+on-device `pad`/`slice`, and the mixed-dtype scalar broadcast (f64 tensor + f32
+scalar). Original notes:
+
+
 Profile the DL examples; the ops that bounce to host (broadcast binary, gather/
 scatter, pad, slice, sort, `where`/select) each cost a GPU↔host copy and dominate
 end-to-end time. Wire GPU dispatch (or at least keep-on-device) for the top few —
