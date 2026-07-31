@@ -119,6 +119,21 @@ elementwise chains into a single dispatch (revive the dropped Fuse work
 properly), and avoids materialising intermediates. Multi-week; the single biggest
 perf lever for graphs. Depends on #2's on-device data path.
 
+**Increment 1 — DONE** (`Nx.Vulkan.Compiler` + `Nx.Vulkan.Codegen`,
+`dispatch_generated` NIF). Traces the defn, and for a same-shape f32 elementwise
+chain (single output) JIT-generates one GLSL shader for the whole chain,
+compiles it once (cached by hash in `priv/shader_cache/`), dispatches once.
+Everything else falls through to `Nx.Defn.Evaluator` (always correct).
+Measured **3.62x** over eager per-op on a 10-op chain (GT 650M, n=1e6). Use:
+`Nx.Defn.jit(&fun/2, compiler: Nx.Vulkan.Compiler)`. `NXV_FUSE_DEBUG=1` logs the
+path per defn.
+
+Next increments: (a) fused elementwise→reduce (the `sum`/`mean` case — the old
+`emit_fused_reduce` in `9a9e3ad` codegen is the template, retarget to NativeV);
+(b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
+(c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
+on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.
+
 ### 4. Package, document, position
 Hex release, README with the portability pitch + a support matrix (OS × GPU
 vendor × verified), install docs, the fleet benchmark numbers, and a
