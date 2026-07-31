@@ -103,12 +103,14 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [10.0, 30.0, 40.0]
     end
 
-    test "select result is on BinaryBackend" do
+    # select now runs a GPU broadcast shader (thrust 2) for u8 pred + f32/f64
+    # branches — stays on VulkanoBackend instead of host round-tripping.
+    test "select (u8 pred, f32) stays on VulkanoBackend and is correct" do
       pred = v(Nx.tensor([1, 0, 1], type: {:u, 8}, backend: Nx.BinaryBackend))
       on_t = v(f32([1.0, 2.0, 3.0]))
       on_f = v(f32([10.0, 20.0, 30.0]))
       r = Nx.select(pred, on_t, on_f)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [1.0, 20.0, 3.0]
     end
 

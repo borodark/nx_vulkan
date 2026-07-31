@@ -1,0 +1,54 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// Broadcasting select: out = pred ? on_true : on_false  (rank <= 4). Keeps
+// masking / where / relu-grad on the GPU. `pred` is a u8 tensor read here as
+// u32 words (byte-extracted); its tail word may over-read, which the enabled
+// robust_buffer_access makes return 0 (harmless — only the valid byte is used).
+// on_true/on_false/out are f32. Each of pred/t/f broadcasts independently.
+// Params: [rank, out[4], pred[4], t[4], f[4]].
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Pred { uint pred[]; };
+layout(std430, binding = 1) readonly buffer T { double t[]; };
+layout(std430, binding = 2) readonly buffer F { double f[]; };
+layout(std430, binding = 3) writeonly buffer O { double o[]; };
+layout(std430, binding = 4) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint outd[4];
+    uint pd[4];
+    uint td[4];
+    uint fd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        pd[i] = uint(prm[5 + i]);
+        td[i] = uint(prm[9 + i]);
+        fd[i] = uint(prm[13 + i]);
+    }
+
+    uint idx = gid;
+    uint pidx = 0u, tidx = 0u, fidx = 0u;
+    uint ps = 1u, ts = 1u, fs = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = outd[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        pidx += ((pd[d] == 1u) ? 0u : coord) * ps; ps *= pd[d];
+        tidx += ((td[d] == 1u) ? 0u : coord) * ts; ts *= td[d];
+        fidx += ((fd[d] == 1u) ? 0u : coord) * fs; fs *= fd[d];
+    }
+
+    uint word = pred[pidx >> 2];
+    uint b = (word >> ((pidx & 3u) * 8u)) & 0xFFu;
+    o[gid] = (b != 0u) ? t[tidx] : f[fidx];
+}

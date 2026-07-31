@@ -713,9 +713,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- host-fallback ops
 
-  # as_type — Nx-level cast via BinaryBackend. For f32↔f32 (no-op) we
-  # just rewrap. For real casts we round-trip through host.
-  @impl true
+  # as_type — same-type is a rewrap; f32<->f64 casts run a GPU shader; other
+  # dtype pairs round-trip through BinaryBackend.
   @cast_f32_to_f64_spv Path.expand("../../priv/shaders/cast_f32_to_f64.spv", __DIR__)
   @cast_f64_to_f32_spv Path.expand("../../priv/shaders/cast_f64_to_f32.spv", __DIR__)
 
@@ -723,6 +722,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
   defp cast_spv(_from, _to), do: nil
 
+  @impl true
   def as_type(%T{type: type} = out, %T{type: source_type, shape: shape, data: %__MODULE__{ref: ref}} = tensor) do
     cond do
       type == source_type ->
@@ -758,14 +758,59 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # select(cond, on_true, on_false) — host-fallback.
+  # select(pred, on_true, on_false) — GPU broadcast select (masking / where /
+  # relu-grad) when pred is u8 and on_true/on_false/out share an f32/f64 type;
+  # host fallback otherwise.
+  @select_f32_spv Path.expand("../../priv/shaders/select_f32.spv", __DIR__)
+  @select_f64_spv Path.expand("../../priv/shaders/select_f64.spv", __DIR__)
+
+  defp select_spv({:f, 32}), do: @select_f32_spv
+  defp select_spv({:f, 64}), do: @select_f64_spv
+  defp select_spv(_), do: nil
+
   @impl true
-  def select(out, pred, on_true, on_false) do
-    pred_bin = Nx.backend_transfer(ensure_on_backend(pred), Nx.BinaryBackend)
-    t_bin = Nx.backend_transfer(ensure_on_backend(on_true), Nx.BinaryBackend)
-    f_bin = Nx.backend_transfer(ensure_on_backend(on_false), Nx.BinaryBackend)
-    result = Nx.select(pred_bin, t_bin, f_bin)
-    host_result(out, result)
+  def select(%T{type: type, shape: os} = out, pred, on_true, on_false) do
+    p = ensure_on_backend(pred)
+    t = ensure_on_backend(on_true)
+    f = ensure_on_backend(on_false)
+    spv = select_spv(type)
+
+    gpu? =
+      spv != nil and p.type == {:u, 8} and t.type == type and f.type == type and
+        match?(%__MODULE__{}, p.data) and match?(%__MODULE__{}, t.data) and
+        match?(%__MODULE__{}, f.data) and tuple_size(os) >= 1 and tuple_size(os) <= 4
+
+    if gpu? do
+      gpu_select(out, p, t, f, spv)
+    else
+      pred_bin = Nx.backend_transfer(p, Nx.BinaryBackend)
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      f_bin = Nx.backend_transfer(f, Nx.BinaryBackend)
+      host_result(out, with_binary_backend(fn -> Nx.select(pred_bin, t_bin, f_bin) end))
+    end
+  end
+
+  defp gpu_select(out, %T{data: %__MODULE__{ref: p_ref}} = p, %T{data: %__MODULE__{ref: t_ref}} = t, %T{data: %__MODULE__{ref: f_ref}} = f, spv) do
+    rank = tuple_size(out.shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(pad_left(Tuple.to_list(p.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(t.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(f.shape), rank)),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(out.type))
+
+    :ok = Nx.Vulkan.NativeV.apply_select(out_ref, p_ref, t_ref, f_ref, params_ref, n, rank, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # all/3, any/3 — boolean reductions, host-fallback.

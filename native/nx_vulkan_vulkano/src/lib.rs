@@ -214,9 +214,14 @@ fn ctx() -> Result<&'static VkContext, String> {
     // _f64.spv shaders. Falls back gracefully on devices without it
     // (those will keep using the f32 paths + host fallback for f64).
     let supports_f64 = physical.supported_features().shader_float64;
+    // robust_buffer_access makes out-of-bounds reads return 0 instead of
+    // faulting — needed by the select shader, which reads a u8 `pred` buffer as
+    // u32 words and may touch up to 3 bytes past the end on the tail word.
+    let supports_robust = physical.supported_features().robust_buffer_access;
 
     let enabled_features = vulkano::device::Features {
         shader_float64: supports_f64,
+        robust_buffer_access: supports_robust,
         ..Default::default()
     };
 
@@ -1272,6 +1277,53 @@ fn apply_binary_broadcast<'a>(
     }
 }
 
+/// Broadcasting select: out = pred ? t : f. Bindings: pred, t, f, out, params
+/// at 0..4. Push: {n, rank}. pred is a u8 tensor read as u32 words in the shader
+/// (needs robust_buffer_access for the tail). Keeps masking / where / relu-grad
+/// on the GPU.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_select<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    pred_ref: ResourceArc<VulkanoTensor>,
+    t_ref: ResourceArc<VulkanoTensor>,
+    f_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, pred_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, t_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, f_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(4, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise dtype cast (e.g. f32<->f64). Bindings: in at 0, out at 1 (which
 /// may have a different element size). Push: uint n (element count). The shader
 /// determines the source/dest types; no op_code.
@@ -2087,6 +2139,7 @@ rustler::init!(
         concat_buffers,
         apply_binary,
         cast,
+        apply_select,
         apply_binary_broadcast,
         apply_unary,
         reduce_axis,

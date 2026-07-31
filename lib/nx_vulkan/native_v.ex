@@ -99,6 +99,15 @@ defmodule Nx.Vulkan.NativeV do
   def cast(_out, _a, _n, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Broadcasting select: out = pred ? t : f. Bindings pred/t/f/out/params; params
+  is [rank, out[4], pred[4], t[4], f[4]] int32; `n` = output element count. pred
+  is u8 (read as u32 words in the shader). Keeps masking / where / relu-grad on
+  the GPU.
+  """
+  def apply_select(_out, _pred, _t, _f, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Elementwise unary op. `op_code` selects:
 
       0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu
