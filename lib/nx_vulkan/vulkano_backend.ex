@@ -379,7 +379,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
     else
       inp_bin = Nx.backend_transfer(i, Nx.BinaryBackend)
       kernel_bin = Nx.backend_transfer(k, Nx.BinaryBackend)
-      host_result(out, Nx.conv(inp_bin, kernel_bin, opts))
+      # BinaryBackend.conv calls the high-level Nx.pad internally; with the
+      # process default backend still VulkanoBackend that would dispatch to our
+      # GPU pad and hand conv a Vulkan tensor it then can't to_binary. Pin the
+      # default to BinaryBackend for the whole composed op.
+      host_result(out, with_binary_backend(fn -> Nx.conv(inp_bin, kernel_bin, opts) end))
     end
   end
 
@@ -986,16 +990,58 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- sampler-path host fallbacks
 
-  # Nx.Backend.pad/4 callback. The Nx sampler uses pad to extend tensors
-  # along arbitrary axes (NUTS leapfrog scratch buffers, batched chain
-  # padding, etc.). No GPU pad shader yet — round-trip through
-  # BinaryBackend. Pad value comes in as a tensor; transfer it too.
+  @pad_spv Path.expand("../../priv/shaders/pad.spv", __DIR__)
+
+  # Nx.Backend.pad/4 callback. GPU path: a type-generic copy that maps each
+  # output element back through the per-axis {low, high, interior} config —
+  # elements in an edge pad, an interior gap, or outside the source get the pad
+  # value (shader handles negative low/high cropping). Runs for 4/8-byte dtypes,
+  # rank 1..4, scalar same-type pad value. Everything else host-falls-back.
   @impl true
   def pad(out, tensor, pad_value, padding_config) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    pv_bin = Nx.backend_transfer(ensure_on_backend(pad_value), Nx.BinaryBackend)
-    result = Nx.pad(t_bin, pv_bin, padding_config)
-    host_result(out, result)
+    t = ensure_on_backend(tensor)
+    pv = ensure_on_backend(pad_value)
+    eb = element_bytes(t.type)
+    rank = tuple_size(t.shape)
+
+    if match?(%__MODULE__{}, t.data) and rem(eb, 4) == 0 and rank >= 1 and rank <= 4 and
+         pv.type == t.type and tuple_size(pv.shape) == 0 do
+      gpu_pad(out, t, pv, padding_config, eb)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend)
+      host_result(out, Nx.pad(t_bin, pv_bin, padding_config))
+    end
+  end
+
+  defp gpu_pad(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, pv, padding_config, eb) do
+    rank = tuple_size(out.shape)
+    ews = div(eb, 4)
+    lows = Enum.map(padding_config, fn {lo, _hi, _int} -> lo end)
+    interiors = Enum.map(padding_config, fn {_lo, _hi, int} -> int end)
+
+    params =
+      for v <-
+            [rank, ews] ++
+              pad4(Tuple.to_list(sshape)) ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(lows) ++
+              pad4(interiors),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+
+    pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend) |> Nx.to_binary()
+    {:ok, padval_ref} = Nx.Vulkan.NativeV.buf_upload(pv_bin)
+
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+
+    :ok = Nx.Vulkan.NativeV.apply_pad(out_ref, in_ref, params_ref, padval_ref, n, rank, @pad_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # put_slice: write `slice` into `tensor` at `start_indices`. Used by

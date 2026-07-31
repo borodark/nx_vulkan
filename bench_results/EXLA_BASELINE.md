@@ -12,6 +12,25 @@ sum 256x256                  9.89       3.74        0.67     EXLA 5.6x      vulk
 mlp fwd 64x128->128->10    417.97       3.68        2.13     EXLA 1.7x      vulk exact, exla<3e-2
 ```
 
+## Re-run after thrust-2 (2026-07-31, @ af7292d) — NN forward fully on-GPU
+
+Same RTX 3060 Ti, after broadcast/select/compare/cast/clip landed (forward +
+relu-grad mask on-device):
+
+```
+workload                 binary ms   vulkano ms    exla ms   vs EXLA
+matmul 256x256           23570.19      20.64       37.67     Vulkano 1.8x
+conv 2x8x16x16 k16         302.42       3.97        2.23     EXLA 1.8x
+tanh 100k                   53.73      21.67       21.05     ~parity
+sum 256x256                 10.06       3.82        0.68     EXLA 5.6x
+mlp fwd 64x128->128->10    419.36       3.22        2.23     EXLA 1.45x
+```
+
+**mlp fwd closed from ~1.7x to ~1.45x** vs EXLA (Vulkano 3.68 -> 3.22 ms) purely
+from keeping the forward on the GPU — no more host round-trips for bias/relu/
+softmax. Still ~130x over pure-Elixir Binary. The remaining EXLA edge is the
+reduction (`sum` 5.6x) and its compiled/fused kernels — thrust 3.
+
 ## Read
 
 **VulkanoBackend is in EXLA's league for eager execution** — same order of

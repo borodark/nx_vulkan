@@ -47,11 +47,13 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     end
 
-    test "pad result is on BinaryBackend" do
+    # pad now runs a GPU type-generic copy shader (thrust 2) for static config +
+    # 4/8-byte dtypes — stays on VulkanoBackend.
+    test "pad (f32) stays on VulkanoBackend and is correct" do
       a = v(f32([1.0, 2.0, 3.0]))
       pv = v(Nx.tensor(0.0, type: :f32, backend: Nx.BinaryBackend))
       r = Nx.pad(a, pv, [{1, 1, 0}])
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0.0, 1.0, 2.0, 3.0, 0.0]
     end
 

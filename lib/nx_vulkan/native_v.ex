@@ -107,6 +107,16 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Pad (type-generic copy). Bindings in/out/params/pad-value; params is
+  [rank, ews, S[4], O[4], low[4], interior[4]] int32 (ews = element_bytes/4);
+  `pad_value` buffer is one element (ews u32 words); `n` = output element count.
+  Elements landing in an edge pad, interior gap, or outside the source get the
+  pad value. Keeps pad on the GPU.
+  """
+  def apply_pad(_out, _in, _params, _padval, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Broadcasting select: out = pred ? t : f. Bindings pred/t/f/out/params; params
   is [rank, out[4], pred[4], t[4], f[4]] int32; `n` = output element count. pred
   is u8 (read as u32 words in the shader). Keeps masking / where / relu-grad on
