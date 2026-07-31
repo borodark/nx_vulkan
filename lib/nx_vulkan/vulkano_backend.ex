@@ -716,13 +716,28 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # as_type — Nx-level cast via BinaryBackend. For f32↔f32 (no-op) we
   # just rewrap. For real casts we round-trip through host.
   @impl true
-  def as_type(%T{type: type} = out, %T{type: source_type, data: %__MODULE__{ref: ref}} = tensor) do
-    if type == source_type do
-      put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
-    else
-      bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-      bin_cast = Nx.as_type(bin_in, type)
-      host_result(out, bin_cast)
+  @cast_f32_to_f64_spv Path.expand("../../priv/shaders/cast_f32_to_f64.spv", __DIR__)
+  @cast_f64_to_f32_spv Path.expand("../../priv/shaders/cast_f64_to_f32.spv", __DIR__)
+
+  defp cast_spv({:f, 32}, {:f, 64}), do: @cast_f32_to_f64_spv
+  defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
+  defp cast_spv(_from, _to), do: nil
+
+  def as_type(%T{type: type} = out, %T{type: source_type, shape: shape, data: %__MODULE__{ref: ref}} = tensor) do
+    cond do
+      type == source_type ->
+        put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+
+      cast_spv(source_type, type) != nil ->
+        # f32<->f64 widening/narrowing on the GPU (mixed precision).
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+        :ok = Nx.Vulkan.NativeV.cast(out_ref, ref, n, cast_spv(source_type, type))
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
+
+      true ->
+        bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+        host_result(out, Nx.as_type(bin_in, type))
     end
   end
 

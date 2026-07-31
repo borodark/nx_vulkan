@@ -1272,6 +1272,44 @@ fn apply_binary_broadcast<'a>(
     }
 }
 
+/// Elementwise dtype cast (e.g. f32<->f64). Bindings: in at 0, out at 1 (which
+/// may have a different element size). Push: uint n (element count). The shader
+/// determines the source/dest types; no op_code.
+#[rustler::nif(schedule = "DirtyIo")]
+fn cast<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise unary op. `op_code` selects:
 ///   0=exp 1=log 2=sqrt 3=abs 4=neg 5=sigmoid 6=tanh 7=relu
 ///   8=ceil 9=floor 10=sign 11=reciprocal 12=square
@@ -2048,6 +2086,7 @@ rustler::init!(
         buf_upload_into,
         concat_buffers,
         apply_binary,
+        cast,
         apply_binary_broadcast,
         apply_unary,
         reduce_axis,

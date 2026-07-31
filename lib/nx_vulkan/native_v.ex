@@ -93,6 +93,12 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Elementwise dtype cast (in binding 0 -> out binding 1). The shader defines the
+  source/dest types; `n` = element count. Used for f32<->f64 on the GPU.
+  """
+  def cast(_out, _a, _n, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Elementwise unary op. `op_code` selects:
 
       0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu
