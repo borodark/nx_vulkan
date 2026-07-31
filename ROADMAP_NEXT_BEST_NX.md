@@ -140,17 +140,21 @@ one-thread-per-slot serial: **full `sum` 256² 9.9x, 1024² 27x, fused chain+red
 reductions fall back to eager (already parallel) — no regressions. The first
 serial attempt regressed 0.3–0.6x everywhere; the parallel version is the fix.
 
-**Increment 2b — many-slot fused reduce: DONE.** The workgroup-per-slot tree
-reduce now grid-strides over output slots (one launch handles any slot count,
-past the 65535 workgroup limit). `reduce_beneficial?/3` enables it by default in
-two contiguous-reduce (`inner_stride == 1`) regimes measured to win: few slots
-(full reductions, 8-27x) and many slots with a wide reduce axis (slots >= 2048,
-reduce >= 256 → ~4.4x, grid-stride). The noisy middle and narrow-reduce many-slot
-cases fall back to eager (no regressions).
+**Increment 2b — many-slot fused reduce (grid-stride): DONE, but opt-in only.**
+The workgroup-per-slot tree reduce now grid-strides over output slots (one launch
+handles any slot count, past the 65535 workgroup limit). It wins ~4.4x on the
+weak Kepler eager path — but FLEET VALIDATION on the RTX 3060 Ti showed it
+**regresses ~0.44x on Ampere**: a strong GPU's one-thread-per-slot eager reduce
+is already well-fed by thousands of slots, so the fused kernel only adds
+overhead. Hardware-dependent → NOT a default. `reduce_beneficial?/3` keeps only
+the FEW-slot regime (full/small-output reductions) on by default — that wins on
+both Kepler (8-27x) and Ampere (2.8-6.7x). The many-slot path is available via
+`NXV_FUSE_REDUCE=1` for weak-GPU deployments. Lesson: validate perf heuristics
+across the fleet, not just the local box — the win/loss crossover is HW-specific.
 
-Next increments: (a) `mean`/`product` fusion, and a warp-per-slot variant for the
-narrow-reduce many-slot case (reduce < 256) still on the eager path;
-(b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
+Next increments: (a) a runtime device-class check (device_name / vendor) to
+auto-enable the many-slot regime only on weak GPUs; (b) `mean`/`product` fusion;
+(c) common-subexpression sharing so fan-out nodes aren't recomputed inline;
 (c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
 on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.
 

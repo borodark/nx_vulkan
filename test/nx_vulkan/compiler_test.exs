@@ -83,7 +83,7 @@ defmodule Nx.Vulkan.CompilerTest do
   defp biota(shape, scale \\ 1.0),
     do: Nx.iota(shape, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(scale)
 
-  describe "reductions fuse on the GPU by default in the winning regimes" do
+  describe "reductions fuse on the GPU by default in the few-slot regime (wins on Kepler + Ampere)" do
     test "few-slot full reduction with a large axis fuses" do
       v = biota({256})
       got = jit(fn x -> Nx.sum(x) end).(v)
@@ -91,15 +91,13 @@ defmodule Nx.Vulkan.CompilerTest do
       assert close?(got, Nx.sum(v))
     end
 
-    test "many-slot wide contiguous reduce fuses (grid-stride over slots)" do
-      m = biota({2048, 256}, 1.0e-4)
+    test "small-output single-axis reduction (slots <= 256) fuses" do
+      # {8, 256} axes:[1] -> 8 slots, contiguous reduce of 256 -> few-slot win
+      m = biota({8, 256}, 1.0e-4)
       got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
       assert match?(%VulkanoBackend{}, got.data)
-      assert Nx.shape(got) == {2048}
-      # both the fused (f64 acc) and eager-GPU paths accumulate in f64; compare
-      # to the eager GPU reduce for an apples-to-apples numeric check
-      ref = Nx.sum(Nx.backend_transfer(m, VulkanoBackend), axes: [1])
-      assert close?(got, ref)
+      assert Nx.shape(got) == {8}
+      assert close?(got, Nx.sum(Nx.backend_transfer(m, VulkanoBackend), axes: [1]))
     end
   end
 
@@ -130,6 +128,14 @@ defmodule Nx.Vulkan.CompilerTest do
       m = biota({1024, 512}, 1.0e-4)
       got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
       refute match?(%VulkanoBackend{}, got.data)
+    end
+
+    test "many-slot wide reduce falls back by default (hardware-dependent, opt-in only)" do
+      # Wins ~4.4x on Kepler but regresses ~0.44x on Ampere, so not a default.
+      m = biota({2048, 256}, 1.0e-4)
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.sum(m, axes: [1]))
     end
   end
 
@@ -174,6 +180,16 @@ defmodule Nx.Vulkan.CompilerTest do
       got = jit(fn x -> Nx.sum(x, axes: [0, 2]) end).(m)
       refute match?(%VulkanoBackend{}, got.data)
       assert close?(got, Nx.sum(m, axes: [0, 2]))
+    end
+
+    test "many-slot reduce with grid-stride (> 65535 slots) fuses and is correct" do
+      # 100k output slots exceeds maxComputeWorkGroupCount[0] (65535); the
+      # shader grid-strides over slots. Opt-in only (regresses on Ampere).
+      m = biota({100_000, 128}, 1.0e-6)
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.shape(got) == {100_000}
+      assert close?(got, Nx.sum(Nx.backend_transfer(m, VulkanoBackend), axes: [1]))
     end
   end
 

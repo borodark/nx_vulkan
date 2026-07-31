@@ -30,13 +30,15 @@ defmodule Nx.Vulkan.Compiler do
   (`Codegen.emit_fused_reduce` + `dispatch_generated_reduce`), which grid-strides
   over output slots so one launch handles any slot count. It beats even the eager
   path, whose own `reduce_axis` is one-thread-per-slot serial. Enabled by default
-  for a contiguous reduce (`inner_stride == 1`) in the two regimes measured to
-  win on the fleet: few output slots (full reductions — ~8-27x over eager on the
-  GT 650M, the case where EXLA had out-run the eager backend) and many slots with
-  a wide reduce axis (~3.8-4.2x). The noisy middle and narrow-reduce many-slot
-  cases fall back to the already-parallel eager path — no regressions.
-  `NXV_FUSE_REDUCE=1` forces fusion for any contiguous reduce; `=0` disables it.
-  See `reduce_beneficial?/3`.
+  for a contiguous reduce (`inner_stride == 1`) with FEW output slots — full
+  reductions and small-output reductions — which win across the fleet: ~8-27x
+  over eager on the GT 650M and ~2.8-6.7x on the RTX 3060 Ti (the case where EXLA
+  had out-run the eager backend). The many-slot wide-reduce regime is grid-
+  stride-capable and wins on the weak Kepler eager path (~4.4x) but REGRESSES on
+  the much stronger Ampere eager path (0.44x), so it is hardware-dependent and
+  NOT a default — opt in with `NXV_FUSE_REDUCE=1`. Non-contiguous, short-axis and
+  mid/many-slot reductions otherwise fall back to the already-parallel eager path
+  — no regressions. `=0` disables all reduce fusion. See `reduce_beneficial?/3`.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -144,23 +146,22 @@ defmodule Nx.Vulkan.Compiler do
   # slot a 256-thread workgroup doing a coalesced tree reduce, and grid-strides
   # over slots so it handles any slot count. It requires a contiguous reduce
   # (inner_stride == 1 — full reduction or last-axis; inner > 1 is uncoalesced,
-  # measured 0.23x). Two regimes measured to win on the fleet:
+  # measured 0.23x).
   #
-  #   * Few-slot (slots <= @few_slots, reduce >= @min_reduce_few): the eager
-  #     `reduce_axis` is one-thread-per-slot, so with few slots it is badly
-  #     under-parallelised. Fused wins hugest here — a full reduction (slots=1)
-  #     is ~8-27x over eager, the case where EXLA had out-run the eager backend.
-  #   * Many-slot wide reduce (slots >= @many_slots, reduce >= @min_reduce_many):
-  #     enough slots to saturate the GPU AND a reduce axis wide enough to use a
-  #     full workgroup. Coalesced + saves the intermediate buffer → 3.8-4.2x.
+  # DEFAULT REGIME — few slots (slots <= @few_slots, reduce >= @min_reduce_few):
+  # eager's `reduce_axis` is one-thread-per-slot, so with few slots it is badly
+  # under-parallelised. Fused wins here on BOTH the weak Kepler and the strong
+  # Ampere GPUs — a full reduction (slots=1) is ~8-27x over eager on the GT 650M
+  # and ~2.8-6.7x on the RTX 3060 Ti (the case where EXLA had out-run eager).
   #
-  # The middle (few_slots < slots < many_slots) and narrow-reduce many-slot cases
-  # are noisy/neutral, so they fall back to the already-parallel eager path — no
-  # regressions. NXV_FUSE_REDUCE=1 forces any contiguous reduce; =0 disables.
+  # The many-slot wide-reduce regime (slots >= 2048, reduce >= 256) is grid-
+  # stride-capable and wins ~4.4x on Kepler, but it REGRESSES on Ampere (0.44x):
+  # a 3060 Ti's eager one-thread-per-slot path is already well-fed by thousands
+  # of slots, leaving the fused kernel no headroom, only overhead. So it is NOT
+  # a default — hardware-dependent. It stays available via NXV_FUSE_REDUCE=1 for
+  # weak-GPU deployments / experimentation. `=0` disables all reduce fusion.
   @few_slots 256
   @min_reduce_few 64
-  @many_slots 2048
-  @min_reduce_many 256
 
   defp reduce_beneficial?(slots, reduce_size, inner_stride) do
     force = System.get_env("NXV_FUSE_REDUCE")
@@ -170,9 +171,7 @@ defmodule Nx.Vulkan.Compiler do
       inner_stride != 1 -> false
       slots < 1 -> false
       force == "1" -> true
-      slots <= @few_slots -> reduce_size >= @min_reduce_few
-      slots >= @many_slots -> reduce_size >= @min_reduce_many
-      true -> false
+      true -> slots <= @few_slots and reduce_size >= @min_reduce_few
     end
   end
 

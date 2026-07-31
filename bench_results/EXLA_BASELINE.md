@@ -50,6 +50,18 @@ eager path is relatively much faster — the fused kernel is the same win, the
 baseline it beats is higher. Elementwise-fusion bench on the same box: the 10-op
 n=1e6 chain is 31.35 -> 23.30 ms (1.35x, vs 3.62x on Kepler — same reason).
 
+### Many-slot fused reduce is hardware-dependent (fleet finding)
+
+The grid-stride many-slot wide-reduce regime (slots >= 2048, reduce >= 256) that
+wins ~4.4x on the GT 650M **regresses on the 3060 Ti**: `sum axes:[1]` 4096x256
+measured **0.44x** (eager 6.53 -> fused 14.76 ms) and 16384x256 **0.81x** — exact,
+but slower. Ampere's one-thread-per-slot eager reduce is already well-fed by
+thousands of slots, leaving the fused kernel no headroom. So the many-slot regime
+is **opt-in only** (`NXV_FUSE_REDUCE=1`); the default keeps just the few-slot
+regime, which wins on both GPUs (full `sum` 256x256: 2.78x, 1024²: 6.72x,
+`sum(tanh(a*b+a))` 512²: 6.07x on the 3060 Ti). Lesson: perf heuristics must be
+fleet-validated — the win/loss crossover is HW-specific.
+
 ### Vulkano vs EXLA head-to-head on `Nx.sum` (f32, RTX 3060 Ti)
 
 ```

@@ -45,11 +45,16 @@ bench.("  sum(a*b) 256x256      ", {256, 256}, fn x, y -> Nx.sum(Nx.multiply(x, 
 bench.("  sum(a*b) 1024x1024    ", {1024, 1024}, fn x, y -> Nx.sum(Nx.multiply(x, y)) end)
 bench.("  sum(tanh(a*b+a)) 512² ", {512, 512}, fn x, y -> Nx.sum(Nx.tanh(Nx.add(Nx.multiply(x, y), x))) end)
 
-IO.puts("\nMany-slot WIDE contiguous reduce (fused by default via grid-stride):")
-bench.("  sum axes:[1] 4096x256 ", {4096, 256}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [1]) end)
-bench.("  sum axes:[1] 16384x256", {16384, 256}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [1]) end)
-
-IO.puts("\nOutside the win regime — falls back to eager (no regression):")
+IO.puts("\nOutside the few-slot regime — falls back to eager by default (no regression):")
 # narrow reduce (< 256) and non-contiguous (axes:[0], inner>1) fall back
 bench.("  sum axes:[1] 4096x8   ", {4096, 8}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [1]) end)
 bench.("  sum axes:[0] 256x2048 ", {256, 2048}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [0]) end)
+
+# The many-slot wide-reduce regime is grid-stride-capable and wins on weak GPUs
+# (~4.4x on GT 650M) but REGRESSES on strong ones (~0.44x on RTX 3060 Ti), so it
+# is opt-in only. Force it here to show its (hardware-dependent) numbers.
+System.put_env("NXV_FUSE_REDUCE", "1")
+IO.puts("\nMany-slot WIDE reduce, forced via NXV_FUSE_REDUCE=1 (grid-stride, HW-dependent):")
+bench.("  sum axes:[1] 4096x256 ", {4096, 256}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [1]) end)
+bench.("  sum axes:[1] 16384x256", {16384, 256}, fn x, y -> Nx.sum(Nx.multiply(x, y), axes: [1]) end)
+System.delete_env("NXV_FUSE_REDUCE")
