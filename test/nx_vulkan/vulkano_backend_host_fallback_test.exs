@@ -62,10 +62,12 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [7.0, 7.0, 7.0, 7.0]
     end
 
-    test "slice result is on BinaryBackend" do
+    # slice now runs a GPU strided-copy shader (thrust 2) for static starts +
+    # 4/8-byte dtypes — stays on VulkanoBackend.
+    test "slice (static start, f32) stays on VulkanoBackend and is correct" do
       a = v(f32([1.0, 2.0, 3.0, 4.0, 5.0]))
       r = Nx.slice(a, [1], [3])
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [2.0, 3.0, 4.0]
     end
 

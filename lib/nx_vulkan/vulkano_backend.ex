@@ -938,16 +938,50 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # GPU-side slice shader for contiguous prefixes; until then this is
   # correct but copies through host memory.
   @impl true
+  @slice_spv Path.expand("../../priv/shaders/slice.spv", __DIR__)
+
   def slice(out, tensor, start_indices, lengths, strides) do
-    # Delegate to Nx-level slice on BinaryBackend; result stays on host
-    # (Tier 1 of SHAPE_C_PLAN.md — avoid the upload-back round trip).
-    # start_indices may be dynamic (scalar tensors); they must ride to
-    # BinaryBackend too, else Nx.slice calls BinaryBackend.to_binary on a
-    # VulkanoBackend index tensor and crashes (found via `doctest Nx`).
-    bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-    bin_idx = Enum.map(start_indices, &maybe_transfer_idx/1)
-    bin_result = Nx.slice(bin_in, bin_idx, lengths, strides: strides)
-    host_result(out, bin_result)
+    t = ensure_on_backend(tensor)
+    eb = element_bytes(t.type)
+    rank = tuple_size(t.shape)
+
+    # GPU strided copy when starts are static integers, the dtype is 4/8-byte,
+    # and rank 1..4. Dynamic (tensor) starts, sub-word dtypes and higher rank
+    # host-fall-back. (Dynamic starts must transfer to BinaryBackend too, else
+    # Nx.slice calls BinaryBackend.to_binary on a VulkanoBackend index — a bug
+    # found via `doctest Nx`.)
+    if Enum.all?(start_indices, &is_integer/1) and rem(eb, 4) == 0 and
+         match?(%__MODULE__{}, t.data) and rank >= 1 and rank <= 4 do
+      gpu_slice(out, t, start_indices, strides, eb)
+    else
+      bin_in = Nx.backend_transfer(t, Nx.BinaryBackend)
+      bin_idx = Enum.map(start_indices, &maybe_transfer_idx/1)
+      host_result(out, Nx.slice(bin_in, bin_idx, lengths, strides: strides))
+    end
+  end
+
+  defp gpu_slice(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, starts, strides, eb) do
+    rank = tuple_size(out.shape)
+    ews = div(eb, 4)
+
+    params =
+      for v <-
+            [rank, ews] ++
+              pad4(Tuple.to_list(sshape)) ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(starts) ++
+              pad4(strides),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+
+    :ok = Nx.Vulkan.NativeV.apply_slice(out_ref, in_ref, params_ref, n, rank, @slice_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # ---------------------------------------------------------------- sampler-path host fallbacks

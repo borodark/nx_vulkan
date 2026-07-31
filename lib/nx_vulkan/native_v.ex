@@ -99,6 +99,14 @@ defmodule Nx.Vulkan.NativeV do
   def cast(_out, _a, _n, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Strided slice (type-generic u32-word copy). Bindings in/out/params; params is
+  [rank, ews, S[4], O[4], start[4], stride[4]] int32 (ews = element_bytes/4);
+  `n` = output element count. Keeps static-start slices on the GPU.
+  """
+  def apply_slice(_out, _in, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Broadcasting select: out = pred ? t : f. Bindings pred/t/f/out/params; params
   is [rank, out[4], pred[4], t[4], f[4]] int32; `n` = output element count. pred
   is u8 (read as u32 words in the shader). Keeps masking / where / relu-grad on

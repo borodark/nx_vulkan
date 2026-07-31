@@ -1,0 +1,53 @@
+#version 450
+
+// Strided slice as a type-generic copy: out[o] = in[start + o*stride], one
+// thread per output element, copying `ews` u32 words per element (element_bytes
+// / 4). Works for any 4/8-byte dtype (f32/f64/s32/s64/…); 1/2-byte types and
+// dynamic (tensor) starts host-fall-back. rank <= 4.
+//
+// Params: [rank, ews, S[4], O[4], start[4], stride[4]] where S = source dims,
+// O = output dims, start/stride are per-dim (static, non-negative).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; };
+layout(std430, binding = 2) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    uint S[4];
+    uint O[4];
+    uint st[4];
+    uint sd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        S[i] = uint(prm[2 + i]);
+        O[i] = uint(prm[6 + i]);
+        st[i] = uint(prm[10 + i]);
+        sd[i] = uint(prm[14 + i]);
+    }
+
+    uint idx = gid;
+    uint sidx = 0u;
+    uint sstride = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = O[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        uint srcc = st[d] + coord * sd[d];
+        sidx += srcc * sstride;
+        sstride *= S[d];
+    }
+
+    for (uint w = 0u; w < ews; ++w) {
+        o[gid * ews + w] = inp[sidx * ews + w];
+    }
+}
