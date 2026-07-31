@@ -1500,6 +1500,53 @@ fn apply_gather<'a>(
     }
 }
 
+/// Generic JIT-shader dispatch (thrust 3 — the Defn fusion compiler). Runs a
+/// runtime-generated shader whose layout is: input buffers at bindings
+/// 0..k-1, output buffer at binding k, push constant {n = element count}.
+/// `in_refs` is the ordered list of input buffers the codegen assigned to
+/// bindings 0..k-1. One dispatch replaces a whole fused elementwise chain.
+#[rustler::nif(schedule = "DirtyIo")]
+fn dispatch_generated<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_refs: Vec<ResourceArc<VulkanoTensor>>,
+    n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let mut writes: Vec<WriteDescriptorSet> = in_refs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| WriteDescriptorSet::buffer(i as u32, r.buf.clone()))
+            .collect();
+        writes.push(WriteDescriptorSet::buffer(
+            in_refs.len() as u32,
+            out_ref.buf.clone(),
+        ));
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            writes,
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise dtype cast (e.g. f32<->f64). Bindings: in at 0, out at 1 (which
 /// may have a different element size). Push: uint n (element count). The shader
 /// determines the source/dest types; no op_code.
@@ -2318,6 +2365,7 @@ rustler::init!(
         apply_slice,
         apply_pad,
         apply_gather,
+        dispatch_generated,
         apply_select,
         apply_compare,
         apply_binary_broadcast,
