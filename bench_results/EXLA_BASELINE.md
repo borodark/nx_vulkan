@@ -31,6 +31,42 @@ from keeping the forward on the GPU — no more host round-trips for bias/relu/
 softmax. Still ~130x over pure-Elixir Binary. The remaining EXLA edge is the
 reduction (`sum` 5.6x) and its compiled/fused kernels — thrust 3.
 
+## Thrust-3 parallel fused reduce (2026-07-31, @ 7ef2c8a) — RTX 3060 Ti
+
+The fusion compiler's parallel workgroup-per-slot tree reduce, validated on the
+Ampere box (device: RTX 3060 Ti). Fused = `Nx.Defn.jit(_, compiler:
+Nx.Vulkan.Compiler)`; exact to BinaryBackend (err 0.0).
+
+```
+workload                       eager ms   fused ms   speedup
+sum(a*b) 256x256                 12.13      2.18       5.55x
+sum(a*b) 1024x1024              103.67     15.82       6.55x
+sum(tanh(a*b+a)) 512x512         45.79     15.82       2.89x
+sum axes:[1] 2048x256 (many)      3.89      3.49       1.11x  (eager fallback)
+```
+
+Speedups are smaller than the GT 650M's (9.9x / 27x / 8.5x) because Ampere's
+eager path is relatively much faster — the fused kernel is the same win, the
+baseline it beats is higher. Elementwise-fusion bench on the same box: the 10-op
+n=1e6 chain is 31.35 -> 23.30 ms (1.35x, vs 3.62x on Kepler — same reason).
+
+### Vulkano vs EXLA head-to-head on `Nx.sum` (f32, RTX 3060 Ti)
+
+```
+shape        Vulkano eager   Vulkano fused   EXLA JIT
+256x256        7.89 ms         1.05 ms        0.708 ms
+1024x1024    117.28 ms         8.26 ms        0.475 ms
+```
+
+The fused reduce takes `sum 256x256` from ~11x behind EXLA (eager) to **~1.5x**
+(1.05 vs 0.708 ms) — most of the gap closed. EXLA's compiled reduction still
+leads, more so at 1024x1024; note EXLA's 1024² (0.475) being *faster* than its
+own 256² (0.708) means those absolute figures are XLA launch-overhead-bound, not
+throughput-bound, so read them as "EXLA still ahead on tiny reductions," not a
+17x throughput deficit. Correctness: Vulkano fused == eager exactly; EXLA within
+f32 tolerance. (OTP differs between the pure-nx_vulkan run (kerl 26) and the
+EXLA/bench249 run (kerl 27) per each harness's config.)
+
 ## Read
 
 **VulkanoBackend is in EXLA's league for eager execution** — same order of
