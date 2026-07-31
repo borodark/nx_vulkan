@@ -147,21 +147,23 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [0, 1]
     end
 
-    test "clip result is on BinaryBackend" do
+    # clip now composes from GPU broadcast min/max (thrust 2) — it stays on
+    # VulkanoBackend for same-type f32/f64 rather than host round-tripping.
+    test "clip (f32) stays on VulkanoBackend and is correct" do
       a = v(f32([-1.0, 0.5, 1.5, 3.0]))
       lo = v(Nx.tensor(0.0, type: :f32, backend: Nx.BinaryBackend))
       hi = v(Nx.tensor(2.0, type: :f32, backend: Nx.BinaryBackend))
       r = Nx.clip(a, lo, hi)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0.0, 0.5, 1.5, 2.0]
     end
 
-    test "clip with mixed-backend bounds" do
+    test "clip with mixed-backend bounds (bounds transferred to GPU)" do
       a = v(f32([-5.0, 0.0, 5.0]))
       lo = Nx.tensor(-1.0, type: :f32, backend: Nx.BinaryBackend)
       hi = Nx.tensor(1.0, type: :f32, backend: Nx.BinaryBackend)
       r = Nx.clip(a, lo, hi)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [-1.0, 0.0, 1.0]
     end
   end

@@ -960,10 +960,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # GPU later; for now, Tier 1 host fallback keeps the contract.
   @impl true
   def clip(out, tensor, min, max) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    min_bin = Nx.backend_transfer(ensure_on_backend(min), Nx.BinaryBackend)
-    max_bin = Nx.backend_transfer(ensure_on_backend(max), Nx.BinaryBackend)
-    result = Nx.clip(t_bin, min_bin, max_bin)
+    # clip = min(max(t, lo), hi) — composes from our broadcast max/min, so it
+    # stays on the GPU (same-type f32/f64) instead of host round-tripping. Mixed
+    # types (e.g. f32 tensor, integer bounds) fall back per-op, still correct.
+    t = ensure_on_backend(tensor)
+    lo = ensure_on_backend(min)
+    hi = ensure_on_backend(max)
+    result = Nx.min(Nx.max(t, lo), hi)
     host_result(out, result)
   end
 
