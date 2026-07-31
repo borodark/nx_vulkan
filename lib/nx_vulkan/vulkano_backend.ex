@@ -183,8 +183,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
       else
         bspv = bcast_binary_spv(type)
 
-        if bspv != nil and unquote(code) != 4 and bcast_ok?(a_v, b_v, out) do
-          gpu_bcast_binary(out, a_v, b_v, unquote(code), bspv)
+        if bspv != nil and unquote(code) != 4 and bcast_shape_ok?(a_v, b_v, out) do
+          # coerce mismatched-dtype operands (e.g. f32 scalar with f64 tensor)
+          # to the output type on the GPU, else fall back.
+          case {coerce_to(a_v, type), coerce_to(b_v, type)} do
+            {%T{} = ca, %T{} = cb} -> gpu_bcast_binary(out, ca, cb, unquote(code), bspv)
+            _ -> binary_op_host_fallback(unquote(op), out, a_v, b_v)
+          end
         else
           binary_op_host_fallback(unquote(op), out, a_v, b_v)
         end
@@ -192,15 +197,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # Broadcast GPU path is valid when both operands are on this backend, match the
-  # output type, and the output rank is 1..4 (Nx guarantees a,b broadcast to
-  # out.shape). pow is excluded above (fp64 has no pow).
-  defp bcast_ok?(%T{type: t} = a, %T{type: t} = b, %T{shape: os, type: t}) do
+  # Broadcast GPU path is valid when both operands are on this backend and the
+  # output rank is 1..4 (Nx guarantees a,b broadcast to out.shape). Dtype
+  # mismatches are handled by coerce_to; pow is excluded above (fp64 has no pow).
+  defp bcast_shape_ok?(%T{} = a, %T{} = b, %T{shape: os}) do
     match?(%__MODULE__{}, a.data) and match?(%__MODULE__{}, b.data) and
       tuple_size(os) >= 1 and tuple_size(os) <= 4
   end
 
-  defp bcast_ok?(_a, _b, _out), do: false
+  defp bcast_shape_ok?(_a, _b, _out), do: false
 
   defp gpu_bcast_binary(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
     rank = tuple_size(out.shape)
@@ -722,6 +727,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
   defp cast_spv(_from, _to), do: nil
 
+  # Coerce an on-GPU tensor to `to` type via the f32<->f64 cast shader so
+  # mixed-dtype ops (e.g. f64 tensor + f32 scalar literal) stay on the GPU.
+  # Returns the coerced %T{} (a no-op when already `to`), or nil when the pair
+  # can't be cast on the GPU (non-f32/f64, or not on this backend).
+  defp coerce_to(%T{type: to} = t, to), do: t
+
+  defp coerce_to(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
+    case cast_spv(from, to) do
+      nil ->
+        nil
+
+      spv ->
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(to))
+        :ok = Nx.Vulkan.NativeV.cast(out_ref, ref, n, spv)
+        %{t | type: to, data: %__MODULE__{ref: out_ref, shape: shape, type: to}}
+    end
+  end
+
+  defp coerce_to(_t, _to), do: nil
+
   @impl true
   def as_type(%T{type: type} = out, %T{type: source_type, shape: shape, data: %__MODULE__{ref: ref}} = tensor) do
     cond do
@@ -757,17 +783,25 @@ defmodule Nx.Vulkan.VulkanoBackend do
     def unquote(op)(out, a, b) do
       a_v = ensure_on_backend(a)
       b_v = ensure_on_backend(b)
-      it = a_v.type
-      spv = compare_spv(it)
+      # comparison happens at the merged input type; coerce both operands to it
+      # (handles f64 tensor vs f32 scalar) then compare -> u8.
+      merged = Nx.Type.merge(a_v.type, b_v.type)
+      spv = compare_spv(merged)
 
-      if spv != nil and b_v.type == it and match?(%__MODULE__{}, a_v.data) and
-           match?(%__MODULE__{}, b_v.data) and tuple_size(out.shape) >= 1 and
-           tuple_size(out.shape) <= 4 do
-        gpu_compare(out, a_v, b_v, unquote(code), spv)
-      else
-        a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
-        b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
-        host_result(out, apply(Nx, unquote(op), [a_bin, b_bin]))
+      cast =
+        if spv != nil and match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data) and
+             tuple_size(out.shape) >= 1 and tuple_size(out.shape) <= 4 do
+          {coerce_to(a_v, merged), coerce_to(b_v, merged)}
+        end
+
+      case cast do
+        {%T{} = ca, %T{} = cb} ->
+          gpu_compare(out, ca, cb, unquote(code), spv)
+
+        _ ->
+          a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+          b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+          host_result(out, apply(Nx, unquote(op), [a_bin, b_bin]))
       end
     end
   end
@@ -813,18 +847,24 @@ defmodule Nx.Vulkan.VulkanoBackend do
     f = ensure_on_backend(on_false)
     spv = select_spv(type)
 
-    gpu? =
-      spv != nil and p.type == {:u, 8} and t.type == type and f.type == type and
-        match?(%__MODULE__{}, p.data) and match?(%__MODULE__{}, t.data) and
-        match?(%__MODULE__{}, f.data) and tuple_size(os) >= 1 and tuple_size(os) <= 4
+    shape_ok? =
+      spv != nil and p.type == {:u, 8} and match?(%__MODULE__{}, p.data) and
+        match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, f.data) and
+        tuple_size(os) >= 1 and tuple_size(os) <= 4
 
-    if gpu? do
-      gpu_select(out, p, t, f, spv)
-    else
-      pred_bin = Nx.backend_transfer(p, Nx.BinaryBackend)
-      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
-      f_bin = Nx.backend_transfer(f, Nx.BinaryBackend)
-      host_result(out, with_binary_backend(fn -> Nx.select(pred_bin, t_bin, f_bin) end))
+    # coerce the branches to the output type on the GPU (handles a f32 scalar 0.0
+    # against an f64 tensor); pred stays u8.
+    branches = if shape_ok?, do: {coerce_to(t, type), coerce_to(f, type)}
+
+    case branches do
+      {%T{} = ct, %T{} = cf} ->
+        gpu_select(out, p, ct, cf, spv)
+
+      _ ->
+        pred_bin = Nx.backend_transfer(p, Nx.BinaryBackend)
+        t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+        f_bin = Nx.backend_transfer(f, Nx.BinaryBackend)
+        host_result(out, with_binary_backend(fn -> Nx.select(pred_bin, t_bin, f_bin) end))
     end
   end
 
