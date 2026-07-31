@@ -128,19 +128,21 @@ Measured **3.62x** over eager per-op on a 10-op chain (GT 650M, n=1e6). Use:
 `Nx.Defn.jit(&fun/2, compiler: Nx.Vulkan.Compiler)`. `NXV_FUSE_DEBUG=1` logs the
 path per defn.
 
-**Increment 2 — fused elementwise→reduce: implemented but DISABLED by default.**
-`Codegen.emit_fused_reduce` + `dispatch_generated_reduce` NIF exist and are
-correct (opt in with `NXV_FUSE_REDUCE=1`), but the one-invocation-per-output-slot
-shader loops the reduce axis serially with an f64 accumulator — `reduce_size`x
-fewer threads than the eager path's fully-parallel elementwise stage — and
-measured **0.3–0.6x (slower)** in every regime on the Kepler fleet (full,
-per-axis, tall-skinny). So reductions stay on the faster eager path. The real
-fix is a **shared-memory parallel tree reduction** (workgroup reduce, two-pass or
-atomic for full reductions) — that's the actual thrust-3-reduce work; the current
-codegen is the scaffold for it.
+**Increment 2 — parallel fused elementwise→reduce: DONE.** `Codegen.emit_fused_reduce`
+emits a **workgroup-per-slot shared-memory tree reduce** (256 threads cooperate
+per output slot, f64 accumulator for sum), `dispatch_generated_reduce` launches
+one workgroup per slot. Enabled by default for the winning regime — a full
+reduction or contiguous last-axis reduce (`inner_stride == 1`) with few output
+slots (`reduce_beneficial?/3`). It beats even eager, whose own `reduce_axis` is
+one-thread-per-slot serial: **full `sum` 256² 9.9x, 1024² 27x, fused chain+reduce
+8.5x** over eager (GT 650M), exact to BinaryBackend. That takes Vulkano's `sum`
+256² from ~5.6x behind EXLA to ~1.4x. Many-slot / non-contiguous / short-axis
+reductions fall back to eager (already parallel) — no regressions. The first
+serial attempt regressed 0.3–0.6x everywhere; the parallel version is the fix.
 
-Next increments: (a) the parallel tree fused-reduce above (closes EXLA's `sum`
-5.6x gap — the last measured eager loss);
+Next increments: (a) extend the fused reduce to the many-slot regime (a
+grid-stride over slots so >65535-slot reductions and large-output per-axis cases
+also fuse) and `mean`/`product`;
 (b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
 (c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
 on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.

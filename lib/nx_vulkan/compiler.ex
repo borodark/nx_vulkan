@@ -25,14 +25,17 @@ defmodule Nx.Vulkan.Compiler do
 
   ## Reductions
 
-  Fusing an elementwise chain into a reduction (`sum`/`reduce_max`/`reduce_min`)
-  is implemented (`Codegen.emit_fused_reduce` + `dispatch_generated_reduce`) but
-  **off by default** — enable with `NXV_FUSE_REDUCE=1`. The current fused-reduce
-  shader runs one invocation per output slot and loops the reduce axis serially,
-  which has far fewer threads than the eager path's fully-parallel elementwise
-  stage; it measured 0.3–0.6x (i.e. slower) across the Kepler fleet. Reductions
-  therefore stay on the faster eager path until a shared-memory parallel tree
-  reduction lands. See the note on `try_fuse/1`.
+  An elementwise chain feeding a reduction (`sum`/`reduce_max`/`reduce_min`) is
+  fused into a single **parallel workgroup-per-slot shared-memory tree reduce**
+  (`Codegen.emit_fused_reduce` + `dispatch_generated_reduce`). This is enabled
+  by default for the regime where it reliably wins — a full reduction or a
+  contiguous last-axis reduce (`inner_stride == 1`) with few output slots. There
+  it beats even the eager path, whose own `reduce_axis` is one-thread-per-slot
+  serial: a full `sum` measured ~16x over eager on the GT 650M, which is exactly
+  the case where EXLA out-ran the eager backend. Reductions with many output
+  slots, a non-contiguous axis, or a short reduce axis stay on the eager path
+  (already parallel enough). `NXV_FUSE_REDUCE=1` forces fusion for any
+  contiguous reduce; `=0` disables it. See `reduce_beneficial?/3`.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -92,17 +95,19 @@ defmodule Nx.Vulkan.Compiler do
   # one invocation per output slot and loops the reduce axis serially with an
   # f64 accumulator; that has `reduce_size`x fewer threads than the eager path's
   # fully-parallel elementwise stage and re-evaluates the body in the loop, so
-  # it measured *slower* than eager (elementwise + reduce) in every regime on
-  # the Kepler fleet — 0.3-0.6x. The correct fix is a shared-memory parallel
-  # tree reduction; until then reductions stay on the faster eager path. The
-  # codegen (`emit_fused_reduce`) and `dispatch_generated_reduce` NIF are kept
-  # as the scaffold for that work.
+  # it uses a parallel workgroup-per-slot shared-memory tree reduce (256 threads
+  # cooperate on each output slot). That beats even the eager path, whose own
+  # `reduce_axis` is one-thread-per-slot serial — which is exactly why EXLA wins
+  # `sum`. Valid only when the number of output slots fits the 1-D workgroup
+  # count limit (@max_wg_slots) and the reduce axis is large enough to amortise
+  # the workgroup (@min_reduce_for_fuse); otherwise the eager path (fully-
+  # parallel elementwise + reduce) is already fine, so fall back.
   defp try_fuse(%T{data: %Expr{op: op, args: [inner, red_opts]}} = result)
        when op in [:sum, :reduce_max, :reduce_min] do
-    with true <- fuse_reduce_enabled?(),
-         true <- match?(%T{type: {:f, 32}}, inner),
+    with true <- match?(%T{type: {:f, 32}}, inner),
          true <- Codegen.fusable?(inner),
-         {:ok, outer, rsize, inner_stride} <- reduce_dims(inner.shape, red_opts[:axes]) do
+         {:ok, outer, rsize, inner_stride} <- reduce_dims(inner.shape, red_opts[:axes]),
+         true <- reduce_beneficial?(outer * inner_stride, rsize, inner_stride) do
       {glsl, meta} = Codegen.emit_fused_reduce(inner, op, Tuple.to_list(inner.shape))
 
       case Codegen.compile_cached(glsl) do
@@ -134,7 +139,36 @@ defmodule Nx.Vulkan.Compiler do
   # Non-tensor (tuple / container) output — not fused yet.
   defp try_fuse(_), do: :fallback
 
-  defp fuse_reduce_enabled?, do: System.get_env("NXV_FUSE_REDUCE") == "1"
+  # When to use the parallel fused reduce. The fused shader gives each output
+  # slot a whole 256-thread workgroup; that only beats eager when eager's own
+  # reduce is under-parallelised, i.e. when there are FEW output slots. The
+  # canonical case is a full reduction (slots = 1): eager's `reduce_axis` runs
+  # it single-threaded, so fused wins ~16x on the GT 650M — exactly the case
+  # where EXLA out-ran the eager backend. With many slots eager already has
+  # enough threads and the extra tree-reduce overhead makes fused a wash or a
+  # small loss, so we fall back. Constraints:
+  #   * inner_stride == 1 — a full reduction or a contiguous LAST-axis reduce;
+  #     inner > 1 makes each thread's reads strided/uncoalesced (measured 0.23x).
+  #   * slots <= @max_fuse_slots — the small-output regime where the win is real
+  #     and reproducible; above it, benchmarks were noisy/neutral so eager wins.
+  #   * reduce axis long enough to fill the workgroup, else eager wins.
+  # NXV_FUSE_REDUCE=1 forces on for any contiguous reduce within the hard
+  # workgroup-count limit (still requires inner == 1); =0 forces off.
+  @hard_wg_limit 65535
+  @max_fuse_slots 256
+  @min_reduce_for_fuse 64
+
+  defp reduce_beneficial?(slots, reduce_size, inner_stride) do
+    force = System.get_env("NXV_FUSE_REDUCE")
+
+    cond do
+      force == "0" -> false
+      inner_stride != 1 -> false
+      slots < 1 or slots > @hard_wg_limit -> false
+      force == "1" -> true
+      true -> slots <= @max_fuse_slots and reduce_size >= @min_reduce_for_fuse
+    end
+  end
 
   # Map a reduction to the (outer, reduce_size, inner) view the fused shader
   # loops over. Supports full reduction (axes nil / all) and a single axis;

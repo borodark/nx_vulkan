@@ -117,14 +117,17 @@ defmodule Nx.Vulkan.CompilerTest do
       assert close?(got, Nx.reduce_max(Nx.multiply(a, b)))
     end
 
-    test "single-axis sum (both axes), elementwise fused in" do
+    test "contiguous last-axis sum (inner==1) fuses; non-last axis falls back" do
       m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), {2, 3})
-      g0 = jit(fn x -> Nx.sum(x, axes: [0]) end).(m)
+      # axes:[1] -> inner_stride 1 -> parallel tree reduce on the GPU
       g1 = jit(fn x -> Nx.sum(Nx.multiply(x, 2.0), axes: [1]) end).(m)
-      assert match?(%VulkanoBackend{}, g0.data)
       assert match?(%VulkanoBackend{}, g1.data)
-      assert Nx.to_flat_list(g0) == [5.0, 7.0, 9.0]
       assert Nx.to_flat_list(g1) == [12.0, 30.0]
+
+      # axes:[0] -> inner_stride 3 (uncoalesced) -> falls back, still correct
+      g0 = jit(fn x -> Nx.sum(x, axes: [0]) end).(m)
+      refute match?(%VulkanoBackend{}, g0.data)
+      assert Nx.to_flat_list(g0) == [5.0, 7.0, 9.0]
     end
 
     test "multi-axis reduction still falls back" do
