@@ -77,8 +77,34 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
-  describe "reductions fall back to the eager path by default (faster than serial fused reduce)" do
-    test "full sum falls back but is correct" do
+  # With BinaryBackend inputs the fused path lands on VulkanoBackend while the
+  # eager fallback stays on BinaryBackend, so the result backend distinguishes
+  # which path ran.
+  defp biota(shape, scale \\ 1.0),
+    do: Nx.iota(shape, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(scale)
+
+  describe "reductions fuse on the GPU by default in the winning regimes" do
+    test "few-slot full reduction with a large axis fuses" do
+      v = biota({256})
+      got = jit(fn x -> Nx.sum(x) end).(v)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.sum(v))
+    end
+
+    test "many-slot wide contiguous reduce fuses (grid-stride over slots)" do
+      m = biota({2048, 256}, 1.0e-4)
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.shape(got) == {2048}
+      # both the fused (f64 acc) and eager-GPU paths accumulate in f64; compare
+      # to the eager GPU reduce for an apples-to-apples numeric check
+      ref = Nx.sum(Nx.backend_transfer(m, VulkanoBackend), axes: [1])
+      assert close?(got, ref)
+    end
+  end
+
+  describe "reductions fall back to the eager path outside the winning regimes (still correct)" do
+    test "short-axis full reduction falls back" do
       a = bin([1.0, 2.0, 3.0, 4.0])
       b = bin([1.0, 1.0, 1.0, 1.0])
       got = jit(fn x, y -> Nx.sum(Nx.multiply(x, y)) end).(a, b)
@@ -86,11 +112,24 @@ defmodule Nx.Vulkan.CompilerTest do
       assert Nx.to_number(got) == 10.0
     end
 
-    test "single-axis sum falls back but is correct" do
+    test "short single-axis sum falls back" do
       m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), {2, 3})
       got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
       refute match?(%VulkanoBackend{}, got.data)
       assert Nx.to_flat_list(got) == [6.0, 15.0]
+    end
+
+    test "narrow-reduce many-slot falls back (reduce_size < 256)" do
+      m = biota({4096, 8})
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.sum(m, axes: [1]))
+    end
+
+    test "mid slot-count falls back (256 < slots < 2048)" do
+      m = biota({1024, 512}, 1.0e-4)
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
     end
   end
 

@@ -27,15 +27,16 @@ defmodule Nx.Vulkan.Compiler do
 
   An elementwise chain feeding a reduction (`sum`/`reduce_max`/`reduce_min`) is
   fused into a single **parallel workgroup-per-slot shared-memory tree reduce**
-  (`Codegen.emit_fused_reduce` + `dispatch_generated_reduce`). This is enabled
-  by default for the regime where it reliably wins — a full reduction or a
-  contiguous last-axis reduce (`inner_stride == 1`) with few output slots. There
-  it beats even the eager path, whose own `reduce_axis` is one-thread-per-slot
-  serial: a full `sum` measured ~16x over eager on the GT 650M, which is exactly
-  the case where EXLA out-ran the eager backend. Reductions with many output
-  slots, a non-contiguous axis, or a short reduce axis stay on the eager path
-  (already parallel enough). `NXV_FUSE_REDUCE=1` forces fusion for any
-  contiguous reduce; `=0` disables it. See `reduce_beneficial?/3`.
+  (`Codegen.emit_fused_reduce` + `dispatch_generated_reduce`), which grid-strides
+  over output slots so one launch handles any slot count. It beats even the eager
+  path, whose own `reduce_axis` is one-thread-per-slot serial. Enabled by default
+  for a contiguous reduce (`inner_stride == 1`) in the two regimes measured to
+  win on the fleet: few output slots (full reductions — ~8-27x over eager on the
+  GT 650M, the case where EXLA had out-run the eager backend) and many slots with
+  a wide reduce axis (~3.8-4.2x). The noisy middle and narrow-reduce many-slot
+  cases fall back to the already-parallel eager path — no regressions.
+  `NXV_FUSE_REDUCE=1` forces fusion for any contiguous reduce; `=0` disables it.
+  See `reduce_beneficial?/3`.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -140,23 +141,26 @@ defmodule Nx.Vulkan.Compiler do
   defp try_fuse(_), do: :fallback
 
   # When to use the parallel fused reduce. The fused shader gives each output
-  # slot a whole 256-thread workgroup; that only beats eager when eager's own
-  # reduce is under-parallelised, i.e. when there are FEW output slots. The
-  # canonical case is a full reduction (slots = 1): eager's `reduce_axis` runs
-  # it single-threaded, so fused wins ~16x on the GT 650M — exactly the case
-  # where EXLA out-ran the eager backend. With many slots eager already has
-  # enough threads and the extra tree-reduce overhead makes fused a wash or a
-  # small loss, so we fall back. Constraints:
-  #   * inner_stride == 1 — a full reduction or a contiguous LAST-axis reduce;
-  #     inner > 1 makes each thread's reads strided/uncoalesced (measured 0.23x).
-  #   * slots <= @max_fuse_slots — the small-output regime where the win is real
-  #     and reproducible; above it, benchmarks were noisy/neutral so eager wins.
-  #   * reduce axis long enough to fill the workgroup, else eager wins.
-  # NXV_FUSE_REDUCE=1 forces on for any contiguous reduce within the hard
-  # workgroup-count limit (still requires inner == 1); =0 forces off.
-  @hard_wg_limit 65535
-  @max_fuse_slots 256
-  @min_reduce_for_fuse 64
+  # slot a 256-thread workgroup doing a coalesced tree reduce, and grid-strides
+  # over slots so it handles any slot count. It requires a contiguous reduce
+  # (inner_stride == 1 — full reduction or last-axis; inner > 1 is uncoalesced,
+  # measured 0.23x). Two regimes measured to win on the fleet:
+  #
+  #   * Few-slot (slots <= @few_slots, reduce >= @min_reduce_few): the eager
+  #     `reduce_axis` is one-thread-per-slot, so with few slots it is badly
+  #     under-parallelised. Fused wins hugest here — a full reduction (slots=1)
+  #     is ~8-27x over eager, the case where EXLA had out-run the eager backend.
+  #   * Many-slot wide reduce (slots >= @many_slots, reduce >= @min_reduce_many):
+  #     enough slots to saturate the GPU AND a reduce axis wide enough to use a
+  #     full workgroup. Coalesced + saves the intermediate buffer → 3.8-4.2x.
+  #
+  # The middle (few_slots < slots < many_slots) and narrow-reduce many-slot cases
+  # are noisy/neutral, so they fall back to the already-parallel eager path — no
+  # regressions. NXV_FUSE_REDUCE=1 forces any contiguous reduce; =0 disables.
+  @few_slots 256
+  @min_reduce_few 64
+  @many_slots 2048
+  @min_reduce_many 256
 
   defp reduce_beneficial?(slots, reduce_size, inner_stride) do
     force = System.get_env("NXV_FUSE_REDUCE")
@@ -164,9 +168,11 @@ defmodule Nx.Vulkan.Compiler do
     cond do
       force == "0" -> false
       inner_stride != 1 -> false
-      slots < 1 or slots > @hard_wg_limit -> false
+      slots < 1 -> false
       force == "1" -> true
-      true -> slots <= @max_fuse_slots and reduce_size >= @min_reduce_for_fuse
+      slots <= @few_slots -> reduce_size >= @min_reduce_few
+      slots >= @many_slots -> reduce_size >= @min_reduce_many
+      true -> false
     end
   end
 

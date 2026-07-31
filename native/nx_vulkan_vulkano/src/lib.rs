@@ -1587,11 +1587,12 @@ fn dispatch_generated_reduce<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        // Parallel tree reduce: ONE workgroup per output slot (each workgroup's
-        // 256 threads cooperatively reduce that slot's axis). Dispatch exactly
-        // `outer*inner` workgroups — the caller guarantees this is within
-        // maxComputeWorkGroupCount[0].
+        // Parallel tree reduce: one workgroup per output slot (each workgroup's
+        // 256 threads cooperatively reduce that slot's axis). The shader
+        // grid-strides over slots, so cap the launch at 65535 workgroups
+        // (maxComputeWorkGroupCount[0]) and let the loop cover any excess.
         let n_slots = outer * inner;
+        let groups = n_slots.min(65535).max(1);
         run_single_dispatch(
             context,
             &cached,
@@ -1602,7 +1603,7 @@ fn dispatch_generated_reduce<'a>(
                 inner,
                 op: 0,
             },
-            [n_slots, 1, 1],
+            [groups, 1, 1],
         )
     })();
 

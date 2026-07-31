@@ -140,9 +140,16 @@ one-thread-per-slot serial: **full `sum` 256² 9.9x, 1024² 27x, fused chain+red
 reductions fall back to eager (already parallel) — no regressions. The first
 serial attempt regressed 0.3–0.6x everywhere; the parallel version is the fix.
 
-Next increments: (a) extend the fused reduce to the many-slot regime (a
-grid-stride over slots so >65535-slot reductions and large-output per-axis cases
-also fuse) and `mean`/`product`;
+**Increment 2b — many-slot fused reduce: DONE.** The workgroup-per-slot tree
+reduce now grid-strides over output slots (one launch handles any slot count,
+past the 65535 workgroup limit). `reduce_beneficial?/3` enables it by default in
+two contiguous-reduce (`inner_stride == 1`) regimes measured to win: few slots
+(full reductions, 8-27x) and many slots with a wide reduce axis (slots >= 2048,
+reduce >= 256 → ~4.4x, grid-stride). The noisy middle and narrow-reduce many-slot
+cases fall back to eager (no regressions).
+
+Next increments: (a) `mean`/`product` fusion, and a warp-per-slot variant for the
+narrow-reduce many-slot case (reduce < 256) still on the eager path;
 (b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
 (c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
 on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.

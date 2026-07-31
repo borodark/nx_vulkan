@@ -209,27 +209,34 @@ defmodule Nx.Vulkan.Codegen do
     #{helper_functions()}
 
     void main() {
-        uint slot = gl_WorkGroupID.x;
         uint tid = gl_LocalInvocationID.x;
-        uint outr = slot / pc.inner;
-        uint inr = slot % pc.inner;
-        uint base = outr * pc.reduce_size * pc.inner + inr;
+        uint slots = pc.outer * pc.inner;
+        // Grid-stride over output slots so one launch handles any slot count,
+        // not just <= maxComputeWorkGroupCount[0]. Each workgroup fully reduces
+        // one slot (coalesced: its 256 threads stride consecutive elements),
+        // then moves to the next slot gl_NumWorkGroups.x away.
+        for (uint slot = gl_WorkGroupID.x; slot < slots; slot += gl_NumWorkGroups.x) {
+            uint outr = slot / pc.inner;
+            uint inr = slot % pc.inner;
+            uint base = outr * pc.reduce_size * pc.inner + inr;
 
-        #{acc_type} acc = #{init};
-        for (uint r = tid; r < pc.reduce_size; r += #{@wg_size}u) {
-            uint idx = base + r * pc.inner;
+            #{acc_type} acc = #{init};
+            for (uint r = tid; r < pc.reduce_size; r += #{@wg_size}u) {
+                uint idx = base + r * pc.inner;
     #{loads}
-            #{accumulate}
-        }
-        sdata[tid] = acc;
-        barrier();
+                #{accumulate}
+            }
+            sdata[tid] = acc;
+            barrier();
 
-        for (uint s = #{div(@wg_size, 2)}u; s > 0u; s >>= 1u) {
-            if (tid < s) sdata[tid] = #{combine};
+            for (uint s = #{div(@wg_size, 2)}u; s > 0u; s >>= 1u) {
+                if (tid < s) sdata[tid] = #{combine};
+                barrier();
+            }
+
+            if (tid == 0u) out_buf[slot] = #{store};
             barrier();
         }
-
-        if (tid == 0u) out_buf[slot] = #{store};
     }
     """
 
