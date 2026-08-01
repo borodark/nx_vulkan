@@ -528,6 +528,76 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "multi-output (tuple) graphs fuse into one shared stage schedule" do
+    setup do
+      x = Nx.iota({8, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({4, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      %{x: x, w: w}
+    end
+
+    test "two outputs share a matmul: {x@W, relu(x@W)}", %{x: x, w: w} do
+      fun = fn a, ww ->
+        y = Nx.dot(a, ww)
+        {y, Nx.max(y, 0.0)}
+      end
+
+      {g1, g2} = jit(fun).(x, w)
+      {r1, r2} = fun.(x, w)
+      assert ms_close?(g1, r1)
+      assert ms_close?(g2, r2)
+    end
+
+    test "layernorm stats {mean, variance} share the sum stage" do
+      x = Nx.iota({4, 64}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+
+      fun = fn a ->
+        m = Nx.mean(a, axes: [1], keep_axes: true)
+        d = Nx.subtract(a, m)
+        v = Nx.mean(Nx.multiply(d, d), axes: [1], keep_axes: true)
+        {m, v}
+      end
+
+      {gm, gv} = jit(fun).(x)
+      {rm, rv} = fun.(x)
+      assert ms_close?(gm, rm)
+      assert ms_close?(gv, rv)
+    end
+
+    test "softmax stats {exp(x-max), sum(exp(x-max))}" do
+      x = Nx.iota({4, 64}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+
+      fun = fn a ->
+        n = Nx.exp(Nx.subtract(a, Nx.reduce_max(a, axes: [1], keep_axes: true)))
+        {n, Nx.sum(n, axes: [1], keep_axes: true)}
+      end
+
+      {gn, gs} = jit(fun).(x)
+      {rn, rs} = fun.(x)
+      assert ms_close?(gn, rn)
+      assert ms_close?(gs, rs)
+    end
+
+    test "output that is a passthrough parameter: {x, relu(x@W)}", %{x: x, w: w} do
+      fun = fn a, ww -> {a, Nx.max(Nx.dot(a, ww), 0.0)} end
+      {g1, g2} = jit(fun).(x, w)
+      {r1, r2} = fun.(x, w)
+      assert ms_close?(g1, r1)
+      assert ms_close?(g2, r2)
+    end
+
+    test "a non-schedulable leaf drops the whole tuple to the Evaluator (still correct)" do
+      a = Nx.iota({2, 3, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      b = Nx.iota({2, 4, 5}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      # a batched dot is unschedulable -> the tuple falls back whole
+      fun = fn x, y -> {Nx.dot(x, [2], [0], y, [1], [0]), Nx.add(x, 1.0)} end
+      {g1, g2} = jit(fun).(a, b)
+      refute match?(%VulkanoBackend{}, g1.data)
+      {r1, r2} = fun.(a, b)
+      assert Nx.to_flat_list(g1) == Nx.to_flat_list(r1)
+      assert close?(g2, r2)
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr

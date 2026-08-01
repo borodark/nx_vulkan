@@ -46,7 +46,7 @@ defmodule Nx.Vulkan.Compiler do
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Tensor, as: T
-  alias Nx.Defn.Expr
+  alias Nx.Defn.{Expr, Composite}
   alias Nx.Vulkan.{Codegen, VulkanoBackend, NativeV}
 
   @impl true
@@ -85,6 +85,10 @@ defmodule Nx.Vulkan.Compiler do
           {:ok_plan, stages, out_sid, template} ->
             debug(fn -> "MULTISTAGE: #{length(stages)} stages, root=#{op_of(result)}" end)
             fn [params] -> [run_plan(stages, out_sid, template, params)] end
+
+          {:ok_plan_multi, stages, out_refs, template} ->
+            debug(fn -> "MULTISTAGE(multi): #{length(stages)} stages, #{length(out_refs)} outputs" end)
+            fn [params] -> [run_plan_multi(stages, out_refs, template, params)] end
 
           :fallback ->
             debug(fn -> "fallback (evaluator): root=#{inspect(op_of(result))}" end)
@@ -202,7 +206,39 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
-  defp try_multistage(_), do: :fallback
+  # non-f32 single tensor: not schedulable
+  defp try_multistage(%T{}), do: :fallback
+
+  # Composite output (a tuple / container of tensors): plan every leaf through ONE
+  # shared stage schedule, so subexpressions common to several outputs are computed
+  # once (memoised) and each output is a distinct buffer. Enables e.g. `{mean, var}`
+  # layernorm stats or `{softmax, logsumexp}` to fuse in a single graph instead of
+  # falling back to the Evaluator. Requires every leaf to be f32 and at least one to
+  # carry a boundary; any unschedulable leaf drops the whole tuple to the Evaluator.
+  defp try_multistage(result) do
+    leaves = Composite.flatten_list([result])
+
+    if leaves != [] and Enum.all?(leaves, &match?(%T{type: {:f, 32}}, &1)) and
+         Enum.any?(leaves, &has_boundary?/1) do
+      try do
+        {template, {refs_rev, state}} =
+          Composite.traverse(
+            result,
+            {[], %{stages: [], memo: %{}, counter: 0}},
+            fn leaf, {refs, st} ->
+              {ref, st} = plan_node(leaf, st)
+              {Nx.to_template(leaf), {[ref | refs], st}}
+            end
+          )
+
+        {:ok_plan_multi, Enum.reverse(state.stages), Enum.reverse(refs_rev), template}
+      catch
+        :unschedulable -> :fallback
+      end
+    else
+      :fallback
+    end
+  end
 
   # plan_node returns {ref, state} where ref is {:param, pidx} | {:stage, sid}.
   defp plan_node(%T{data: %Expr{id: id}} = node, state) do
@@ -413,6 +449,23 @@ defmodule Nx.Vulkan.Compiler do
     values = Enum.reduce(stages, %{}, &exec_stage(&1, &2, params))
     out_ref = Map.fetch!(values, {:stage, out_sid})
     %{template | data: %VulkanoBackend{ref: out_ref, shape: template.shape, type: template.type}}
+  end
+
+  # Multi-output: run the shared schedule once, then rebuild the output container
+  # by walking its template in the same leaf order the plan collected `out_refs`,
+  # binding each leaf to its resolved buffer (a stage output, or a passthrough
+  # param). A ref shared by several outputs (memoised) aliases the same buffer.
+  defp run_plan_multi(stages, out_refs, template, params) do
+    values = Enum.reduce(stages, %{}, &exec_stage(&1, &2, params))
+
+    {result, {[], _}} =
+      Composite.traverse(template, {out_refs, values}, fn leaf, {[ref | rest], vals} ->
+        {buf, vals} = resolve(ref, vals, params)
+        data = %VulkanoBackend{ref: buf, shape: leaf.shape, type: leaf.type}
+        {%{leaf | data: data}, {rest, vals}}
+      end)
+
+    result
   end
 
   defp exec_stage({:dot, sid, a_ref, b_ref, m, n, k}, values, params) do
