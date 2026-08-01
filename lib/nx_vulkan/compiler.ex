@@ -93,27 +93,50 @@ defmodule Nx.Vulkan.Compiler do
 
   # ---- fusion decision -------------------------------------------------
 
-  # Reduce root (sum / reduce_max / reduce_min) over a fusable elementwise inner
-  # → one fused shader that evaluates the chain and reduces in a single dispatch.
-  #
-  # DISABLED BY DEFAULT (opt in with NXV_FUSE_REDUCE=1). The current shader does
-  # one invocation per output slot and loops the reduce axis serially with an
-  # f64 accumulator; that has `reduce_size`x fewer threads than the eager path's
-  # fully-parallel elementwise stage and re-evaluates the body in the loop, so
-  # it uses a parallel workgroup-per-slot shared-memory tree reduce (256 threads
-  # cooperate on each output slot). That beats even the eager path, whose own
-  # `reduce_axis` is one-thread-per-slot serial — which is exactly why EXLA wins
-  # `sum`. Valid only when the number of output slots fits the 1-D workgroup
-  # count limit (@max_wg_slots) and the reduce axis is large enough to amortise
-  # the workgroup (@min_reduce_for_fuse); otherwise the eager path (fully-
-  # parallel elementwise + reduce) is already fine, so fall back.
+  # A reduce root (sum / product / reduce_max / reduce_min) over a fusable
+  # elementwise inner → one fused shader that evaluates the chain and reduces in
+  # a single parallel dispatch (see `fuse_reduce/5` and `Codegen`).
   defp try_fuse(%T{data: %Expr{op: op, args: [inner, red_opts]}} = result)
-       when op in [:sum, :reduce_max, :reduce_min] do
+       when op in [:sum, :product, :reduce_max, :reduce_min] do
+    fuse_reduce(result, inner, op, red_opts[:axes], nil)
+  end
+
+  # `mean` lowers to `divide(sum(inner, axes), n)` — fuse it as a `sum` with a
+  # `/n` post-scale baked into the shader. Any other divide falls through to the
+  # general elementwise path.
+  defp try_fuse(
+         %T{
+           data: %Expr{
+             op: :divide,
+             args: [
+               %T{data: %Expr{op: :sum, args: [inner, red_opts]}},
+               %T{data: %Expr{op: :constant, args: [n]}}
+             ]
+           }
+         } = result
+       )
+       when is_number(n) do
+    case fuse_reduce(result, inner, :sum, red_opts[:axes], n) do
+      :fallback -> fuse_elementwise(result)
+      ok -> ok
+    end
+  end
+
+  defp try_fuse(%T{data: %Expr{}} = result), do: fuse_elementwise(result)
+
+  # Non-tensor (tuple / container) output — not fused yet.
+  defp try_fuse(_), do: :fallback
+
+  # Compile a fused reduce for `reduce_op(inner, axes)` with an optional `/scale`
+  # post-op (for mean). Falls back unless the inner is a same-shape f32
+  # elementwise chain, the reduce is contiguous, and `reduce_beneficial?/3` says
+  # the parallel reduce wins on this GPU.
+  defp fuse_reduce(result, inner, reduce_op, axes, scale) do
     with true <- match?(%T{type: {:f, 32}}, inner),
          true <- Codegen.fusable?(inner),
-         {:ok, outer, rsize, inner_stride} <- reduce_dims(inner.shape, red_opts[:axes]),
+         {:ok, outer, rsize, inner_stride} <- reduce_dims(inner.shape, axes),
          true <- reduce_beneficial?(outer * inner_stride, rsize, inner_stride) do
-      {glsl, meta} = Codegen.emit_fused_reduce(inner, op, Tuple.to_list(inner.shape))
+      {glsl, meta} = Codegen.emit_fused_reduce(inner, reduce_op, scale)
 
       case Codegen.compile_cached(glsl) do
         {:ok, spv_path} ->
@@ -128,7 +151,7 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
-  defp try_fuse(%T{data: %Expr{}} = result) do
+  defp fuse_elementwise(result) do
     if Codegen.fusable?(result) do
       {glsl, meta} = Codegen.emit_elementwise(result)
 
@@ -140,9 +163,6 @@ defmodule Nx.Vulkan.Compiler do
       :fallback
     end
   end
-
-  # Non-tensor (tuple / container) output — not fused yet.
-  defp try_fuse(_), do: :fallback
 
   # When to use the parallel fused reduce. The fused shader gives each output
   # slot a 256-thread workgroup doing a coalesced tree reduce, and grid-strides

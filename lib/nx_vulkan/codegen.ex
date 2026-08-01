@@ -142,9 +142,9 @@ defmodule Nx.Vulkan.Codegen do
     {glsl, %{param_order: param_order, n_inputs: k}}
   end
 
-  # Reduce ops we fuse: op -> {glsl accumulator init, combine}. `sum` uses an
-  # f64 accumulator to match BinaryBackend's summation order/precision.
-  @reduce_ops [:sum, :reduce_max, :reduce_min]
+  # Reduce ops we fuse: op -> {glsl accumulator init, combine}. `sum`/`product`
+  # accumulate in f64 for precision; `mean` fuses as `sum` with a post-scale.
+  @reduce_ops [:sum, :product, :reduce_max, :reduce_min]
 
   @doc "True if `op` is a reduction this module can fuse an elementwise inner into."
   def reduce_op?(op), do: op in @reduce_ops
@@ -165,9 +165,12 @@ defmodule Nx.Vulkan.Codegen do
   (`maxComputeWorkGroupCount[0]`, typically 65535) — the caller gates on that.
   Dispatch **`outer*inner` workgroups** (one per slot), NOT `ceil(slots/256)`.
 
+  `scale` (a number or nil) applies a final `/ scale` to each output slot — this
+  is how `mean` fuses: `divide(sum(...), n)` becomes a fused sum scaled by `1/n`.
+
   Returns `{glsl, %{param_order: [...], n_inputs: k}}`.
   """
-  def emit_fused_reduce(%T{} = inner, reduce_op, _dims) when reduce_op in @reduce_ops do
+  def emit_fused_reduce(%T{} = inner, reduce_op, scale \\ nil) when reduce_op in @reduce_ops do
     param_order = inner |> collect_param_indices(MapSet.new()) |> Enum.sort()
     binding_of = param_order |> Enum.with_index() |> Map.new()
     {temp_lines, root} = emit_dag(inner, binding_of)
@@ -191,7 +194,9 @@ defmodule Nx.Vulkan.Codegen do
     temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
 
     %{acc_type: acc_type, init: init, shared_init: shared_init, accumulate: accumulate,
-      combine: combine, store: store} = reduce_kind(reduce_op, root)
+      combine: combine, store: base_store} = reduce_kind(reduce_op, root)
+
+    store = if scale, do: "(#{base_store}) / #{glsl_float(scale)}", else: base_store
 
     glsl = """
     #version 450
@@ -259,6 +264,17 @@ defmodule Nx.Vulkan.Codegen do
       shared_init: "0.0lf",
       accumulate: "acc += double(#{root});",
       combine: "sdata[tid] + sdata[tid + s]",
+      store: "float(sdata[0])"
+    }
+  end
+
+  defp reduce_kind(:product, root) do
+    %{
+      acc_type: "double",
+      init: "1.0lf",
+      shared_init: "1.0lf",
+      accumulate: "acc *= double(#{root});",
+      combine: "sdata[tid] * sdata[tid + s]",
       store: "float(sdata[0])"
     }
   end

@@ -75,6 +75,14 @@ defmodule Nx.Vulkan.CompilerTest do
       assert Nx.shape(got) == {2, 3}
       assert close?(got, ref)
     end
+
+    test "plain divide (not a mean) still fuses as an elementwise op", %{a: a, b: b} do
+      # divide/2 whose LHS is not a reduce must route through the elementwise
+      # path, not the mean special-case.
+      got = jit(fn x, y -> Nx.divide(x, Nx.add(y, 1.0)) end).(a, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.divide(a, Nx.add(b, 1.0)))
+    end
   end
 
   # With BinaryBackend inputs the fused path lands on VulkanoBackend while the
@@ -185,6 +193,33 @@ defmodule Nx.Vulkan.CompilerTest do
       got = jit(fn x, y -> Nx.reduce_max(Nx.multiply(x, y)) end).(a, b)
       assert match?(%VulkanoBackend{}, got.data)
       assert close?(got, Nx.reduce_max(Nx.multiply(a, b)))
+    end
+
+    test "product of a chain fuses and is correct" do
+      a = bin([1.0, 2.0, 3.0, 4.0])
+      got = jit(fn x -> Nx.product(Nx.add(x, 1.0)) end).(a)
+      assert match?(%VulkanoBackend{}, got.data)
+      # (1+1)(2+1)(3+1)(4+1) = 2*3*4*5 = 120
+      assert close?(got, Nx.tensor(120.0))
+    end
+
+    test "mean fuses as sum with a /n post-scale" do
+      a = bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+      full = jit(fn x -> Nx.mean(x) end).(a)
+      assert match?(%VulkanoBackend{}, full.data)
+      assert close?(full, Nx.tensor(3.5))
+
+      m = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), {2, 3})
+      rows = jit(fn x -> Nx.mean(x, axes: [1]) end).(m)
+      assert match?(%VulkanoBackend{}, rows.data)
+      assert close?(rows, Nx.tensor([2.0, 5.0]))
+    end
+
+    test "mean of an elementwise chain fuses (single dispatch)" do
+      a = bin([1.0, 2.0, 3.0, 4.0])
+      got = jit(fn x -> Nx.mean(Nx.multiply(x, 2.0)) end).(a)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.tensor(5.0))
     end
 
     test "contiguous last-axis sum (inner==1) fuses; non-last axis falls back" do

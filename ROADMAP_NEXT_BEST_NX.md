@@ -162,10 +162,19 @@ verified: the GT 650M classifies `:weak` and fuses `{2048,256}` by default, a
 strong GPU falls back. Best of both: Kepler gets the 4.4x, Ampere avoids the
 0.44x regression, no env flag needed.
 
-Next increments: (a) `mean`/`product` fusion;
-(b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
-(c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
-on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.
+**Increment 2d — CSE + `mean`/`product` fusion: DONE.** (i) `Codegen.emit_dag/2`
+linearises the elementwise DAG into SSA temporaries (post-order, id-deduped topo
+sort), so a fan-out node is computed once instead of re-inlined — naive inlining
+was exponential (8 chained squarings → 255 multiplies; 12 → 4095, enough to choke
+glslangValidator; now 8 / 12 temps). Applies to both the elementwise and
+fused-reduce bodies. (ii) `product` is fused as a reduce (f64 mul accumulator);
+`mean` (which lowers to `divide(sum(...), n)`) is fused as a `sum` with a `/n`
+post-scale baked into the shader — plain `divide` still routes through the
+elementwise path. All correct vs BinaryBackend.
+
+Next increments: (a) multi-stage split at non-fusable boundaries (dot/conv)
+keeping intermediates on-device; (b) tuple/multi-output; (c) f64 + broadcasting
+between shapes; (d) a warp-per-slot reduce for the narrow-reduce many-slot case.
 
 ### 4. Package, document, position
 Hex release, README with the portability pitch + a support matrix (OS × GPU
