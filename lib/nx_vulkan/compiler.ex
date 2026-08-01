@@ -252,6 +252,46 @@ defmodule Nx.Vulkan.Compiler do
     {ref, memoize(state, node, ref)}
   end
 
+  # A reduction (sum / product / reduce_max / reduce_min) materialised as its own
+  # stage: the parallel tree reduce over the fusable inner chain writes a small
+  # GPU buffer that downstream stages consume (broadcast-aware). This lets
+  # `x - mean(x)` (layernorm / softmax) fuse — the sum becomes a reduce stage and
+  # the surrounding subtract/divide fuse as a region reading it. `mean` needs no
+  # special case: it lowers to `divide(sum, n)`, the divide fuses in the consuming
+  # region and the `sum` falls here as a leaf. Gated by the SAME fleet-validated
+  # `reduce_beneficial?` as the standalone reduce, so multi-stage never forces a
+  # reduce the fleet says regresses on this GPU — it falls back whole-graph to the
+  # Evaluator instead (still correct), keeping behaviour consistent with try_fuse.
+  defp plan_new(%T{data: %Expr{op: op, args: [inner, red_opts]}} = node, state)
+       when op in [:sum, :product, :reduce_max, :reduce_min] do
+    unless match?(%T{type: {:f, 32}}, inner), do: throw(:unschedulable)
+
+    {outer, rsize, inner_stride} =
+      case reduce_dims(inner.shape, red_opts[:axes]) do
+        {:ok, o, r, i} -> {o, r, i}
+        :error -> throw(:unschedulable)
+      end
+
+    unless reduce_beneficial?(outer * inner_stride, rsize, inner_stride),
+      do: throw(:unschedulable)
+
+    leaves = collect_leaves(inner)
+
+    {inputs, input_refs, state} =
+      Enum.reduce(leaves, {[], [], state}, fn leaf, {ins, refs, st} ->
+        {key, lref, st} = plan_leaf(leaf, st)
+        {ins ++ [{key, leaf.shape}], refs ++ [lref], st}
+      end)
+
+    {glsl, _} = Codegen.emit_reduce_region(inner, op, inputs)
+    spv = compile!(glsl)
+    n_out = max(Nx.size(node), 1)
+    {sid, state} = new_sid(state)
+    state = add_stage(state, {:reduce, sid, spv, input_refs, {outer, rsize, inner_stride}, n_out})
+    ref = {:stage, sid}
+    {ref, memoize(state, node, ref)}
+  end
+
   defp plan_new(%T{data: %Expr{op: op}} = node, state) do
     unless fusable_elementwise?(node), do: throw(:unschedulable)
     # A maximal fusable region; its leaves (params + non-fusable nodes) become
@@ -308,7 +348,9 @@ defmodule Nx.Vulkan.Compiler do
   defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)
   defp fusable_elementwise?(_), do: false
 
-  defp has_boundary?(%T{data: %Expr{op: op}}) when op in [:dot, :conv], do: true
+  defp has_boundary?(%T{data: %Expr{op: op}})
+       when op in [:dot, :conv, :sum, :product, :reduce_max, :reduce_min],
+       do: true
 
   defp has_boundary?(%T{data: %Expr{args: args}}) do
     Enum.any?(args, fn
@@ -412,6 +454,16 @@ defmodule Nx.Vulkan.Compiler do
 
     {:ok, out} = NativeV.buf_alloc(p.n * p.cout * p.o_total * p.ebytes)
     :ok = NativeV.conv_gemm(out, col_ref, k_buf, p.n, p.cout, p.o_total, p.k_cols, p.gemm_spv)
+    Map.put(values, {:stage, sid}, out)
+  end
+
+  # reduce stage: parallel workgroup-per-slot tree reduce (dispatch_generated_reduce)
+  # over the fusable inner chain, writing outer*inner slots. Inputs may be earlier
+  # stages' buffers.
+  defp exec_stage({:reduce, sid, spv, input_refs, {outer, rsize, inner}, n_out}, values, params) do
+    {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
+    {:ok, out} = NativeV.buf_alloc(n_out * 4)
+    :ok = NativeV.dispatch_generated_reduce(out, in_refs, outer, rsize, inner, spv)
     Map.put(values, {:stage, sid}, out)
   end
 

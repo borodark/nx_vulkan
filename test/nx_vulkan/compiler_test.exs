@@ -472,6 +472,62 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "multi-stage split (reduce boundaries) — layernorm/softmax patterns fuse" do
+    setup do
+      # {4, 64}: reduce over axis 1 -> outer=4, rsize=64, inner=1, slots=4 (in the
+      # beneficial few-slot regime: slots <= 256, rsize >= 64).
+      x = Nx.iota({4, 64}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      %{x: x}
+    end
+
+    test "mean-centering x - mean(x, axis) (layernorm numerator) fuses", %{x: x} do
+      fun = fn a -> Nx.subtract(a, Nx.mean(a, axes: [1], keep_axes: true)) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+      assert Nx.shape(got) == {4, 64}
+    end
+
+    test "full-reduction centering x - mean(x) (scalar mean) fuses", %{x: x} do
+      fun = fn a -> Nx.subtract(a, Nx.mean(a)) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+    end
+
+    test "row normalize x / sum(x, axis) fuses", %{x: x} do
+      fun = fn a -> Nx.divide(a, Nx.sum(a, axes: [1], keep_axes: true)) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+    end
+
+    test "softmax numerator exp(x - max(x, axis)) fuses (reduce_max boundary)", %{x: x} do
+      fun = fn a -> Nx.exp(Nx.subtract(a, Nx.reduce_max(a, axes: [1], keep_axes: true))) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+    end
+
+    test "two reduce stages: sum(x, axis) + reduce_max(x, axis)", %{x: x} do
+      fun = fn a ->
+        Nx.add(
+          Nx.sum(a, axes: [1], keep_axes: true),
+          Nx.reduce_max(a, axes: [1], keep_axes: true)
+        )
+      end
+
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+      assert Nx.shape(got) == {4, 1}
+    end
+
+    test "non-beneficial reduce (short axis) falls back whole-graph but stays correct" do
+      # rsize = 8 < @min_reduce_few (64) -> reduce_beneficial? false -> :unschedulable
+      x = Nx.iota({4, 8}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      fun = fn a -> Nx.subtract(a, Nx.mean(a, axes: [1], keep_axes: true)) end
+      got = jit(fun).(x)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, fun.(x))
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr

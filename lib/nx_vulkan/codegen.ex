@@ -194,13 +194,26 @@ defmodule Nx.Vulkan.Codegen do
 
   Returns `{glsl, %{param_order: [...], n_inputs: k}}`.
   """
-  def emit_fused_reduce(%T{shape: in_shape} = inner, reduce_op, scale \\ nil)
+  def emit_fused_reduce(%T{} = inner, reduce_op, scale \\ nil)
       when reduce_op in @reduce_ops do
     inputs = param_inputs(inner)
+    {glsl, meta} = emit_reduce_region(inner, reduce_op, inputs, scale)
+    param_order = Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end)
+    {glsl, Map.put(meta, :param_order, param_order)}
+  end
+
+  @doc """
+  Like `emit_fused_reduce/3` but for a reduction region whose leaf inputs are
+  given explicitly as `inputs` (`{{:param, pidx} | {:stage, node_id}, shape}`) —
+  so the reduced `inner` chain may read earlier stages' output buffers, not just
+  parameters. Used by the multi-stage split to materialise a reduce as a stage
+  (e.g. `mean(x)` in an `x - mean(x)` layernorm graph). Returns `{glsl, %{n_inputs: k}}`.
+  """
+  def emit_reduce_region(%T{shape: in_shape} = inner, reduce_op, inputs, scale \\ nil)
+      when reduce_op in @reduce_ops do
     ctx = build_ctx(inputs)
     {temp_lines, root} = emit_dag(inner, ctx)
     k = length(inputs)
-    param_order = Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end)
 
     decls = input_decls(k)
 
@@ -269,7 +282,7 @@ defmodule Nx.Vulkan.Codegen do
     """
 
     _ = shared_init
-    {glsl, %{param_order: param_order, n_inputs: k}}
+    {glsl, %{n_inputs: k}}
   end
 
   # Per-op GLSL fragments for the parallel tree reduce. `root` is the GLSL ref to
