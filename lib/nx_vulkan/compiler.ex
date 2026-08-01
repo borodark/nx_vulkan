@@ -35,10 +35,12 @@ defmodule Nx.Vulkan.Compiler do
   over eager on the GT 650M and ~2.8-6.7x on the RTX 3060 Ti (the case where EXLA
   had out-run the eager backend). The many-slot wide-reduce regime is grid-
   stride-capable and wins on the weak Kepler eager path (~4.4x) but REGRESSES on
-  the much stronger Ampere eager path (0.44x), so it is hardware-dependent and
-  NOT a default — opt in with `NXV_FUSE_REDUCE=1`. Non-contiguous, short-axis and
-  mid/many-slot reductions otherwise fall back to the already-parallel eager path
-  — no regressions. `=0` disables all reduce fusion. See `reduce_beneficial?/3`.
+  the much stronger Ampere eager path (0.44x), so it is hardware-dependent: it is
+  auto-enabled only on GPUs `Nx.Vulkan.Device` classifies `:weak` (integrated /
+  software / older low-end discrete), and stays off on strong GPUs. Force it on
+  any GPU with `NXV_FUSE_REDUCE=1`. Non-contiguous, short-axis and mid-slot
+  reductions fall back to the already-parallel eager path — no regressions. `=0`
+  disables all reduce fusion. See `reduce_beneficial?/3` and `Nx.Vulkan.Device`.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -154,14 +156,18 @@ defmodule Nx.Vulkan.Compiler do
   # Ampere GPUs — a full reduction (slots=1) is ~8-27x over eager on the GT 650M
   # and ~2.8-6.7x on the RTX 3060 Ti (the case where EXLA had out-run eager).
   #
-  # The many-slot wide-reduce regime (slots >= 2048, reduce >= 256) is grid-
-  # stride-capable and wins ~4.4x on Kepler, but it REGRESSES on Ampere (0.44x):
-  # a 3060 Ti's eager one-thread-per-slot path is already well-fed by thousands
-  # of slots, leaving the fused kernel no headroom, only overhead. So it is NOT
-  # a default — hardware-dependent. It stays available via NXV_FUSE_REDUCE=1 for
-  # weak-GPU deployments / experimentation. `=0` disables all reduce fusion.
+  # The many-slot wide-reduce regime (slots >= @many_slots, reduce >=
+  # @min_reduce_many) is grid-stride-capable and wins ~4.4x on Kepler, but it
+  # REGRESSES on Ampere (0.44x): a 3060 Ti's eager one-thread-per-slot path is
+  # already well-fed by thousands of slots, leaving the fused kernel no headroom,
+  # only overhead. So it is hardware-dependent — auto-enabled only on GPUs
+  # `Nx.Vulkan.Device` classifies `:weak` (integrated / software / older
+  # low-end discrete), where it's measured to win. Force on any GPU with
+  # NXV_FUSE_REDUCE=1; `=0` disables all reduce fusion.
   @few_slots 256
   @min_reduce_few 64
+  @many_slots 2048
+  @min_reduce_many 256
 
   defp reduce_beneficial?(slots, reduce_size, inner_stride) do
     force = System.get_env("NXV_FUSE_REDUCE")
@@ -171,7 +177,9 @@ defmodule Nx.Vulkan.Compiler do
       inner_stride != 1 -> false
       slots < 1 -> false
       force == "1" -> true
-      true -> slots <= @few_slots and reduce_size >= @min_reduce_few
+      slots <= @few_slots -> reduce_size >= @min_reduce_few
+      slots >= @many_slots -> reduce_size >= @min_reduce_many and Nx.Vulkan.Device.weak?()
+      true -> false
     end
   end
 

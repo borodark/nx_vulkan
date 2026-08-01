@@ -130,12 +130,37 @@ defmodule Nx.Vulkan.CompilerTest do
       refute match?(%VulkanoBackend{}, got.data)
     end
 
-    test "many-slot wide reduce falls back by default (hardware-dependent, opt-in only)" do
-      # Wins ~4.4x on Kepler but regresses ~0.44x on Ampere, so not a default.
+    test "many-slot wide reduce falls back on STRONG GPUs (regresses there)" do
+      # Wins ~4.4x on Kepler but regresses ~0.44x on Ampere; on a strong GPU it
+      # must fall back regardless of the test host's actual device.
+      System.put_env("NXV_GPU_CLASS", "strong")
+      on_exit(fn -> System.delete_env("NXV_GPU_CLASS") end)
       m = biota({2048, 256}, 1.0e-4)
       got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
       refute match?(%VulkanoBackend{}, got.data)
       assert close?(got, Nx.sum(m, axes: [1]))
+    end
+  end
+
+  describe "many-slot wide reduce auto-enables on weak GPUs (device-class check)" do
+    setup do
+      System.put_env("NXV_GPU_CLASS", "weak")
+      on_exit(fn -> System.delete_env("NXV_GPU_CLASS") end)
+      :ok
+    end
+
+    test "fuses on a weak GPU and is correct" do
+      m = biota({2048, 256}, 1.0e-4)
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.shape(got) == {2048}
+      assert close?(got, Nx.sum(Nx.backend_transfer(m, VulkanoBackend), axes: [1]))
+    end
+
+    test "narrow reduce still falls back even on a weak GPU (reduce < 256)" do
+      m = biota({4096, 8})
+      got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
+      refute match?(%VulkanoBackend{}, got.data)
     end
   end
 

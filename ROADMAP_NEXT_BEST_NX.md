@@ -152,9 +152,18 @@ both Kepler (8-27x) and Ampere (2.8-6.7x). The many-slot path is available via
 `NXV_FUSE_REDUCE=1` for weak-GPU deployments. Lesson: validate perf heuristics
 across the fleet, not just the local box — the win/loss crossover is HW-specific.
 
-Next increments: (a) a runtime device-class check (device_name / vendor) to
-auto-enable the many-slot regime only on weak GPUs; (b) `mean`/`product` fusion;
-(c) common-subexpression sharing so fan-out nodes aren't recomputed inline;
+**Increment 2c — device-class auto-enable: DONE.** `Nx.Vulkan.Device.class/0`
+labels the active GPU `:weak | :strong` (heuristic over the Vulkan device
+name+type: software/integrated/virtual and the older low-end discrete NVIDIA
+GeForce GT line are `:weak`; GTX/RTX and unknown discrete are `:strong`, cached
+in `persistent_term`; `NXV_GPU_CLASS=weak|strong` overrides). The compiler now
+auto-enables the many-slot fused reduce ONLY on `:weak` GPUs, where it wins —
+verified: the GT 650M classifies `:weak` and fuses `{2048,256}` by default, a
+strong GPU falls back. Best of both: Kepler gets the 4.4x, Ampere avoids the
+0.44x regression, no env flag needed.
+
+Next increments: (a) `mean`/`product` fusion;
+(b) common-subexpression sharing so fan-out nodes aren't recomputed inline;
 (c) multi-stage split at non-fusable boundaries (dot/conv) keeping intermediates
 on-device; (d) tuple/multi-output; (e) f64 + broadcasting between shapes.
 
