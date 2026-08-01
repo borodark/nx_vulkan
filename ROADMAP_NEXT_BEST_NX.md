@@ -172,9 +172,20 @@ fused-reduce bodies. (ii) `product` is fused as a reduce (f64 mul accumulator);
 post-scale baked into the shader — plain `divide` still routes through the
 elementwise path. All correct vs BinaryBackend.
 
+**Increment 2e — broadcasting in the fused kernel: DONE.** Nx.Defn carries
+mismatched-shape operands directly (no `:broadcast` node), and in a valid
+elementwise tree every node broadcasts to the root shape — so only the PARAMETER
+loads need to be broadcast-aware. `Codegen.emit_loads` loads each input at its
+NumPy-broadcast source index computed from `i` (or the reduce index `idx`) with
+the compile-time-constant shapes baked into the GLSL; full-shape inputs still
+load linearly. `fusable?` relaxed via `broadcasts_to?/2`. Covers scalar-tensor
+scale, row `{n}` / column `{m,1}` vectors, and n-d broadcast, in both the
+elementwise and reduce paths. Common NN pattern `relu(x*scale{n} + bias{n})` now
+fuses to ONE dispatch: 1.47x over eager on the GT 650M, exact.
+
 Next increments: (a) multi-stage split at non-fusable boundaries (dot/conv)
-keeping intermediates on-device; (b) tuple/multi-output; (c) f64 + broadcasting
-between shapes; (d) a warp-per-slot reduce for the narrow-reduce many-slot case.
+keeping intermediates on-device; (b) tuple/multi-output; (c) f64 fusion;
+(d) a warp-per-slot reduce for the narrow-reduce many-slot case.
 
 ### 4. Package, document, position
 Hex release, README with the portability pitch + a support matrix (OS × GPU

@@ -85,6 +85,52 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "broadcasting inputs fuse (NumPy-style, baked-in shapes)" do
+    setup do
+      x = Nx.iota({4, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.add(1.0)
+      %{x: x}
+    end
+
+    test "row-vector bias: x{4,3} + b{3}", %{x: x} do
+      b = bin([10.0, 20.0, 30.0])
+      got = jit(fn a, v -> Nx.add(a, v) end).(x, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.shape(got) == {4, 3}
+      assert close?(got, Nx.add(x, b))
+    end
+
+    test "column-vector: x{4,3} + c{4,1}", %{x: x} do
+      c = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0]), {4, 1})
+      got = jit(fn a, v -> Nx.add(a, v) end).(x, c)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.add(x, c))
+    end
+
+    test "scalar-tensor scale: x * s{}", %{x: x} do
+      s = Nx.tensor(2.5, type: :f32, backend: Nx.BinaryBackend)
+      got = jit(fn a, v -> Nx.multiply(a, v) end).(x, s)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.multiply(x, s))
+    end
+
+    test "chained broadcast: tanh(x*c{4,1} + b{3})", %{x: x} do
+      c = Nx.reshape(bin([1.0, 2.0, 3.0, 4.0]), {4, 1})
+      b = bin([0.1, 0.2, 0.3])
+      got = jit(fn a, cc, bb -> Nx.tanh(Nx.add(Nx.multiply(a, cc), bb)) end).(x, c, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.tanh(Nx.add(Nx.multiply(x, c), b)))
+    end
+
+    test "3D broadcast: x{2,3,4} + v{4}" do
+      x = Nx.iota({2, 3, 4}, type: :f32, backend: Nx.BinaryBackend)
+      v = bin([1.0, 2.0, 3.0, 4.0])
+      got = jit(fn a, vv -> Nx.add(a, vv) end).(x, v)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.shape(got) == {2, 3, 4}
+      assert close?(got, Nx.add(x, v))
+    end
+  end
+
   # With BinaryBackend inputs the fused path lands on VulkanoBackend while the
   # eager fallback stays on BinaryBackend, so the result backend distinguishes
   # which path ran.
@@ -291,6 +337,17 @@ defmodule Nx.Vulkan.CompilerTest do
       # CSE: the interior node is emitted as a temp, then referenced as the root.
       assert glsl =~ "float t0 = (v1 - v0);"
       assert glsl =~ "out_buf[i] = t0;"
+    end
+
+    test "broadcast param loads at its mapped index; full-shape param loads at i" do
+      alias Nx.Defn.Expr
+      x = Expr.parameter(Nx.template({4, 3}, :f32), :root, 0)
+      bias = Expr.parameter(Nx.template({3}, :f32), :root, 1)
+      {glsl, _} = Codegen.emit_elementwise(Nx.add(x, bias))
+      # full-shape input loads linearly; the {3} row-vector loads at i % 3
+      assert glsl =~ "float v0 = buf0[i];"
+      assert glsl =~ "((i / 1u) % 3u)"
+      assert glsl =~ "float v1 = buf1["
     end
 
     test "CSE — a fan-out node is computed once, not re-inlined (no exponential blowup)" do

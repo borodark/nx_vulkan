@@ -67,19 +67,23 @@ defmodule Nx.Vulkan.Codegen do
 
   def fusable?(_), do: false
 
+  # In a valid elementwise tree every node's shape broadcasts to the root shape
+  # (NumPy rules), so nodes may be smaller than `out_shape` — a param `{n}` added
+  # to `{m, n}`, a scalar-tensor scale, etc. The codegen loads each param at its
+  # broadcast-mapped index; interior nodes are unchanged (see `emit_loads`).
   defp fusable_node?(%T{data: %Expr{op: :parameter}, type: {:f, 32}, shape: s}, out_shape),
-    do: s == out_shape
+    do: broadcasts_to?(s, out_shape)
 
   defp fusable_node?(%T{data: %Expr{op: :constant, args: [c]}, shape: {}}, _out_shape),
     do: is_number(c)
 
   defp fusable_node?(%T{data: %Expr{op: op, args: [a]}, type: {:f, 32}, shape: s}, out_shape)
        when is_map_key(@unary_ops, op),
-       do: s == out_shape and fusable_node?(a, out_shape)
+       do: broadcasts_to?(s, out_shape) and fusable_node?(a, out_shape)
 
   defp fusable_node?(%T{data: %Expr{op: op, args: [a, b]}, type: {:f, 32}, shape: s}, out_shape)
        when is_map_key(@binary_ops, op),
-       do: s == out_shape and operand_fusable?(a, out_shape) and operand_fusable?(b, out_shape)
+       do: broadcasts_to?(s, out_shape) and operand_fusable?(a, out_shape) and operand_fusable?(b, out_shape)
 
   defp fusable_node?(_, _), do: false
 
@@ -90,14 +94,26 @@ defmodule Nx.Vulkan.Codegen do
 
   defp operand_fusable?(node, out_shape), do: fusable_node?(node, out_shape)
 
+  # NumPy broadcast: `s` right-aligns to `o`, each dim 1 or equal.
+  defp broadcasts_to?(s, o) do
+    sl = Tuple.to_list(s)
+    ol = Tuple.to_list(o)
+
+    length(sl) <= length(ol) and
+      (List.duplicate(1, length(ol) - length(sl)) ++ sl)
+      |> Enum.zip(ol)
+      |> Enum.all?(fn {sd, od} -> sd == 1 or sd == od end)
+  end
+
   @doc """
   Emit a GLSL compute shader for a fusable elementwise expression.
 
   Returns `{glsl, %{param_order: [param_index, ...], n_inputs: k}}` where
   `param_order[b]` is the runtime argument index bound to input binding `b`.
   """
-  def emit_elementwise(%T{} = expr) do
-    param_order = expr |> collect_param_indices(MapSet.new()) |> Enum.sort()
+  def emit_elementwise(%T{shape: out_shape} = expr) do
+    param_shapes = collect_params(expr, %{})
+    param_order = param_shapes |> Map.keys() |> Enum.sort()
     binding_of = param_order |> Enum.with_index() |> Map.new()
     {temp_lines, root} = emit_dag(expr, binding_of)
     k = length(param_order)
@@ -110,12 +126,7 @@ defmodule Nx.Vulkan.Codegen do
       end)
       |> Enum.join("\n")
 
-    loads =
-      param_order
-      |> Enum.with_index()
-      |> Enum.map(fn {_pidx, b} -> "    float v#{b} = buf#{b}[i];" end)
-      |> Enum.join("\n")
-
+    loads = emit_loads(param_order, param_shapes, out_shape, "i", "    ")
     temps = Enum.map_join(temp_lines, "\n", &("    " <> &1))
 
     glsl = """
@@ -170,8 +181,10 @@ defmodule Nx.Vulkan.Codegen do
 
   Returns `{glsl, %{param_order: [...], n_inputs: k}}`.
   """
-  def emit_fused_reduce(%T{} = inner, reduce_op, scale \\ nil) when reduce_op in @reduce_ops do
-    param_order = inner |> collect_param_indices(MapSet.new()) |> Enum.sort()
+  def emit_fused_reduce(%T{shape: in_shape} = inner, reduce_op, scale \\ nil)
+      when reduce_op in @reduce_ops do
+    param_shapes = collect_params(inner, %{})
+    param_order = param_shapes |> Map.keys() |> Enum.sort()
     binding_of = param_order |> Enum.with_index() |> Map.new()
     {temp_lines, root} = emit_dag(inner, binding_of)
     k = length(param_order)
@@ -184,12 +197,9 @@ defmodule Nx.Vulkan.Codegen do
       end)
       |> Enum.join("\n")
 
-    # load each input at the running reduce index `idx`
-    loads =
-      param_order
-      |> Enum.with_index()
-      |> Enum.map(fn {_pidx, b} -> "            float v#{b} = buf#{b}[idx];" end)
-      |> Enum.join("\n")
+    # load each input at the running reduce index `idx` (broadcast-aware: the
+    # pre-reduction shape `in_shape` is the coordinate space)
+    loads = emit_loads(param_order, param_shapes, in_shape, "idx", "            ")
 
     temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
 
@@ -369,17 +379,58 @@ defmodule Nx.Vulkan.Codegen do
     if String.contains?(s, [".", "e", "E"]), do: s, else: s <> ".0"
   end
 
-  defp collect_param_indices(%T{data: %Expr{op: :parameter, args: [pidx]}}, acc),
-    do: MapSet.put(acc, pidx)
+  # Map each distinct parameter index -> its shape (for broadcast-aware loads).
+  defp collect_params(%T{data: %Expr{op: :parameter, args: [pidx]}, shape: shape}, acc),
+    do: Map.put(acc, pidx, shape)
 
-  defp collect_param_indices(%T{data: %Expr{args: args}}, acc) do
+  defp collect_params(%T{data: %Expr{args: args}}, acc) do
     Enum.reduce(args, acc, fn
-      %T{data: %Expr{}} = child, a -> collect_param_indices(child, a)
+      %T{data: %Expr{}} = child, a -> collect_params(child, a)
       _, a -> a
     end)
   end
 
-  defp collect_param_indices(_, acc), do: acc
+  defp collect_params(_, acc), do: acc
+
+  # ---- broadcast-aware parameter loads ---------------------------------
+
+  # Emit `float vB = bufB[<index>];` for each input binding. Inputs whose shape
+  # equals `out_shape` load at the flat index `ivar` directly; broadcast inputs
+  # (scalar, row/col vector, any dim == 1) load at their NumPy-broadcast source
+  # index, computed from `ivar` with the (compile-time-constant) shapes baked in.
+  defp emit_loads(param_order, param_shapes, out_shape, ivar, indent) do
+    param_order
+    |> Enum.with_index()
+    |> Enum.map(fn {pidx, b} ->
+      s = Map.fetch!(param_shapes, pidx)
+      idx = if s == out_shape, do: ivar, else: broadcast_index(s, out_shape, ivar)
+      "#{indent}float v#{b} = buf#{b}[#{idx}];"
+    end)
+    |> Enum.join("\n")
+  end
+
+  # GLSL uint expression for the flat source index of a broadcast input of shape
+  # `s` when the output flat index is `ivar` and the output shape is `o`. Only
+  # dims where `s` is not 1 contribute (row-major suffix strides, baked in).
+  defp broadcast_index(s, o, ivar) do
+    ol = Tuple.to_list(o)
+    r = length(ol)
+    sl = Tuple.to_list(s)
+    aligned = List.duplicate(1, r - length(sl)) ++ sl
+
+    terms =
+      for d <- 0..(r - 1), Enum.at(aligned, d) != 1 do
+        out_suffix = ol |> Enum.drop(d + 1) |> Enum.product()
+        in_suffix = aligned |> Enum.drop(d + 1) |> Enum.product()
+        coord = "((#{ivar} / #{out_suffix}u) % #{Enum.at(ol, d)}u)"
+        if in_suffix == 1, do: coord, else: "#{coord} * #{in_suffix}u"
+      end
+
+    case terms do
+      [] -> "0u"
+      _ -> "(" <> Enum.join(terms, " + ") <> ")"
+    end
+  end
 
   # ---- SPIR-V compile + cache ------------------------------------------
 
