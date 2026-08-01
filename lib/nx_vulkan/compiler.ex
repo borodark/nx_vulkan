@@ -13,7 +13,7 @@ defmodule Nx.Vulkan.Compiler do
   it generates one GLSL shader for the whole chain, compiles it once (cached by
   source hash), and returns a function that uploads the inputs, issues ONE
   `dispatch_generated` call, and hands back a GPU-resident result. Anything it
-  can't fuse — tuple outputs, reductions, dot/conv, broadcasting between
+  can't fuse — tuple outputs, reductions, batched/non-f32 dot/conv, broadcasting between
   differing shapes, non-f32 — falls through to `Nx.Defn.Evaluator`, so results
   are always correct; the worst case is "no fusion, same as eager."
 
@@ -171,20 +171,22 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
-  # ---- multi-stage split (dot boundaries) ------------------------------
+  # ---- multi-stage split (dot / conv boundaries) -----------------------
   #
-  # When a graph isn't a single fusable region (it contains a `dot`), split it
-  # into a schedule of stages that run on-device with GPU-resident intermediates:
-  # each `dot` becomes a matmul stage, and each maximal fusable elementwise region
-  # becomes ONE generated shader whose leaf inputs may be earlier stages' output
-  # buffers. This fuses whole NN layers — e.g. `relu(x @ W + b)` runs as a matmul
-  # stage + a single fused `max(dot + b, 0)` stage instead of matmul + broadcast-
-  # add + relu as three separate eager dispatches.
+  # When a graph isn't a single fusable region (it contains a `dot` or `conv`),
+  # split it into a schedule of stages that run on-device with GPU-resident
+  # intermediates: each `dot` becomes a matmul stage, each `conv` an im2col+GEMM
+  # stage, and each maximal fusable elementwise region becomes ONE generated
+  # shader whose leaf inputs may be earlier stages' output buffers. This fuses
+  # whole NN layers — e.g. `relu(x @ W + b)` runs as a matmul stage + a single
+  # fused `max(dot + b, 0)` stage instead of matmul + broadcast-add + relu as
+  # three separate eager dispatches; a CNN layer `relu(conv(x, k) + b)` fuses the
+  # same way around the conv.
 
   @matmul_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
 
   defp try_multistage(%T{type: {:f, 32}} = result) do
-    if has_dot?(result) do
+    if has_boundary?(result) do
       try do
         {ref, state} = plan_node(result, %{stages: [], memo: %{}, counter: 0})
 
@@ -223,6 +225,17 @@ defmodule Nx.Vulkan.Compiler do
     n = elem(b.shape, 1)
     {sid, state} = new_sid(state)
     state = add_stage(state, {:dot, sid, a_ref, b_ref, m, n, k})
+    ref = {:stage, sid}
+    {ref, memoize(state, node, ref)}
+  end
+
+  defp plan_new(%T{data: %Expr{op: :conv, args: [inp, kernel, opts]}} = node, state) do
+    conv_schedulable!(node, inp, kernel, opts)
+    {in_ref, state} = plan_node(inp, state)
+    {k_ref, state} = plan_node(kernel, state)
+    plan = VulkanoBackend.conv_plan(node.type, inp.shape, kernel.shape, node.shape, opts)
+    {sid, state} = new_sid(state)
+    state = add_stage(state, {:conv, sid, in_ref, k_ref, plan})
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -283,16 +296,39 @@ defmodule Nx.Vulkan.Compiler do
   defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)
   defp fusable_elementwise?(_), do: false
 
-  defp has_dot?(%T{data: %Expr{op: :dot}}), do: true
+  defp has_boundary?(%T{data: %Expr{op: op}}) when op in [:dot, :conv], do: true
 
-  defp has_dot?(%T{data: %Expr{args: args}}) do
+  defp has_boundary?(%T{data: %Expr{args: args}}) do
     Enum.any?(args, fn
-      %T{data: %Expr{}} = child -> has_dot?(child)
+      %T{data: %Expr{}} = child -> has_boundary?(child)
       _ -> false
     end)
   end
 
-  defp has_dot?(_), do: false
+  defp has_boundary?(_), do: false
+
+  # A conv is schedulable as a stage under the same envelope the eager backend's
+  # GPU conv path covers: f32 in/kernel/out, spatial rank 1..3, no feature/batch
+  # grouping, identity permutations. Anything else throws :unschedulable and the
+  # whole graph falls back to the Evaluator (still correct).
+  defp conv_schedulable!(%T{type: t}, %T{type: it, shape: ishape}, %T{type: kt, shape: kshape}, opts) do
+    rank = tuple_size(ishape)
+    sr = rank - 2
+
+    ok =
+      t == {:f, 32} and it == {:f, 32} and kt == {:f, 32} and
+        sr >= 1 and sr <= 3 and
+        Keyword.get(opts, :feature_group_size, 1) == 1 and
+        Keyword.get(opts, :batch_group_size, 1) == 1 and
+        identity_perm?(opts[:input_permutation], rank) and
+        identity_perm?(opts[:kernel_permutation], tuple_size(kshape)) and
+        identity_perm?(opts[:output_permutation], rank)
+
+    unless ok, do: throw(:unschedulable)
+  end
+
+  defp identity_perm?(nil, _rank), do: true
+  defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
 
   defp dot_2d_f32!(%T{type: t}, %T{shape: as, type: at} = _a, ca, ba, %T{shape: bs, type: bt}, cb, bb) do
     ok =
@@ -337,6 +373,33 @@ defmodule Nx.Vulkan.Compiler do
     {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
     {:ok, out} = NativeV.buf_alloc(n_elems * 4)
     :ok = NativeV.dispatch_generated(out, in_refs, n_elems, spv)
+    Map.put(values, {:stage, sid}, out)
+  end
+
+  # conv stage: im2col unfold + GEMM, reusing the eager backend's shaders and the
+  # precomputed geometry (VulkanoBackend.conv_plan). Input/kernel may be earlier
+  # stages' GPU buffers, so `conv(relu(x), k)` fuses the relu as an input stage.
+  defp exec_stage({:conv, sid, in_ref, k_ref, p}, values, params) do
+    {in_buf, values} = resolve(in_ref, values, params)
+    {k_buf, values} = resolve(k_ref, values, params)
+    {:ok, params_ref} = NativeV.buf_upload(p.params_bin)
+    {:ok, col_ref} = NativeV.buf_alloc(p.m * p.k_cols * p.ebytes)
+
+    :ok =
+      NativeV.conv_im2col(
+        col_ref,
+        in_buf,
+        params_ref,
+        p.n,
+        p.cin,
+        p.o_total,
+        p.k_total,
+        p.k_cols,
+        p.im2col_spv
+      )
+
+    {:ok, out} = NativeV.buf_alloc(p.n * p.cout * p.o_total * p.ebytes)
+    :ok = NativeV.conv_gemm(out, col_ref, k_buf, p.n, p.cout, p.o_total, p.k_cols, p.gemm_spv)
     Map.put(values, {:stage, sid}, out)
   end
 

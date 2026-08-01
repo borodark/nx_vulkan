@@ -374,6 +374,50 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "multi-stage split (conv boundaries) — CNN layers fuse on-GPU" do
+    setup do
+      # input {n=1, cin=2, 5, 5}, kernel {cout=3, cin=2, 3, 3} -> out {1, 3, 3, 3}
+      x = Nx.iota({1, 2, 5, 5}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      k = Nx.iota({3, 2, 3, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      # bias {1, cout, 1, 1} broadcasts over the conv output
+      b = Nx.iota({1, 3, 1, 1}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.1)
+      %{x: x, k: k, b: b}
+    end
+
+    test "bare conv(x, k) runs as a single im2col+GEMM stage", %{x: x, k: k} do
+      got = jit(fn a, kk -> Nx.conv(a, kk) end).(x, k)
+      assert ms_close?(got, Nx.conv(x, k))
+      assert Nx.shape(got) == {1, 3, 3, 3}
+    end
+
+    test "relu(conv(x, k) + b): conv stage + fused epilogue", %{x: x, k: k, b: b} do
+      fun = fn a, kk, bb -> Nx.max(Nx.add(Nx.conv(a, kk), bb), 0.0) end
+      got = jit(fun).(x, k, b)
+      assert ms_close?(got, fun.(x, k, b))
+    end
+
+    test "fused input to a conv: conv(relu(x), k)", %{x: x, k: k} do
+      fun = fn a, kk -> Nx.conv(Nx.max(a, 0.0), kk) end
+      got = jit(fun).(x, k)
+      assert ms_close?(got, fun.(x, k))
+    end
+
+    test "conv honours strides + padding", %{x: x, k: k} do
+      fun = fn a, kk -> Nx.conv(a, kk, strides: [2, 2], padding: [{1, 1}, {1, 1}]) end
+      got = jit(fun).(x, k)
+      assert ms_close?(got, fun.(x, k))
+    end
+
+    test "grouped conv (feature_group_size > 1) falls back but stays correct" do
+      x = Nx.iota({1, 4, 5, 5}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      k = Nx.iota({2, 2, 3, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn a, kk -> Nx.conv(a, kk, feature_group_size: 2) end
+      got = jit(fun).(x, k)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, fun.(x, k))
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr

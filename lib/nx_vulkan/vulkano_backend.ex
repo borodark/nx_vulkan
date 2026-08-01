@@ -412,11 +412,54 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
 
   defp gpu_conv(
-         %T{type: type} = out,
+         %T{type: type, shape: oshape} = out,
          %T{shape: ishape, data: %__MODULE__{ref: in_ref}},
          %T{shape: kshape, data: %__MODULE__{ref: k_ref}},
          opts
        ) do
+    p = conv_plan(type, ishape, kshape, oshape, opts)
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(p.params_bin)
+    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(p.m * p.k_cols * p.ebytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_im2col(
+        col_ref,
+        in_ref,
+        params_ref,
+        p.n,
+        p.cin,
+        p.o_total,
+        p.k_total,
+        p.k_cols,
+        p.im2col_spv
+      )
+
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(p.n * p.cout * p.o_total * p.ebytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_gemm(
+        out_ref,
+        col_ref,
+        k_ref,
+        p.n,
+        p.cout,
+        p.o_total,
+        p.k_cols,
+        p.gemm_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
+  end
+
+  @doc false
+  # Shared conv geometry: resolves shapes + fully-materialised opts into the
+  # buffer dims, SPV paths and the packed int params blob consumed by
+  # conv_im2col / conv_gemm. Pure — no device calls — so the Nx.Defn multi-stage
+  # compiler can compute it once at compile time and reuse it, while the eager
+  # backend calls it per dispatch. `oshape` is the output-permutation-layout
+  # shape (identity perms only reach here). Reads the f32 accumulator policy at
+  # call time via conv_spvs/1.
+  def conv_plan(type, ishape, kshape, oshape, opts) do
     {im2col_spv, gemm_spv} = conv_spvs(type)
     ebytes = element_bytes(type)
     rank = tuple_size(ishape)
@@ -428,7 +471,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     spatial = fn shape -> for ax <- 0..(sr - 1)//1, do: elem(shape, 2 + ax) end
     d = spatial.(ishape)
     kdims = spatial.(kshape)
-    odims = spatial.(out.shape)
+    odims = spatial.(oshape)
     pad_lo = Enum.map(opts[:padding], fn {lo, _hi} -> lo end)
 
     # Pad each per-dim list to length 3 with its identity default so the
@@ -448,34 +491,22 @@ defmodule Nx.Vulkan.VulkanoBackend do
         <<v::signed-32-little>>
       end
 
-    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params_bin)
-
     o_total = Enum.product(odims)
     k_total = Enum.product(kdims)
-    k_cols = cin * k_total
-    m = n * o_total
 
-    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(m * k_cols * ebytes)
-
-    :ok =
-      Nx.Vulkan.NativeV.conv_im2col(
-        col_ref,
-        in_ref,
-        params_ref,
-        n,
-        cin,
-        o_total,
-        k_total,
-        k_cols,
-        im2col_spv
-      )
-
-    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * cout * o_total * ebytes)
-
-    :ok =
-      Nx.Vulkan.NativeV.conv_gemm(out_ref, col_ref, k_ref, n, cout, o_total, k_cols, gemm_spv)
-
-    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
+    %{
+      im2col_spv: im2col_spv,
+      gemm_spv: gemm_spv,
+      ebytes: ebytes,
+      params_bin: params_bin,
+      n: n,
+      cin: cin,
+      cout: cout,
+      o_total: o_total,
+      k_total: k_total,
+      k_cols: cin * k_total,
+      m: n * o_total
+    }
   end
 
   defp pad3([a], d), do: [a, d, d]
