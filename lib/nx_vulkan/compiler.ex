@@ -192,7 +192,7 @@ defmodule Nx.Vulkan.Compiler do
   defp try_multistage(%T{type: {:f, 32}} = result) do
     if has_boundary?(result) do
       try do
-        {ref, state} = plan_node(result, %{stages: [], memo: %{}, counter: 0})
+        {ref, state} = plan_node(result, new_plan_state(result))
 
         case ref do
           {:stage, sid} -> {:ok_plan, Enum.reverse(state.stages), sid, Nx.to_template(result)}
@@ -224,7 +224,7 @@ defmodule Nx.Vulkan.Compiler do
         {template, {refs_rev, state}} =
           Composite.traverse(
             result,
-            {[], %{stages: [], memo: %{}, counter: 0}},
+            {[], new_plan_state(result)},
             fn leaf, {refs, st} ->
               {ref, st} = plan_node(leaf, st)
               {Nx.to_template(leaf), {[ref | refs], st}}
@@ -237,6 +237,75 @@ defmodule Nx.Vulkan.Compiler do
       end
     else
       :fallback
+    end
+  end
+
+  # Fresh plan state for `result`, with the cross-stage-CSE hoist set precomputed.
+  defp new_plan_state(result) do
+    %{stages: [], memo: %{}, counter: 0, shared: hoist_ids(result)}
+  end
+
+  @doc false
+  # Test hook: the cross-stage-CSE hoist set for a result expression.
+  def __hoist_ids__(result), do: hoist_ids(result)
+
+  # Boundary ops — a reference through one of these definitely crosses a stage.
+  @boundary_ops [:sum, :product, :reduce_max, :reduce_min, :dot, :conv]
+
+  # Cross-stage CSE: the set of node ids worth materialising once and reading as a
+  # buffer, rather than re-inlining into every consumer. A fusable node qualifies
+  # when it is referenced by >= 2 distinct consumers (distinct parents, plus being
+  # an output counts as one) AND at least one of those references CROSSES a stage
+  # boundary — a boundary-op parent (reduce/dot/conv) or being reused as an output.
+  # Sharing purely among elementwise parents is skipped: those fuse into one region
+  # where the in-shader CSE (emit_dag) already computes the node once, so hoisting
+  # there would only add a needless dispatch.
+  defp hoist_ids(result) do
+    if System.get_env("NXV_CSE") == "0" do
+      # Cross-stage CSE disabled: shared nodes are re-inlined into every consumer
+      # (recompute) instead of materialised once. Trades an extra dispatch +
+      # buffer for the recompute — the win depends on the shared node's cost vs
+      # dispatch overhead, so this env flag exists to A/B it across the fleet.
+      MapSet.new()
+    else
+      do_hoist_ids(result)
+    end
+  end
+
+  defp do_hoist_ids(result) do
+    roots = Composite.flatten_list([result])
+    out_ids = MapSet.new(Enum.map(roots, fn %T{data: %Expr{id: id}} -> id end))
+
+    {parents, _} =
+      Enum.reduce(roots, {%{}, MapSet.new()}, fn r, {p, s} -> walk_parents(r, p, s) end)
+
+    parents
+    |> Enum.filter(fn {cid, %{ids: pids, crosses: crosses}} ->
+      is_out = MapSet.member?(out_ids, cid)
+      consumers = MapSet.size(pids) + if(is_out, do: 1, else: 0)
+      consumers >= 2 and (crosses or is_out)
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> MapSet.new()
+  end
+
+  # Build child_id -> %{ids: distinct-parent-ids, crosses: has a boundary parent}.
+  defp walk_parents(%T{data: %Expr{id: id, op: op, args: args}}, parents, seen) do
+    if MapSet.member?(seen, id) do
+      {parents, seen}
+    else
+      seen = MapSet.put(seen, id)
+      boundary? = op in @boundary_ops
+
+      Enum.reduce(args, {parents, seen}, fn
+        %T{data: %Expr{id: cid}} = child, {p, s} ->
+          entry = Map.get(p, cid, %{ids: MapSet.new(), crosses: false})
+          entry = %{ids: MapSet.put(entry.ids, id), crosses: entry.crosses or boundary?}
+          walk_parents(child, Map.put(p, cid, entry), s)
+
+        _, acc ->
+          acc
+      end)
     end
   end
 
@@ -311,7 +380,15 @@ defmodule Nx.Vulkan.Compiler do
     unless reduce_beneficial?(outer * inner_stride, rsize, inner_stride),
       do: throw(:unschedulable)
 
-    leaves = collect_leaves(inner)
+    # If the reduced `inner` is itself a stage boundary (already materialised, or
+    # hoisted for CSE, or non-fusable) it becomes the reduce's single buffer input
+    # — the reduce reads it instead of re-emitting its arithmetic. Otherwise its
+    # fusable chain inlines into the reduce shader (with shared descendants read
+    # from their buffers).
+    leaves =
+      if stage_leaf?(inner, state.memo, state.shared),
+        do: [inner],
+        else: region_leaves(inner, state.memo, state.shared)
 
     {inputs, input_refs, state} =
       Enum.reduce(leaves, {[], [], state}, fn leaf, {ins, refs, st} ->
@@ -330,10 +407,11 @@ defmodule Nx.Vulkan.Compiler do
 
   defp plan_new(%T{data: %Expr{op: op}} = node, state) do
     unless fusable_elementwise?(node), do: throw(:unschedulable)
-    # A maximal fusable region; its leaves (params + non-fusable nodes) become
-    # this stage's inputs. Materialise each non-param leaf as an earlier stage.
+    # A maximal fusable region; its leaves (params + non-fusable / materialised /
+    # hoisted nodes) become this stage's inputs. Materialise each non-param leaf
+    # as an earlier stage.
     _ = op
-    leaves = collect_leaves(node)
+    leaves = region_leaves(node, state.memo, state.shared)
 
     {inputs, input_refs, state} =
       Enum.reduce(leaves, {[], [], state}, fn leaf, {ins, refs, st} ->
@@ -359,26 +437,39 @@ defmodule Nx.Vulkan.Compiler do
     {{:stage, id}, lref, state}
   end
 
-  # Collect a fusable region's leaf nodes (params + non-fusable boundaries), in
-  # first-encounter order, de-duped. Constants are inlined (skipped).
-  defp collect_leaves(node), do: node |> collect_leaves([], MapSet.new()) |> elem(0)
+  # The leaf inputs of a fusable region rooted at `root`, in first-encounter
+  # order, de-duped; constants inline (skipped). A descendant is a leaf iff it is
+  # a `stage_leaf?` — a parameter/boundary, an already-materialised node (`memo`),
+  # or a node hoisted for cross-stage CSE (`shared`). `root` itself is always
+  # expanded (it is the region being built), so it is never treated as its own
+  # leaf. This is where cross-stage CSE takes effect: a subexpression shared
+  # across a stage boundary is read from its buffer here instead of re-inlined.
+  defp region_leaves(root, memo, shared) do
+    root |> expand_children(memo, shared, [], MapSet.new()) |> elem(0)
+  end
 
-  defp collect_leaves(%T{data: %Expr{op: :constant}}, acc, seen), do: {acc, seen}
+  defp expand_children(%T{data: %Expr{args: args}}, memo, shared, acc, seen) do
+    Enum.reduce(args, {acc, seen}, fn
+      %T{data: %Expr{}} = child, {a, s} -> collect_leaf(child, memo, shared, a, s)
+      _, as -> as
+    end)
+  end
 
-  defp collect_leaves(%T{data: %Expr{id: id}} = node, acc, seen) do
+  defp collect_leaf(%T{data: %Expr{op: :constant}}, _memo, _shared, acc, seen), do: {acc, seen}
+
+  defp collect_leaf(%T{data: %Expr{id: id}} = node, memo, shared, acc, seen) do
     cond do
-      MapSet.member?(seen, id) ->
-        {acc, seen}
-
-      fusable_elementwise?(node) ->
-        Enum.reduce(node.data.args, {acc, MapSet.put(seen, id)}, fn
-          %T{data: %Expr{}} = child, {a, s} -> collect_leaves(child, a, s)
-          _, as -> as
-        end)
-
-      true ->
-        {acc ++ [node], MapSet.put(seen, id)}
+      MapSet.member?(seen, id) -> {acc, seen}
+      stage_leaf?(node, memo, shared) -> {acc ++ [node], MapSet.put(seen, id)}
+      true -> expand_children(node, memo, shared, acc, MapSet.put(seen, id))
     end
+  end
+
+  # A node is a stage boundary (materialised as its own buffer input to a region)
+  # if it is non-fusable (param / dot / conv / reduce), already planned (memo), or
+  # hoisted for cross-stage CSE (shared: referenced across a stage boundary).
+  defp stage_leaf?(%T{data: %Expr{id: id}} = node, memo, shared) do
+    not fusable_elementwise?(node) or Map.has_key?(memo, id) or MapSet.member?(shared, id)
   end
 
   defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)

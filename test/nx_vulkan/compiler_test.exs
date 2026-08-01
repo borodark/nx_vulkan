@@ -598,6 +598,45 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "cross-stage CSE — a subexpression shared across a stage boundary is computed once" do
+    test "full single-output softmax x/sum(exp(x-max)) fuses and is correct" do
+      x = Nx.iota({4, 64}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+
+      softmax = fn a ->
+        n = Nx.exp(Nx.subtract(a, Nx.reduce_max(a, axes: [1], keep_axes: true)))
+        Nx.divide(n, Nx.sum(n, axes: [1], keep_axes: true))
+      end
+
+      got = jit(softmax).(x)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert ms_close?(got, softmax.(x))
+      # rows are a probability distribution
+      rowsums = Nx.sum(got, axes: [1]) |> Nx.to_flat_list()
+      assert Enum.all?(rowsums, &(abs(&1 - 1.0) <= 1.0e-4))
+    end
+
+    test "the shared numerator is hoisted (referenced by the divide and the sum)" do
+      alias Nx.Defn.Expr
+      x = Expr.parameter(Nx.template({4, 64}, :f32), :root, 0)
+      n = Nx.exp(Nx.subtract(x, Nx.reduce_max(x, axes: [1], keep_axes: true)))
+      result = Nx.divide(n, Nx.sum(n, axes: [1], keep_axes: true))
+
+      shared = Nx.Vulkan.Compiler.__hoist_ids__(result)
+      assert MapSet.member?(shared, n.data.id)
+    end
+
+    test "a node shared only among elementwise parents is NOT hoisted (intra-region CSE handles it)" do
+      alias Nx.Defn.Expr
+      x = Expr.parameter(Nx.template({64}, :f32), :root, 0)
+      f = Nx.multiply(x, 2.0)
+      # f is used by two elementwise parents (add, subtract) that fuse into one region
+      result = Nx.add(Nx.add(f, 1.0), Nx.subtract(f, 1.0))
+
+      shared = Nx.Vulkan.Compiler.__hoist_ids__(result)
+      refute MapSet.member?(shared, f.data.id)
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr
