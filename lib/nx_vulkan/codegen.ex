@@ -99,7 +99,7 @@ defmodule Nx.Vulkan.Codegen do
   def emit_elementwise(%T{} = expr) do
     param_order = expr |> collect_param_indices(MapSet.new()) |> Enum.sort()
     binding_of = param_order |> Enum.with_index() |> Map.new()
-    body = emit_expr(expr, binding_of)
+    {temp_lines, root} = emit_dag(expr, binding_of)
     k = length(param_order)
 
     decls =
@@ -115,6 +115,8 @@ defmodule Nx.Vulkan.Codegen do
       |> Enum.with_index()
       |> Enum.map(fn {_pidx, b} -> "    float v#{b} = buf#{b}[i];" end)
       |> Enum.join("\n")
+
+    temps = Enum.map_join(temp_lines, "\n", &("    " <> &1))
 
     glsl = """
     #version 450
@@ -132,7 +134,8 @@ defmodule Nx.Vulkan.Codegen do
         uint i = gl_GlobalInvocationID.x;
         if (i >= pc.n) return;
     #{loads}
-        out_buf[i] = #{body};
+    #{temps}
+        out_buf[i] = #{root};
     }
     """
 
@@ -167,7 +170,7 @@ defmodule Nx.Vulkan.Codegen do
   def emit_fused_reduce(%T{} = inner, reduce_op, _dims) when reduce_op in @reduce_ops do
     param_order = inner |> collect_param_indices(MapSet.new()) |> Enum.sort()
     binding_of = param_order |> Enum.with_index() |> Map.new()
-    body = emit_expr(inner, binding_of)
+    {temp_lines, root} = emit_dag(inner, binding_of)
     k = length(param_order)
 
     decls =
@@ -185,8 +188,10 @@ defmodule Nx.Vulkan.Codegen do
       |> Enum.map(fn {_pidx, b} -> "            float v#{b} = buf#{b}[idx];" end)
       |> Enum.join("\n")
 
+    temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
+
     %{acc_type: acc_type, init: init, shared_init: shared_init, accumulate: accumulate,
-      combine: combine, store: store} = reduce_kind(reduce_op, body)
+      combine: combine, store: store} = reduce_kind(reduce_op, root)
 
     glsl = """
     #version 450
@@ -224,6 +229,7 @@ defmodule Nx.Vulkan.Codegen do
             for (uint r = tid; r < pc.reduce_size; r += #{@wg_size}u) {
                 uint idx = base + r * pc.inner;
     #{loads}
+    #{temps}
                 #{accumulate}
             }
             sdata[tid] = acc;
@@ -244,62 +250,102 @@ defmodule Nx.Vulkan.Codegen do
     {glsl, %{param_order: param_order, n_inputs: k}}
   end
 
-  # Per-op GLSL fragments for the parallel tree reduce. `body` is the fused
-  # elementwise expression evaluated at the current reduce index.
-  defp reduce_kind(:sum, body) do
+  # Per-op GLSL fragments for the parallel tree reduce. `root` is the GLSL ref to
+  # the fused elementwise value at the current reduce index (a temp / load).
+  defp reduce_kind(:sum, root) do
     %{
       acc_type: "double",
       init: "0.0lf",
       shared_init: "0.0lf",
-      accumulate: "acc += double(#{body});",
+      accumulate: "acc += double(#{root});",
       combine: "sdata[tid] + sdata[tid + s]",
       store: "float(sdata[0])"
     }
   end
 
-  defp reduce_kind(:reduce_max, body), do: minmax_kind(body, "max", "-1.0/0.0")
-  defp reduce_kind(:reduce_min, body), do: minmax_kind(body, "min", "1.0/0.0")
+  defp reduce_kind(:reduce_max, root), do: minmax_kind(root, "max", "-1.0/0.0")
+  defp reduce_kind(:reduce_min, root), do: minmax_kind(root, "min", "1.0/0.0")
 
-  defp minmax_kind(body, fun, init) do
+  defp minmax_kind(root, fun, init) do
     %{
       acc_type: "float",
       init: init,
       shared_init: init,
-      accumulate: "acc = #{fun}(acc, #{body});",
+      accumulate: "acc = #{fun}(acc, #{root});",
       combine: "#{fun}(sdata[tid], sdata[tid + s])",
       store: "sdata[0]"
     }
   end
 
-  # ---- expression -> GLSL string ---------------------------------------
+  # ---- expression DAG -> GLSL (with CSE) --------------------------------
 
-  defp emit_expr(%T{data: %Expr{op: :parameter}} = t, binding_of) do
-    %T{data: %Expr{args: [pidx]}} = t
-    "v#{Map.fetch!(binding_of, pidx)}"
+  # Linearise the elementwise DAG into SSA-style temporaries so a node used by
+  # several parents (fan-out) is computed ONCE, not re-inlined at every use —
+  # naive inlining is exponential for deep DAGs (e.g. 8 chained squarings ->
+  # 255 multiplies vs 8 with CSE). Returns `{temp_lines, root_ref}`: `temp_lines`
+  # are `float tN = <expr>;` in dependency order (each node in terms of earlier
+  # temps / param loads / literals), and `root_ref` is the GLSL reference to the
+  # whole expression's value (a temp, a param load `vB`, or a constant literal).
+  defp emit_dag(%T{} = expr, binding_of) do
+    order = expr |> topo_order([], MapSet.new()) |> elem(0) |> Enum.reverse()
+    temp = order |> Enum.with_index() |> Map.new(fn {n, i} -> {n.data.id, i} end)
+
+    lines =
+      Enum.map(order, fn n ->
+        "float t#{Map.fetch!(temp, n.data.id)} = #{node_expr(n, binding_of, temp)};"
+      end)
+
+    {lines, ref(expr, binding_of, temp)}
   end
 
-  defp emit_expr(%T{data: %Expr{op: :constant, args: [c]}}, _binding_of) do
-    glsl_float(c)
+  # Post-order DFS collecting interior (op) nodes de-duped by id; each node is
+  # placed AFTER its children, so reversing the accumulator gives dependency
+  # order. Parameters/constants are leaves — referenced inline, no temp.
+  defp topo_order(%T{data: %Expr{op: op}}, acc, seen) when op in [:parameter, :constant],
+    do: {acc, seen}
+
+  defp topo_order(%T{data: %Expr{id: id}} = node, acc, seen) do
+    if MapSet.member?(seen, id) do
+      {acc, seen}
+    else
+      {acc, seen} =
+        Enum.reduce(node.data.args, {acc, MapSet.put(seen, id)}, fn
+          %T{data: %Expr{}} = child, {a, s} -> topo_order(child, a, s)
+          _, as -> as
+        end)
+
+      {[node | acc], seen}
+    end
   end
 
-  defp emit_expr(%T{data: %Expr{op: op, args: [a]}}, binding_of)
+  # GLSL for one node in terms of its children's refs (no recursion into them).
+  defp node_expr(%T{data: %Expr{op: op, args: [a]}}, binding_of, temp)
        when is_map_key(@unary_ops, op) do
-    inner = emit_expr(a, binding_of)
     # Replace only the standalone `r` operand token — a plain "r" replace would
     # also clobber the `r` inside op names like sqrt/round/reciprocal/erf.
-    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{inner})")
+    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{ref(a, binding_of, temp)})")
   end
 
-  defp emit_expr(%T{data: %Expr{op: op, args: [a, b]}}, binding_of)
+  defp node_expr(%T{data: %Expr{op: op, args: [a, b]}}, binding_of, temp)
        when is_map_key(@binary_ops, op) do
-    l = emit_expr(a, binding_of)
-    r = emit_expr(b, binding_of)
+    l = ref(a, binding_of, temp)
+    r = ref(b, binding_of, temp)
 
     case Map.fetch!(@binary_ops, op) do
       {:infix, sym} -> "(#{l} #{sym} #{r})"
       {:call, f} -> "#{f}(#{l}, #{r})"
     end
   end
+
+  # Reference to a node's already-computed value.
+  defp ref(%T{data: %Expr{op: :parameter, args: [pidx]}}, binding_of, _temp),
+    do: "v#{Map.fetch!(binding_of, pidx)}"
+
+  defp ref(%T{data: %Expr{op: :constant, args: [c]}}, _binding_of, _temp),
+    do: glsl_float(c)
+
+  defp ref(%T{data: %Expr{id: id}}, _binding_of, temp),
+    do: "t#{Map.fetch!(temp, id)}"
 
   defp glsl_float(c) do
     s = to_string(c / 1.0)

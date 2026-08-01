@@ -253,7 +253,23 @@ defmodule Nx.Vulkan.CompilerTest do
       {glsl, meta} = Codegen.emit_elementwise(Nx.subtract(p1, p0))
       assert meta.param_order == [0, 1]
       assert meta.n_inputs == 2
-      assert glsl =~ "out_buf[i] = (v1 - v0);"
+      # CSE: the interior node is emitted as a temp, then referenced as the root.
+      assert glsl =~ "float t0 = (v1 - v0);"
+      assert glsl =~ "out_buf[i] = t0;"
+    end
+
+    test "CSE — a fan-out node is computed once, not re-inlined (no exponential blowup)" do
+      alias Nx.Defn.Expr
+      p0 = Expr.parameter(Nx.template({4}, :f32), :root, 0)
+      # 8 chained squarings of the same node: naive inlining -> 255 multiplies,
+      # CSE -> 8 temps / 8 multiplies.
+      expr = Enum.reduce(1..8, p0, fn _, t -> Nx.multiply(t, t) end)
+      {glsl, _} = Codegen.emit_elementwise(expr)
+      # count `tN = (... * ...)` temp assignments (exclude helper-fn bodies)
+      squaring_temps =
+        Regex.scan(~r/float t\d+ = \(t?v?\d+ \* t?v?\d+\);/, glsl) |> length()
+
+      assert squaring_temps == 8
     end
   end
 end
