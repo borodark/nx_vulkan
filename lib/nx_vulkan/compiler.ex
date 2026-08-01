@@ -217,6 +217,18 @@ defmodule Nx.Vulkan.Compiler do
     {ref, memoize(state, node, ref)}
   end
 
+  # reshape / squeeze are pure row-major views: same bytes, a new logical shape,
+  # no dispatch. Alias the input buffer and let downstream stages read it with the
+  # reshaped dims (every stage's dims come from the Expr tree, not the buffer).
+  # This lets a CNN classifier head — conv -> flatten (reshape) -> dense (dot) —
+  # fuse end-to-end. Safe because every buffer we schedule (matmul/conv/fused/param)
+  # is contiguous row-major, so a reshape over it really is just a relabel.
+  defp plan_new(%T{data: %Expr{op: op, args: [inp | _]}} = node, state)
+       when op in [:reshape, :squeeze] do
+    {ref, state} = plan_node(inp, state)
+    {ref, memoize(state, node, ref)}
+  end
+
   defp plan_new(%T{data: %Expr{op: :dot, args: [a, ca, ba, b, cb, bb]}} = node, state) do
     dot_2d_f32!(node, a, ca, ba, b, cb, bb)
     {a_ref, state} = plan_node(a, state)

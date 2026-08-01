@@ -418,6 +418,60 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "reshape / squeeze are no-op view boundaries (buffer alias, no dispatch)" do
+    setup do
+      # conv {1,2,5,5} * {4,2,3,3} -> {1,4,3,3} = 36 elems; flatten -> {1,36}
+      x = Nx.iota({1, 2, 5, 5}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      k = Nx.iota({4, 2, 3, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      w = Nx.iota({36, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.005)
+      b = bin([0.1, 0.2, 0.3])
+      %{x: x, k: k, w: w, b: b}
+    end
+
+    test "CNN classifier head fuses end-to-end: relu(flatten(conv) @ W + b)",
+         %{x: x, k: k, w: w, b: b} do
+      fun = fn a, kk, ww, bb ->
+        flat = Nx.reshape(Nx.conv(a, kk), {1, 36})
+        Nx.max(Nx.add(Nx.dot(flat, ww), bb), 0.0)
+      end
+
+      got = jit(fun).(x, k, w, b)
+      assert ms_close?(got, fun.(x, k, w, b))
+      assert Nx.shape(got) == {1, 3}
+    end
+
+    test "reshape of a matmul output as the root", %{} do
+      a = Nx.iota({2, 6}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({6, 6}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn x, ww -> Nx.reshape(Nx.dot(x, ww), {3, 4}) end
+      got = jit(fun).(a, w)
+      assert ms_close?(got, fun.(a, w))
+      assert Nx.shape(got) == {3, 4}
+    end
+
+    test "reshape feeding an elementwise epilogue after a dot", %{} do
+      a = Nx.iota({2, 6}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({6, 6}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn x, ww -> Nx.tanh(Nx.reshape(Nx.dot(x, ww), {4, 3})) end
+      got = jit(fun).(a, w)
+      assert ms_close?(got, fun.(a, w))
+    end
+
+    test "squeeze after a conv, then dense", %{x: x, k: k} do
+      # conv -> {1,4,3,3}; squeeze axis 0 -> {4,3,3}; flatten -> {4,9}
+      w = Nx.iota({9, 2}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+
+      fun = fn a, kk, ww ->
+        s = Nx.squeeze(Nx.conv(a, kk), axes: [0])
+        Nx.dot(Nx.reshape(s, {4, 9}), ww)
+      end
+
+      got = jit(fun).(x, k, w)
+      assert ms_close?(got, fun.(x, k, w))
+      assert Nx.shape(got) == {4, 2}
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr
