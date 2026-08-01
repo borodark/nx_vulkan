@@ -317,6 +317,63 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "multi-stage split (dot boundaries) — whole NN layers fuse on-GPU" do
+    setup do
+      x = Nx.iota({8, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({4, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      b = bin([0.1, 0.2, 0.3])
+      %{x: x, w: w, b: b}
+    end
+
+    defp ms_close?(got, ref) do
+      match?(%VulkanoBackend{}, got.data) and Nx.shape(got) == Nx.shape(ref) and
+        Nx.to_flat_list(got)
+        |> Enum.zip(Nx.to_flat_list(ref))
+        |> Enum.all?(fn {a, c} -> abs(a - c) <= 1.0e-3 end)
+    end
+
+    test "bare dot x @ W runs as a single matmul stage", %{x: x, w: w} do
+      got = jit(fn a, ww -> Nx.dot(a, ww) end).(x, w)
+      assert ms_close?(got, Nx.dot(x, w))
+    end
+
+    test "relu(x @ W + b): matmul stage + fused epilogue", %{x: x, w: w, b: b} do
+      got = jit(fn a, ww, bb -> Nx.max(Nx.add(Nx.dot(a, ww), bb), 0.0) end).(x, w, b)
+      assert ms_close?(got, Nx.max(Nx.add(Nx.dot(x, w), b), 0.0))
+    end
+
+    test "tanh(x @ W + b)", %{x: x, w: w, b: b} do
+      got = jit(fn a, ww, bb -> Nx.tanh(Nx.add(Nx.dot(a, ww), bb)) end).(x, w, b)
+      assert ms_close?(got, Nx.tanh(Nx.add(Nx.dot(x, w), b)))
+    end
+
+    test "fused input to a dot: dot(relu(x), W)", %{x: x, w: w} do
+      got = jit(fn a, ww -> Nx.dot(Nx.max(a, 0.0), ww) end).(x, w)
+      assert ms_close?(got, Nx.dot(Nx.max(x, 0.0), w))
+    end
+
+    test "2-layer MLP fuses to 4 stages", %{x: x, w: w, b: b} do
+      w2 = Nx.iota({3, 2}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.03)
+      b2 = bin([0.5, 0.6])
+
+      fun = fn a, ww, bb, w22, b22 ->
+        Nx.sigmoid(Nx.add(Nx.dot(Nx.tanh(Nx.add(Nx.dot(a, ww), bb)), w22), b22))
+      end
+
+      got = jit(fun).(x, w, b, w2, b2)
+      assert ms_close?(got, fun.(x, w, b, w2, b2))
+      assert Nx.shape(got) == {8, 2}
+    end
+
+    test "batched (non-2D) dot falls back but stays correct" do
+      a = Nx.iota({2, 3, 4}, type: :f32, backend: Nx.BinaryBackend)
+      b = Nx.iota({2, 4, 5}, type: :f32, backend: Nx.BinaryBackend)
+      got = jit(fn x, y -> Nx.dot(x, [2], [0], y, [1], [0]) end).(a, b)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == Nx.to_flat_list(Nx.dot(a, [2], [0], b, [1], [0]))
+    end
+  end
+
   describe "Codegen unit" do
     test "fusable?/1 accepts an f32 elementwise tree, rejects a reduction" do
       alias Nx.Defn.Expr

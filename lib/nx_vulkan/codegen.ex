@@ -111,22 +111,25 @@ defmodule Nx.Vulkan.Codegen do
   Returns `{glsl, %{param_order: [param_index, ...], n_inputs: k}}` where
   `param_order[b]` is the runtime argument index bound to input binding `b`.
   """
-  def emit_elementwise(%T{shape: out_shape} = expr) do
-    param_shapes = collect_params(expr, %{})
-    param_order = param_shapes |> Map.keys() |> Enum.sort()
-    binding_of = param_order |> Enum.with_index() |> Map.new()
-    {temp_lines, root} = emit_dag(expr, binding_of)
-    k = length(param_order)
+  def emit_elementwise(%T{} = expr) do
+    inputs = param_inputs(expr)
+    {glsl, _meta} = emit_region(expr, inputs)
+    {glsl, %{param_order: Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end), n_inputs: length(inputs)}}
+  end
 
-    decls =
-      param_order
-      |> Enum.with_index()
-      |> Enum.map(fn {_pidx, b} ->
-        "layout(std430, binding = #{b}) readonly buffer In#{b} { float buf#{b}[]; };"
-      end)
-      |> Enum.join("\n")
-
-    loads = emit_loads(param_order, param_shapes, out_shape, "i", "    ")
+  @doc """
+  Emit an elementwise shader for a fusion region whose leaf inputs are given by
+  `inputs` — an ordered list of `{{:param, pidx} | {:stage, node_id}, shape}`.
+  Parameters and stage-materialised buffers are both loaded from input bindings
+  (broadcast-aware); constants inline. Used by both the single-region compile
+  and the multi-stage split (where a leaf may be a prior stage's output buffer).
+  Returns `{glsl, %{n_inputs: k}}`.
+  """
+  def emit_region(%T{shape: out_shape} = root, inputs) do
+    ctx = build_ctx(inputs)
+    {temp_lines, root_ref} = emit_dag(root, ctx)
+    k = length(inputs)
+    loads = emit_loads(inputs, out_shape, "i", "    ")
     temps = Enum.map_join(temp_lines, "\n", &("    " <> &1))
 
     glsl = """
@@ -136,7 +139,7 @@ defmodule Nx.Vulkan.Codegen do
 
     layout(push_constant) uniform Push { uint n; } pc;
 
-    #{decls}
+    #{input_decls(k)}
     layout(std430, binding = #{k}) writeonly buffer Out { float out_buf[]; };
 
     #{helper_functions()}
@@ -146,11 +149,21 @@ defmodule Nx.Vulkan.Codegen do
         if (i >= pc.n) return;
     #{loads}
     #{temps}
-        out_buf[i] = #{root};
+        out_buf[i] = #{root_ref};
     }
     """
 
-    {glsl, %{param_order: param_order, n_inputs: k}}
+    {glsl, %{n_inputs: k}}
+  end
+
+  # All distinct parameters of `expr` as region inputs, in ascending index order.
+  defp param_inputs(expr) do
+    shapes = collect_params(expr, %{})
+
+    shapes
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.map(fn pidx -> {{:param, pidx}, Map.fetch!(shapes, pidx)} end)
   end
 
   # Reduce ops we fuse: op -> {glsl accumulator init, combine}. `sum`/`product`
@@ -183,23 +196,17 @@ defmodule Nx.Vulkan.Codegen do
   """
   def emit_fused_reduce(%T{shape: in_shape} = inner, reduce_op, scale \\ nil)
       when reduce_op in @reduce_ops do
-    param_shapes = collect_params(inner, %{})
-    param_order = param_shapes |> Map.keys() |> Enum.sort()
-    binding_of = param_order |> Enum.with_index() |> Map.new()
-    {temp_lines, root} = emit_dag(inner, binding_of)
-    k = length(param_order)
+    inputs = param_inputs(inner)
+    ctx = build_ctx(inputs)
+    {temp_lines, root} = emit_dag(inner, ctx)
+    k = length(inputs)
+    param_order = Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end)
 
-    decls =
-      param_order
-      |> Enum.with_index()
-      |> Enum.map(fn {_pidx, b} ->
-        "layout(std430, binding = #{b}) readonly buffer In#{b} { float buf#{b}[]; };"
-      end)
-      |> Enum.join("\n")
+    decls = input_decls(k)
 
     # load each input at the running reduce index `idx` (broadcast-aware: the
     # pre-reduction shape `in_shape` is the coordinate space)
-    loads = emit_loads(param_order, param_shapes, in_shape, "idx", "            ")
+    loads = emit_loads(inputs, in_shape, "idx", "            ")
 
     temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
 
@@ -312,50 +319,59 @@ defmodule Nx.Vulkan.Codegen do
   # are `float tN = <expr>;` in dependency order (each node in terms of earlier
   # temps / param loads / literals), and `root_ref` is the GLSL reference to the
   # whole expression's value (a temp, a param load `vB`, or a constant literal).
-  defp emit_dag(%T{} = expr, binding_of) do
-    order = expr |> topo_order([], MapSet.new()) |> elem(0) |> Enum.reverse()
+  # `ctx` = %{params: %{pidx => binding}, stages: %{node_id => binding}}. A leaf
+  # input is a parameter OR a node materialised by an earlier stage (multi-stage
+  # split); both load from a buffer `vB`. Constants inline as literals.
+  defp emit_dag(%T{} = expr, ctx) do
+    order = expr |> topo_order(ctx, [], MapSet.new()) |> elem(0) |> Enum.reverse()
     temp = order |> Enum.with_index() |> Map.new(fn {n, i} -> {n.data.id, i} end)
 
     lines =
       Enum.map(order, fn n ->
-        "float t#{Map.fetch!(temp, n.data.id)} = #{node_expr(n, binding_of, temp)};"
+        "float t#{Map.fetch!(temp, n.data.id)} = #{node_expr(n, ctx, temp)};"
       end)
 
-    {lines, ref(expr, binding_of, temp)}
+    {lines, ref(expr, ctx, temp)}
   end
 
-  # Post-order DFS collecting interior (op) nodes de-duped by id; each node is
-  # placed AFTER its children, so reversing the accumulator gives dependency
-  # order. Parameters/constants are leaves — referenced inline, no temp.
-  defp topo_order(%T{data: %Expr{op: op}}, acc, seen) when op in [:parameter, :constant],
-    do: {acc, seen}
+  # A node is a leaf input (no temp, stop recursion) if it's a parameter, a
+  # constant, or the output of an earlier stage bound to an input buffer.
+  defp leaf?(%T{data: %Expr{op: op}}, _ctx) when op in [:parameter, :constant], do: true
+  defp leaf?(%T{data: %Expr{id: id}}, ctx), do: Map.has_key?(ctx.stages, id)
 
-  defp topo_order(%T{data: %Expr{id: id}} = node, acc, seen) do
-    if MapSet.member?(seen, id) do
-      {acc, seen}
-    else
-      {acc, seen} =
-        Enum.reduce(node.data.args, {acc, MapSet.put(seen, id)}, fn
-          %T{data: %Expr{}} = child, {a, s} -> topo_order(child, a, s)
-          _, as -> as
-        end)
+  # Post-order DFS collecting interior nodes de-duped by id; each node is placed
+  # AFTER its children, so reversing the accumulator gives dependency order.
+  defp topo_order(node, ctx, acc, seen) do
+    cond do
+      leaf?(node, ctx) ->
+        {acc, seen}
 
-      {[node | acc], seen}
+      MapSet.member?(seen, node.data.id) ->
+        {acc, seen}
+
+      true ->
+        {acc, seen} =
+          Enum.reduce(node.data.args, {acc, MapSet.put(seen, node.data.id)}, fn
+            %T{data: %Expr{}} = child, {a, s} -> topo_order(child, ctx, a, s)
+            _, as -> as
+          end)
+
+        {[node | acc], seen}
     end
   end
 
   # GLSL for one node in terms of its children's refs (no recursion into them).
-  defp node_expr(%T{data: %Expr{op: op, args: [a]}}, binding_of, temp)
+  defp node_expr(%T{data: %Expr{op: op, args: [a]}}, ctx, temp)
        when is_map_key(@unary_ops, op) do
     # Replace only the standalone `r` operand token — a plain "r" replace would
     # also clobber the `r` inside op names like sqrt/round/reciprocal/erf.
-    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{ref(a, binding_of, temp)})")
+    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{ref(a, ctx, temp)})")
   end
 
-  defp node_expr(%T{data: %Expr{op: op, args: [a, b]}}, binding_of, temp)
+  defp node_expr(%T{data: %Expr{op: op, args: [a, b]}}, ctx, temp)
        when is_map_key(@binary_ops, op) do
-    l = ref(a, binding_of, temp)
-    r = ref(b, binding_of, temp)
+    l = ref(a, ctx, temp)
+    r = ref(b, ctx, temp)
 
     case Map.fetch!(@binary_ops, op) do
       {:infix, sym} -> "(#{l} #{sym} #{r})"
@@ -364,14 +380,39 @@ defmodule Nx.Vulkan.Codegen do
   end
 
   # Reference to a node's already-computed value.
-  defp ref(%T{data: %Expr{op: :parameter, args: [pidx]}}, binding_of, _temp),
-    do: "v#{Map.fetch!(binding_of, pidx)}"
+  defp ref(%T{data: %Expr{op: :constant, args: [c]}}, _ctx, _temp), do: glsl_float(c)
 
-  defp ref(%T{data: %Expr{op: :constant, args: [c]}}, _binding_of, _temp),
-    do: glsl_float(c)
+  defp ref(%T{data: %Expr{op: :parameter, args: [pidx]}}, ctx, _temp),
+    do: "v#{Map.fetch!(ctx.params, pidx)}"
 
-  defp ref(%T{data: %Expr{id: id}}, _binding_of, temp),
-    do: "t#{Map.fetch!(temp, id)}"
+  defp ref(%T{data: %Expr{id: id}}, ctx, temp) do
+    case Map.get(ctx.stages, id) do
+      nil -> "t#{Map.fetch!(temp, id)}"
+      b -> "v#{b}"
+    end
+  end
+
+  # Build a `ctx` from an ordered input list of `{key, _shape}` where key is
+  # `{:param, pidx}` or `{:stage, node_id}`; binding = position in the list.
+  defp build_ctx(inputs) do
+    {params, stages, _} =
+      Enum.reduce(inputs, {%{}, %{}, 0}, fn {key, _shape}, {p, s, b} ->
+        case key do
+          {:param, pidx} -> {Map.put(p, pidx, b), s, b + 1}
+          {:stage, id} -> {p, Map.put(s, id, b), b + 1}
+        end
+      end)
+
+    %{params: params, stages: stages}
+  end
+
+  # `layout(...) buffer InB { float bufB[]; };` for each of `k` input bindings.
+  defp input_decls(k) do
+    0..(k - 1)
+    |> Enum.map_join("\n", fn b ->
+      "layout(std430, binding = #{b}) readonly buffer In#{b} { float buf#{b}[]; };"
+    end)
+  end
 
   defp glsl_float(c) do
     s = to_string(c / 1.0)
@@ -394,16 +435,16 @@ defmodule Nx.Vulkan.Codegen do
 
   # ---- broadcast-aware parameter loads ---------------------------------
 
-  # Emit `float vB = bufB[<index>];` for each input binding. Inputs whose shape
-  # equals `out_shape` load at the flat index `ivar` directly; broadcast inputs
-  # (scalar, row/col vector, any dim == 1) load at their NumPy-broadcast source
-  # index, computed from `ivar` with the (compile-time-constant) shapes baked in.
-  defp emit_loads(param_order, param_shapes, out_shape, ivar, indent) do
-    param_order
+  # Emit `float vB = bufB[<index>];` for each input binding (in `inputs` order).
+  # Inputs whose shape equals `out_shape` load at the flat index `ivar`
+  # directly; broadcast inputs (scalar, row/col vector, any dim == 1) load at
+  # their NumPy-broadcast source index, computed from `ivar` with the
+  # (compile-time-constant) shapes baked in.
+  defp emit_loads(inputs, out_shape, ivar, indent) do
+    inputs
     |> Enum.with_index()
-    |> Enum.map(fn {pidx, b} ->
-      s = Map.fetch!(param_shapes, pidx)
-      idx = if s == out_shape, do: ivar, else: broadcast_index(s, out_shape, ivar)
+    |> Enum.map(fn {{_key, shape}, b} ->
+      idx = if shape == out_shape, do: ivar, else: broadcast_index(shape, out_shape, ivar)
       "#{indent}float v#{b} = buf#{b}[#{idx}];"
     end)
     |> Enum.join("\n")

@@ -183,9 +183,22 @@ scale, row `{n}` / column `{m,1}` vectors, and n-d broadcast, in both the
 elementwise and reduce paths. Common NN pattern `relu(x*scale{n} + bias{n})` now
 fuses to ONE dispatch: 1.47x over eager on the GT 650M, exact.
 
-Next increments: (a) multi-stage split at non-fusable boundaries (dot/conv)
-keeping intermediates on-device; (b) tuple/multi-output; (c) f64 fusion;
-(d) a warp-per-slot reduce for the narrow-reduce many-slot case.
+**Increment 2f — multi-stage split (dot boundaries): DONE.** A graph containing
+a `dot` isn't one fusable region, so it fell back to the Evaluator. The compiler
+now splits it into a stage schedule (`try_multistage` + `plan_node` + `run_plan`):
+each 2D-f32 `dot` is a matmul stage, and each maximal elementwise region is ONE
+generated shader (`Codegen.emit_region`) whose leaf inputs may be earlier stages'
+GPU buffers — intermediates stay on-device. Whole NN layers fuse: `relu(x@W+b)`
+→ matmul + one fused `max(dot+b,0)` stage; a 2-layer MLP → 4 stages. All correct
+vs BinaryBackend. Speedup over the (already-on-GPU) eager path is modest on
+matmul-dominated graphs (~1.1x — the matmul is the bottleneck; the win is the
+saved elementwise dispatches/intermediates + no Evaluator fallback); it grows
+with heavier elementwise epilogues. Codegen was generalised so region leaves can
+be `{:param, pidx}` or `{:stage, node_id}` buffers.
+
+Next increments: (a) conv as a boundary op (reuse the conv im2col/gemm shaders);
+(b) reduce as a boundary (materialise `mean(x)` etc. so `x - mean(x)` layernorm
+patterns fuse); (c) tuple/multi-output; (d) f64 fusion.
 
 ### 4. Package, document, position
 Hex release, README with the portability pitch + a support matrix (OS × GPU

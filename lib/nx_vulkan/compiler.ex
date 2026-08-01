@@ -81,8 +81,15 @@ defmodule Nx.Vulkan.Compiler do
         end
 
       :fallback ->
-        debug(fn -> "fallback (evaluator): root=#{inspect(op_of(result))}" end)
-        Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+        case try_multistage(result) do
+          {:ok_plan, stages, out_sid, template} ->
+            debug(fn -> "MULTISTAGE: #{length(stages)} stages, root=#{op_of(result)}" end)
+            fn [params] -> [run_plan(stages, out_sid, template, params)] end
+
+          :fallback ->
+            debug(fn -> "fallback (evaluator): root=#{inspect(op_of(result))}" end)
+            Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+        end
     end
   end
 
@@ -161,6 +168,191 @@ defmodule Nx.Vulkan.Compiler do
       end
     else
       :fallback
+    end
+  end
+
+  # ---- multi-stage split (dot boundaries) ------------------------------
+  #
+  # When a graph isn't a single fusable region (it contains a `dot`), split it
+  # into a schedule of stages that run on-device with GPU-resident intermediates:
+  # each `dot` becomes a matmul stage, and each maximal fusable elementwise region
+  # becomes ONE generated shader whose leaf inputs may be earlier stages' output
+  # buffers. This fuses whole NN layers — e.g. `relu(x @ W + b)` runs as a matmul
+  # stage + a single fused `max(dot + b, 0)` stage instead of matmul + broadcast-
+  # add + relu as three separate eager dispatches.
+
+  @matmul_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+
+  defp try_multistage(%T{type: {:f, 32}} = result) do
+    if has_dot?(result) do
+      try do
+        {ref, state} = plan_node(result, %{stages: [], memo: %{}, counter: 0})
+
+        case ref do
+          {:stage, sid} -> {:ok_plan, Enum.reverse(state.stages), sid, Nx.to_template(result)}
+          _ -> :fallback
+        end
+      catch
+        :unschedulable -> :fallback
+      end
+    else
+      :fallback
+    end
+  end
+
+  defp try_multistage(_), do: :fallback
+
+  # plan_node returns {ref, state} where ref is {:param, pidx} | {:stage, sid}.
+  defp plan_node(%T{data: %Expr{id: id}} = node, state) do
+    case Map.get(state.memo, id) do
+      nil -> plan_new(node, state)
+      ref -> {ref, state}
+    end
+  end
+
+  defp plan_new(%T{data: %Expr{op: :parameter, args: [pidx]}} = node, state) do
+    ref = {:param, pidx}
+    {ref, memoize(state, node, ref)}
+  end
+
+  defp plan_new(%T{data: %Expr{op: :dot, args: [a, ca, ba, b, cb, bb]}} = node, state) do
+    dot_2d_f32!(node, a, ca, ba, b, cb, bb)
+    {a_ref, state} = plan_node(a, state)
+    {b_ref, state} = plan_node(b, state)
+    {m, k} = {elem(a.shape, 0), elem(a.shape, 1)}
+    n = elem(b.shape, 1)
+    {sid, state} = new_sid(state)
+    state = add_stage(state, {:dot, sid, a_ref, b_ref, m, n, k})
+    ref = {:stage, sid}
+    {ref, memoize(state, node, ref)}
+  end
+
+  defp plan_new(%T{data: %Expr{op: op}} = node, state) do
+    unless fusable_elementwise?(node), do: throw(:unschedulable)
+    # A maximal fusable region; its leaves (params + non-fusable nodes) become
+    # this stage's inputs. Materialise each non-param leaf as an earlier stage.
+    _ = op
+    leaves = collect_leaves(node)
+
+    {inputs, input_refs, state} =
+      Enum.reduce(leaves, {[], [], state}, fn leaf, {ins, refs, st} ->
+        {key, lref, st} = plan_leaf(leaf, st)
+        {ins ++ [{key, leaf.shape}], refs ++ [lref], st}
+      end)
+
+    {glsl, _} = Codegen.emit_region(node, inputs)
+    spv = compile!(glsl)
+    {sid, state} = new_sid(state)
+    state = add_stage(state, {:fused, sid, spv, input_refs, Nx.size(node)})
+    ref = {:stage, sid}
+    {ref, memoize(state, node, ref)}
+  end
+
+  # A region leaf: a parameter binds directly; anything else is materialised as
+  # its own stage and referenced by the region via its node id.
+  defp plan_leaf(%T{data: %Expr{op: :parameter, args: [pidx]}}, state),
+    do: {{:param, pidx}, {:param, pidx}, state}
+
+  defp plan_leaf(%T{data: %Expr{id: id}} = leaf, state) do
+    {lref, state} = plan_node(leaf, state)
+    {{:stage, id}, lref, state}
+  end
+
+  # Collect a fusable region's leaf nodes (params + non-fusable boundaries), in
+  # first-encounter order, de-duped. Constants are inlined (skipped).
+  defp collect_leaves(node), do: node |> collect_leaves([], MapSet.new()) |> elem(0)
+
+  defp collect_leaves(%T{data: %Expr{op: :constant}}, acc, seen), do: {acc, seen}
+
+  defp collect_leaves(%T{data: %Expr{id: id}} = node, acc, seen) do
+    cond do
+      MapSet.member?(seen, id) ->
+        {acc, seen}
+
+      fusable_elementwise?(node) ->
+        Enum.reduce(node.data.args, {acc, MapSet.put(seen, id)}, fn
+          %T{data: %Expr{}} = child, {a, s} -> collect_leaves(child, a, s)
+          _, as -> as
+        end)
+
+      true ->
+        {acc ++ [node], MapSet.put(seen, id)}
+    end
+  end
+
+  defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)
+  defp fusable_elementwise?(_), do: false
+
+  defp has_dot?(%T{data: %Expr{op: :dot}}), do: true
+
+  defp has_dot?(%T{data: %Expr{args: args}}) do
+    Enum.any?(args, fn
+      %T{data: %Expr{}} = child -> has_dot?(child)
+      _ -> false
+    end)
+  end
+
+  defp has_dot?(_), do: false
+
+  defp dot_2d_f32!(%T{type: t}, %T{shape: as, type: at} = _a, ca, ba, %T{shape: bs, type: bt}, cb, bb) do
+    ok =
+      t == {:f, 32} and at == {:f, 32} and bt == {:f, 32} and
+        tuple_size(as) == 2 and tuple_size(bs) == 2 and
+        ca == [1] and cb == [0] and ba == [] and bb == []
+
+    unless ok, do: throw(:unschedulable)
+  end
+
+  defp compile!(glsl) do
+    case Codegen.compile_cached(glsl) do
+      {:ok, spv} -> spv
+      {:error, _} -> throw(:unschedulable)
+    end
+  end
+
+  defp memoize(state, %T{data: %Expr{id: id}}, ref),
+    do: %{state | memo: Map.put(state.memo, id, ref)}
+
+  defp add_stage(state, instr), do: %{state | stages: [instr | state.stages]}
+
+  defp new_sid(state), do: {state.counter, %{state | counter: state.counter + 1}}
+
+  # ---- multi-stage runtime executor ------------------------------------
+
+  defp run_plan(stages, out_sid, template, params) do
+    values = Enum.reduce(stages, %{}, &exec_stage(&1, &2, params))
+    out_ref = Map.fetch!(values, {:stage, out_sid})
+    %{template | data: %VulkanoBackend{ref: out_ref, shape: template.shape, type: template.type}}
+  end
+
+  defp exec_stage({:dot, sid, a_ref, b_ref, m, n, k}, values, params) do
+    {a, values} = resolve(a_ref, values, params)
+    {b, values} = resolve(b_ref, values, params)
+    {:ok, out} = NativeV.buf_alloc(m * n * 4)
+    :ok = NativeV.matmul(out, a, b, m, n, k, @matmul_spv)
+    Map.put(values, {:stage, sid}, out)
+  end
+
+  defp exec_stage({:fused, sid, spv, input_refs, n_elems}, values, params) do
+    {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
+    {:ok, out} = NativeV.buf_alloc(n_elems * 4)
+    :ok = NativeV.dispatch_generated(out, in_refs, n_elems, spv)
+    Map.put(values, {:stage, sid}, out)
+  end
+
+  # Resolve an input ref to a device buffer; param buffers are transferred once
+  # and cached (a param feeding several stages uploads only once).
+  defp resolve({:stage, sid}, values, _params), do: {Map.fetch!(values, {:stage, sid}), values}
+
+  defp resolve({:param, pidx} = key, values, params) do
+    case Map.get(values, key) do
+      nil ->
+        tensor = params |> Enum.at(pidx) |> then(& &1.()) |> Nx.devectorize()
+        %T{data: %VulkanoBackend{ref: ref}} = Nx.backend_transfer(tensor, VulkanoBackend)
+        {ref, Map.put(values, key, ref)}
+
+      ref ->
+        {ref, values}
     end
   end
 
