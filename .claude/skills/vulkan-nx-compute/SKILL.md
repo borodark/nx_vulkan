@@ -94,9 +94,9 @@ glslangValidator -V glsl/foo.comp -o priv/shaders/foo.spv
 `-V` = compile GLSL to Vulkan SPIR-V. Commit the `.spv` (they ship in the hex
 package — see the `priv/shaders` entry in `mix.exs` `package/0`). There is no mix
 task — run the command above directly. (`scripts/build_and_test.sh` loops
-glslangValidator over a shader dir, but it points at a **machine-local**
-`/home/io/spirit/shaders`, not the repo's `glsl/` — don't rely on it to compile a
-kernel you added under `glsl/`.) JIT kernels are compiled the same way but at
+glslangValidator over a shader dir, but it points at a **machine-local** path
+outside the repo (a personal `spirit/shaders` dir), not the repo's `glsl/` —
+don't rely on it to compile a kernel you added under `glsl/`.) JIT kernels are compiled the same way but at
 runtime by `Codegen.compile_cached/1`
 (`System.cmd("glslangValidator", ["-V", comp_path, "-o", spv_path])`) into the
 gitignored `priv/shader_cache/`.
