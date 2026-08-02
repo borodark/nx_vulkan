@@ -38,29 +38,29 @@ softmax = fn a ->
   Nx.divide(n, Nx.sum(n, axes: [1], keep_axes: true))
 end
 
-# with_cse_off runs `thunk` with NXV_CSE=0 set for the compile; since jit compiles
-# lazily on first call, set the env, build a fresh jit, warm it, then measure.
+# Cross-stage CSE is default-OFF; NXV_CSE=1 opts the hoisting IN. jit compiles
+# lazily on first call, so set the env, build a fresh jit, warm it, then measure.
 run = fn label, fun, args ->
   ref = apply(fun, args) |> Nx.backend_transfer(Nx.BinaryBackend)
 
-  System.delete_env("NXV_CSE")
+  System.put_env("NXV_CSE", "1")
   on = Nx.Defn.jit(fun, compiler: Nx.Vulkan.Compiler)
   con = apply(on, args) |> Nx.backend_transfer(Nx.BinaryBackend)
+  System.delete_env("NXV_CSE")
 
-  System.put_env("NXV_CSE", "0")
   off = Nx.Defn.jit(fun, compiler: Nx.Vulkan.Compiler)
   coff = apply(off, args) |> Nx.backend_transfer(Nx.BinaryBackend)
-  System.delete_env("NXV_CSE")
 
   err_on = Nx.subtract(ref, con) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
   err_off = Nx.subtract(ref, coff) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
 
   e = best.(fn -> apply(fun, args) end)
-  t_on = best.(fn -> apply(on, args) end)
 
-  System.put_env("NXV_CSE", "0")
-  t_off = best.(fn -> apply(off, args) end)
+  System.put_env("NXV_CSE", "1")
+  t_on = best.(fn -> apply(on, args) end)
   System.delete_env("NXV_CSE")
+
+  t_off = best.(fn -> apply(off, args) end)
 
   IO.puts(
     "#{label}: eager #{e}ms | CSE-on #{t_on}ms (#{Float.round(e / t_on, 2)}x) | " <>

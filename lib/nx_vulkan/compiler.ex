@@ -246,8 +246,9 @@ defmodule Nx.Vulkan.Compiler do
   end
 
   @doc false
-  # Test hook: the cross-stage-CSE hoist set for a result expression.
-  def __hoist_ids__(result), do: hoist_ids(result)
+  # Test hook: the cross-stage-CSE hoist ANALYSIS for a result expression
+  # (ungated — exercises the sharing detection regardless of the NXV_CSE default).
+  def __hoist_ids__(result), do: do_hoist_ids(result)
 
   # Boundary ops — a reference through one of these definitely crosses a stage.
   @boundary_ops [:sum, :product, :reduce_max, :reduce_min, :dot, :conv]
@@ -261,14 +262,19 @@ defmodule Nx.Vulkan.Compiler do
   # where the in-shader CSE (emit_dag) already computes the node once, so hoisting
   # there would only add a needless dispatch.
   defp hoist_ids(result) do
-    if System.get_env("NXV_CSE") == "0" do
-      # Cross-stage CSE disabled: shared nodes are re-inlined into every consumer
-      # (recompute) instead of materialised once. Trades an extra dispatch +
-      # buffer for the recompute — the win depends on the shared node's cost vs
-      # dispatch overhead, so this env flag exists to A/B it across the fleet.
-      MapSet.new()
-    else
+    # Cross-stage CSE (hoisting a boundary-crossing shared subexpr into its own
+    # stage) is DEFAULT-OFF: the fleet race (bench_results/CSE_SOFTMAX_RACE.md)
+    # found it never wins — it regresses ~0.72-0.87x on small/medium softmax and
+    # is at best neutral (~1.0x) at large sizes, on BOTH Kepler (GT 650M) and
+    # Ampere (RTX 3060 Ti). Hoisting swaps a cheap recompute for an extra dispatch
+    # + a global-memory round-trip, which dominates. Opt in with NXV_CSE=1 for the
+    # rare graph with a genuinely expensive shared subexpr. NOTE: this only gates
+    # the *hoisting*; the always-beneficial reuse of a stage already materialised
+    # for another tuple output (via `memo`) is independent and stays on.
+    if System.get_env("NXV_CSE") == "1" do
       do_hoist_ids(result)
+    else
+      MapSet.new()
     end
   end
 
