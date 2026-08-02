@@ -720,12 +720,35 @@ defmodule Nx.Vulkan.Compiler do
   defp resolve({:param, pidx} = key, values, params) do
     case Map.get(values, key) do
       nil ->
-        tensor = params |> Enum.at(pidx) |> then(& &1.()) |> Nx.devectorize()
-        %T{data: %VulkanoBackend{ref: ref}} = Nx.backend_transfer(tensor, VulkanoBackend)
+        ref = param_ref(params, pidx)
         {ref, Map.put(values, key, ref)}
 
       ref ->
         {ref, values}
+    end
+  end
+
+  # Device buffer for runtime argument `pidx`. Defn passes each argument as a
+  # zero-arg thunk (see Evaluator).
+  #
+  # An argument that is ALREADY GPU-resident binds its existing buffer. This
+  # matters a lot: `VulkanoBackend.backend_transfer/3` delegates to
+  # `backend_copy/3`, which round-trips through host memory (`to_binary` then
+  # `from_binary`) even when the target backend is VulkanoBackend itself. Calling
+  # it on an already-on-device param would cost a full download + upload per
+  # param PER INVOCATION — for a 512x512 f64 weight, 2 MB each way — which
+  # swamps the kernel being fed and made fused graphs measurably slower than the
+  # eager path they replace.
+  defp param_ref(params, pidx) do
+    tensor = params |> Enum.at(pidx) |> then(& &1.()) |> Nx.devectorize()
+
+    case tensor.data do
+      %VulkanoBackend{ref: ref} ->
+        ref
+
+      _ ->
+        %T{data: %VulkanoBackend{ref: ref}} = Nx.backend_transfer(tensor, VulkanoBackend)
+        ref
     end
   end
 
@@ -798,14 +821,7 @@ defmodule Nx.Vulkan.Compiler do
   # ---- runtime dispatch ------------------------------------------------
 
   defp run_fused(spv_path, param_order, template, params) do
-    in_refs =
-      Enum.map(param_order, fn pidx ->
-        # Defn passes each argument as a zero-arg thunk (see Evaluator).
-        tensor = params |> Enum.at(pidx) |> then(& &1.()) |> Nx.devectorize()
-
-        %T{data: %VulkanoBackend{ref: ref}} = Nx.backend_transfer(tensor, VulkanoBackend)
-        ref
-      end)
+    in_refs = Enum.map(param_order, &param_ref(params, &1))
 
     n = Nx.size(template)
     {:ok, out_ref} = NativeV.buf_alloc(n * ebytes(template.type))
@@ -816,12 +832,7 @@ defmodule Nx.Vulkan.Compiler do
   end
 
   defp run_fused_reduce(spv_path, param_order, {outer, rsize, inner}, template, params) do
-    in_refs =
-      Enum.map(param_order, fn pidx ->
-        tensor = params |> Enum.at(pidx) |> then(& &1.()) |> Nx.devectorize()
-        %T{data: %VulkanoBackend{ref: ref}} = Nx.backend_transfer(tensor, VulkanoBackend)
-        ref
-      end)
+    in_refs = Enum.map(param_order, &param_ref(params, &1))
 
     n_out = max(Nx.size(template), 1)
     {:ok, out_ref} = NativeV.buf_alloc(n_out * ebytes(template.type))
