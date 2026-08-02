@@ -243,6 +243,14 @@ defmodule Nx.Vulkan.NativeV do
   """
   def device_name, do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Whether the physical device advertises `shaderFloat64` — `{:ok, boolean}`.
+  The `_f64.spv` shaders and any generated f64 kernel require it; on a device
+  without it, pipeline creation for those fails at dispatch time, so callers
+  must gate on this and take a host fallback instead.
+  """
+  def device_supports_f64, do: :erlang.nif_error(:nif_not_loaded)
+
   # Chain shader NIFs — registered in Rust, must have stubs here for NIF loading.
   # f32 variant kept as stub only (unused); f64 is the active path.
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),

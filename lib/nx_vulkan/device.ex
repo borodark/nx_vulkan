@@ -76,6 +76,55 @@ defmodule Nx.Vulkan.Device do
     end
   end
 
+  @doc """
+  Whether the active device supports 64-bit floats in shaders (`shaderFloat64`).
+
+  Every `_f64.spv` kernel and every generated f64 fused kernel needs it; without
+  it, pipeline creation fails at dispatch, so callers must gate on this and take
+  the host fallback. Queried once and cached. Conservatively `false` if the
+  device cannot be reached, so an f64 GPU path is never attempted blind.
+
+  Note this is not a niche capability for this backend: the eager path is
+  f64-first, and even the *f32* fused reduce accumulates in `double`. A device
+  without `shaderFloat64` is severely limited here regardless of this flag.
+
+  Override with `NXV_F64=0|1` (read every call, like `NXV_GPU_CLASS`) to force
+  the f64 GPU paths off or on — `0` is how the host-fallback path is exercised
+  on a machine whose GPU does support f64.
+  """
+  def f64? do
+    case System.get_env("NXV_F64") do
+      "0" -> false
+      "1" -> true
+      _ -> cached_f64()
+    end
+  end
+
+  defp cached_f64 do
+    case :persistent_term.get({__MODULE__, :f64}, nil) do
+      nil ->
+        v =
+          case safe_supports_f64() do
+            {:ok, bool} when is_boolean(bool) -> bool
+            _ -> false
+          end
+
+        :persistent_term.put({__MODULE__, :f64}, v)
+        v
+
+      v ->
+        v
+    end
+  end
+
+  defp safe_supports_f64 do
+    Nx.Vulkan.NativeV.device_supports_f64()
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
   defp safe_device_name do
     Nx.Vulkan.NativeV.device_name()
   rescue

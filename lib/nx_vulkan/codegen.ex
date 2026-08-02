@@ -9,11 +9,14 @@ defmodule Nx.Vulkan.Codegen do
   cached by source hash. One generated shader + one `dispatch_generated` call
   replaces the N per-op dispatches the eager backend would issue.
 
-  Scope today (increment 1): same-shape, f32 elementwise chains over unary and
-  binary arithmetic ops plus scalar constants. Comparisons (which change dtype
-  to u8), broadcasting between differing tensor shapes, reductions and library
-  ops (dot/conv) are not fused yet — `Nx.Vulkan.Compiler` falls back to the
-  Evaluator for those, so behaviour stays correct.
+  Scope: same-shape elementwise chains over unary and binary arithmetic ops plus
+  scalar constants, at `{:f, 32}` or `{:f, 64}` — the emitters are parameterised
+  on the element type (`glsl_scalar/1`), so one code path emits `float` or
+  `double` SSBOs, temps and literals. A tree must be of one dtype throughout.
+  At f64 the transcendentals are excluded (`@f64_unsafe_ops`): GLSL.std.450 has
+  no 64-bit exp/log/pow/tanh. Comparisons (which change dtype to u8) are not
+  fused — `Nx.Vulkan.Compiler` falls back to the Evaluator for those, so
+  behaviour stays correct.
 
   Ported from the dropped `577baf9`/`9a9e3ad` codegen, retargeted to Nx 0.13 and
   the current `Nx.Vulkan.NativeV` dispatch primitives.
@@ -53,16 +56,35 @@ defmodule Nx.Vulkan.Codegen do
     min: {:call, "min"}
   }
 
+  # GLSL.std.450 defines the transcendentals (Exp/Log/Pow/Tanh/…) for 16- and
+  # 32-bit floats ONLY — there is no f64 exp/log/pow in SPIR-V. The arithmetic
+  # and comparison builtins (Sqrt/InverseSqrt/FAbs/FSign/Floor/Ceil/Round/
+  # FMin/FMax) DO cover 64-bit. So an f64 tree may fuse arithmetic freely but
+  # anything transcendental is rejected here and host-falls-back rather than
+  # silently boundary-casting through f32 and losing ~7 decimal digits. (The
+  # eager backend's f64 shaders make that trade deliberately; a fused kernel
+  # should not make it behind the user's back.)
+  @f64_unsafe_ops [:exp, :log, :sigmoid, :tanh, :erf, :expm1, :pow]
+
   @doc "Set of ops that can be fused into one elementwise shader (excludes params/constants)."
   def fusable_op?(op), do: is_map_key(@unary_ops, op) or is_map_key(@binary_ops, op)
 
   @doc """
-  True when the whole expression tree is a same-shape f32 elementwise chain
-  (unary/binary ops, parameters, scalar constants) that `emit_elementwise/1`
-  can compile into a single shader.
+  Like `fusable_op?/1` but dtype-aware: at `{:f, 64}` the transcendentals are
+  excluded (no f64 GLSL.std.450 equivalents — see `@f64_unsafe_ops`).
   """
-  def fusable?(%T{type: {:f, 32}, shape: out_shape} = expr) do
-    fusable_node?(expr, out_shape)
+  def fusable_op?(op, {:f, 64}), do: fusable_op?(op) and op not in @f64_unsafe_ops
+  def fusable_op?(op, _type), do: fusable_op?(op)
+
+  @doc """
+  True when the whole expression tree is a same-shape elementwise chain
+  (unary/binary ops, parameters, scalar constants) of a single float dtype
+  (`{:f, 32}` or `{:f, 64}`) that `emit_elementwise/1` can compile into one
+  shader. Every interior node must share the root's dtype — a mixed-precision
+  tree needs an `as_type` cast, which is not a fusable op anyway.
+  """
+  def fusable?(%T{type: {:f, w} = type, shape: out_shape} = expr) when w in [32, 64] do
+    fusable_node?(expr, out_shape, type)
   end
 
   def fusable?(_), do: false
@@ -71,28 +93,31 @@ defmodule Nx.Vulkan.Codegen do
   # (NumPy rules), so nodes may be smaller than `out_shape` — a param `{n}` added
   # to `{m, n}`, a scalar-tensor scale, etc. The codegen loads each param at its
   # broadcast-mapped index; interior nodes are unchanged (see `emit_loads`).
-  defp fusable_node?(%T{data: %Expr{op: :parameter}, type: {:f, 32}, shape: s}, out_shape),
+  # `type` is repeated in the head so every node must carry the ROOT's dtype.
+  defp fusable_node?(%T{data: %Expr{op: :parameter}, type: type, shape: s}, out_shape, type),
     do: broadcasts_to?(s, out_shape)
 
-  defp fusable_node?(%T{data: %Expr{op: :constant, args: [c]}, shape: {}}, _out_shape),
+  defp fusable_node?(%T{data: %Expr{op: :constant, args: [c]}, shape: {}}, _out_shape, _type),
     do: is_number(c)
 
-  defp fusable_node?(%T{data: %Expr{op: op, args: [a]}, type: {:f, 32}, shape: s}, out_shape)
+  defp fusable_node?(%T{data: %Expr{op: op, args: [a]}, type: type, shape: s}, out_shape, type)
        when is_map_key(@unary_ops, op),
-       do: broadcasts_to?(s, out_shape) and fusable_node?(a, out_shape)
+       do: fusable_op?(op, type) and broadcasts_to?(s, out_shape) and fusable_node?(a, out_shape, type)
 
-  defp fusable_node?(%T{data: %Expr{op: op, args: [a, b]}, type: {:f, 32}, shape: s}, out_shape)
+  defp fusable_node?(%T{data: %Expr{op: op, args: [a, b]}, type: type, shape: s}, out_shape, type)
        when is_map_key(@binary_ops, op),
-       do: broadcasts_to?(s, out_shape) and operand_fusable?(a, out_shape) and operand_fusable?(b, out_shape)
+       do:
+         fusable_op?(op, type) and broadcasts_to?(s, out_shape) and
+           operand_fusable?(a, out_shape, type) and operand_fusable?(b, out_shape, type)
 
-  defp fusable_node?(_, _), do: false
+  defp fusable_node?(_, _, _), do: false
 
   # Binary operands may be scalar constants (shape {}) even when the op output
   # is a full tensor; those are fine (emitted as literals).
-  defp operand_fusable?(%T{data: %Expr{op: :constant, args: [c]}, shape: {}}, _out),
+  defp operand_fusable?(%T{data: %Expr{op: :constant, args: [c]}, shape: {}}, _out, _type),
     do: is_number(c)
 
-  defp operand_fusable?(node, out_shape), do: fusable_node?(node, out_shape)
+  defp operand_fusable?(node, out_shape, type), do: fusable_node?(node, out_shape, type)
 
   # NumPy broadcast: `s` right-aligns to `o`, each dim 1 or equal.
   defp broadcasts_to?(s, o) do
@@ -125,24 +150,25 @@ defmodule Nx.Vulkan.Codegen do
   and the multi-stage split (where a leaf may be a prior stage's output buffer).
   Returns `{glsl, %{n_inputs: k}}`.
   """
-  def emit_region(%T{shape: out_shape} = root, inputs) do
+  def emit_region(%T{shape: out_shape, type: type} = root, inputs) do
     ctx = build_ctx(inputs)
-    {temp_lines, root_ref} = emit_dag(root, ctx)
+    scalar = glsl_scalar(type)
+    {temp_lines, root_ref} = emit_dag(root, ctx, type)
     k = length(inputs)
-    loads = emit_loads(inputs, out_shape, "i", "    ")
+    loads = emit_loads(inputs, out_shape, "i", "    ", scalar)
     temps = Enum.map_join(temp_lines, "\n", &("    " <> &1))
 
     glsl = """
     #version 450
-
+    #{fp64_extension(type)}
     layout(local_size_x = 256) in;
 
     layout(push_constant) uniform Push { uint n; } pc;
 
-    #{input_decls(k)}
-    layout(std430, binding = #{k}) writeonly buffer Out { float out_buf[]; };
+    #{input_decls(k, scalar)}
+    layout(std430, binding = #{k}) writeonly buffer Out { #{scalar} out_buf[]; };
 
-    #{helper_functions()}
+    #{helper_functions(type)}
 
     void main() {
         uint i = gl_GlobalInvocationID.x;
@@ -209,24 +235,25 @@ defmodule Nx.Vulkan.Codegen do
   parameters. Used by the multi-stage split to materialise a reduce as a stage
   (e.g. `mean(x)` in an `x - mean(x)` layernorm graph). Returns `{glsl, %{n_inputs: k}}`.
   """
-  def emit_reduce_region(%T{shape: in_shape} = inner, reduce_op, inputs, scale \\ nil)
+  def emit_reduce_region(%T{shape: in_shape, type: type} = inner, reduce_op, inputs, scale \\ nil)
       when reduce_op in @reduce_ops do
     ctx = build_ctx(inputs)
-    {temp_lines, root} = emit_dag(inner, ctx)
+    scalar = glsl_scalar(type)
+    {temp_lines, root} = emit_dag(inner, ctx, type)
     k = length(inputs)
 
-    decls = input_decls(k)
+    decls = input_decls(k, scalar)
 
     # load each input at the running reduce index `idx` (broadcast-aware: the
     # pre-reduction shape `in_shape` is the coordinate space)
-    loads = emit_loads(inputs, in_shape, "idx", "            ")
+    loads = emit_loads(inputs, in_shape, "idx", "            ", scalar)
 
     temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
 
     %{acc_type: acc_type, init: init, shared_init: shared_init, accumulate: accumulate,
-      combine: combine, store: base_store} = reduce_kind(reduce_op, root)
+      combine: combine, store: base_store} = reduce_kind(reduce_op, root, type)
 
-    store = if scale, do: "(#{base_store}) / #{glsl_float(scale)}", else: base_store
+    store = if scale, do: "(#{base_store}) / #{glsl_lit(scale, type)}", else: base_store
 
     glsl = """
     #version 450
@@ -242,11 +269,11 @@ defmodule Nx.Vulkan.Codegen do
     } pc;
 
     #{decls}
-    layout(std430, binding = #{k}) writeonly buffer Out { float out_buf[]; };
+    layout(std430, binding = #{k}) writeonly buffer Out { #{scalar} out_buf[]; };
 
     shared #{acc_type} sdata[#{@wg_size}];
 
-    #{helper_functions()}
+    #{helper_functions(type)}
 
     void main() {
         uint tid = gl_LocalInvocationID.x;
@@ -287,34 +314,43 @@ defmodule Nx.Vulkan.Codegen do
 
   # Per-op GLSL fragments for the parallel tree reduce. `root` is the GLSL ref to
   # the fused elementwise value at the current reduce index (a temp / load).
-  defp reduce_kind(:sum, root) do
+  #
+  # sum/product accumulate in `double` REGARDLESS of the element type: at f32
+  # that is required for BinaryBackend parity (which sums in f64), and at f64 it
+  # is simply the element type. Only the final store is dtype-dependent.
+  defp reduce_kind(:sum, root, type) do
     %{
       acc_type: "double",
       init: "0.0lf",
       shared_init: "0.0lf",
       accumulate: "acc += double(#{root});",
       combine: "sdata[tid] + sdata[tid + s]",
-      store: "float(sdata[0])"
+      store: "#{glsl_scalar(type)}(sdata[0])"
     }
   end
 
-  defp reduce_kind(:product, root) do
+  defp reduce_kind(:product, root, type) do
     %{
       acc_type: "double",
       init: "1.0lf",
       shared_init: "1.0lf",
       accumulate: "acc *= double(#{root});",
       combine: "sdata[tid] * sdata[tid + s]",
-      store: "float(sdata[0])"
+      store: "#{glsl_scalar(type)}(sdata[0])"
     }
   end
 
-  defp reduce_kind(:reduce_max, root), do: minmax_kind(root, "max", "-1.0/0.0")
-  defp reduce_kind(:reduce_min, root), do: minmax_kind(root, "min", "1.0/0.0")
+  # min/max carry no accumulation error, so the accumulator is the element type
+  # itself — widening to double would only cost shared memory and a cast back.
+  defp reduce_kind(:reduce_max, root, type),
+    do: minmax_kind(root, "max", "-1.0#{lit_suffix(type)}/0.0#{lit_suffix(type)}", type)
 
-  defp minmax_kind(root, fun, init) do
+  defp reduce_kind(:reduce_min, root, type),
+    do: minmax_kind(root, "min", "1.0#{lit_suffix(type)}/0.0#{lit_suffix(type)}", type)
+
+  defp minmax_kind(root, fun, init, type) do
     %{
-      acc_type: "float",
+      acc_type: glsl_scalar(type),
       init: init,
       shared_init: init,
       accumulate: "acc = #{fun}(acc, #{root});",
@@ -335,16 +371,17 @@ defmodule Nx.Vulkan.Codegen do
   # `ctx` = %{params: %{pidx => binding}, stages: %{node_id => binding}}. A leaf
   # input is a parameter OR a node materialised by an earlier stage (multi-stage
   # split); both load from a buffer `vB`. Constants inline as literals.
-  defp emit_dag(%T{} = expr, ctx) do
+  defp emit_dag(%T{} = expr, ctx, type) do
     order = expr |> topo_order(ctx, [], MapSet.new()) |> elem(0) |> Enum.reverse()
     temp = order |> Enum.with_index() |> Map.new(fn {n, i} -> {n.data.id, i} end)
+    scalar = glsl_scalar(type)
 
     lines =
       Enum.map(order, fn n ->
-        "float t#{Map.fetch!(temp, n.data.id)} = #{node_expr(n, ctx, temp)};"
+        "#{scalar} t#{Map.fetch!(temp, n.data.id)} = #{node_expr(n, ctx, temp, type)};"
       end)
 
-    {lines, ref(expr, ctx, temp)}
+    {lines, ref(expr, ctx, temp, type)}
   end
 
   # A node is a leaf input (no temp, stop recursion) if it's a parameter, a
@@ -374,17 +411,17 @@ defmodule Nx.Vulkan.Codegen do
   end
 
   # GLSL for one node in terms of its children's refs (no recursion into them).
-  defp node_expr(%T{data: %Expr{op: op, args: [a]}}, ctx, temp)
+  defp node_expr(%T{data: %Expr{op: op, args: [a]}}, ctx, temp, type)
        when is_map_key(@unary_ops, op) do
     # Replace only the standalone `r` operand token — a plain "r" replace would
     # also clobber the `r` inside op names like sqrt/round/reciprocal/erf.
-    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{ref(a, ctx, temp)})")
+    String.replace(Map.fetch!(@unary_ops, op), ~r/\br\b/, "(#{ref(a, ctx, temp, type)})")
   end
 
-  defp node_expr(%T{data: %Expr{op: op, args: [a, b]}}, ctx, temp)
+  defp node_expr(%T{data: %Expr{op: op, args: [a, b]}}, ctx, temp, type)
        when is_map_key(@binary_ops, op) do
-    l = ref(a, ctx, temp)
-    r = ref(b, ctx, temp)
+    l = ref(a, ctx, temp, type)
+    r = ref(b, ctx, temp, type)
 
     case Map.fetch!(@binary_ops, op) do
       {:infix, sym} -> "(#{l} #{sym} #{r})"
@@ -392,13 +429,24 @@ defmodule Nx.Vulkan.Codegen do
     end
   end
 
-  # Reference to a node's already-computed value.
-  defp ref(%T{data: %Expr{op: :constant, args: [c]}}, _ctx, _temp), do: glsl_float(c)
+  # Reference to a node's already-computed value. A constant inlines as a
+  # literal OF THE ELEMENT TYPE; at f64 the `lf` suffix matters, since an
+  # unsuffixed `0.1` is an f32 literal that glslang would round to f32 before
+  # widening to double.
+  #
+  # The reference this must match is `Nx.Defn.Evaluator` — the fallback this
+  # compiler defers to — NOT an eagerly-computed `Nx.add(t_f64, 0.1)`. Those two
+  # genuinely differ at f64: eager Nx types a bare Elixir float literal as f32
+  # and then promotes, so it carries the f32-rounded constant, whereas inside a
+  # traced graph the constant is already f64. Suffixing keeps us equal to the
+  # Evaluator (and strictly more accurate than the eager path). At f32 the
+  # question does not arise — both routes round identically.
+  defp ref(%T{data: %Expr{op: :constant, args: [c]}}, _ctx, _temp, type), do: glsl_lit(c, type)
 
-  defp ref(%T{data: %Expr{op: :parameter, args: [pidx]}}, ctx, _temp),
+  defp ref(%T{data: %Expr{op: :parameter, args: [pidx]}}, ctx, _temp, _type),
     do: "v#{Map.fetch!(ctx.params, pidx)}"
 
-  defp ref(%T{data: %Expr{id: id}}, ctx, temp) do
+  defp ref(%T{data: %Expr{id: id}}, ctx, temp, _type) do
     case Map.get(ctx.stages, id) do
       nil -> "t#{Map.fetch!(temp, id)}"
       b -> "v#{b}"
@@ -419,13 +467,27 @@ defmodule Nx.Vulkan.Codegen do
     %{params: params, stages: stages}
   end
 
-  # `layout(...) buffer InB { float bufB[]; };` for each of `k` input bindings.
-  defp input_decls(k) do
+  # `layout(...) buffer InB { <scalar> bufB[]; };` for each of `k` input bindings.
+  defp input_decls(k, scalar) do
     0..(k - 1)
     |> Enum.map_join("\n", fn b ->
-      "layout(std430, binding = #{b}) readonly buffer In#{b} { float buf#{b}[]; };"
+      "layout(std430, binding = #{b}) readonly buffer In#{b} { #{scalar} buf#{b}[]; };"
     end)
   end
+
+  # GLSL scalar type + literal suffix for an Nx float dtype.
+  defp glsl_scalar({:f, 32}), do: "float"
+  defp glsl_scalar({:f, 64}), do: "double"
+
+  defp lit_suffix({:f, 64}), do: "lf"
+  defp lit_suffix(_), do: ""
+
+  # f64 shaders must declare the extension; f32 ones must not (the fused reduce
+  # declares it unconditionally because its accumulator is `double` either way).
+  defp fp64_extension({:f, 64}), do: "#extension GL_ARB_gpu_shader_fp64 : require\n"
+  defp fp64_extension(_), do: ""
+
+  defp glsl_lit(c, type), do: glsl_float(c) <> lit_suffix(type)
 
   defp glsl_float(c) do
     s = to_string(c / 1.0)
@@ -453,12 +515,12 @@ defmodule Nx.Vulkan.Codegen do
   # directly; broadcast inputs (scalar, row/col vector, any dim == 1) load at
   # their NumPy-broadcast source index, computed from `ivar` with the
   # (compile-time-constant) shapes baked in.
-  defp emit_loads(inputs, out_shape, ivar, indent) do
+  defp emit_loads(inputs, out_shape, ivar, indent, scalar) do
     inputs
     |> Enum.with_index()
     |> Enum.map(fn {{_key, shape}, b} ->
       idx = if shape == out_shape, do: ivar, else: broadcast_index(shape, out_shape, ivar)
-      "#{indent}float v#{b} = buf#{b}[#{idx}];"
+      "#{indent}#{scalar} v#{b} = buf#{b}[#{idx}];"
     end)
     |> Enum.join("\n")
   end
@@ -518,7 +580,11 @@ defmodule Nx.Vulkan.Codegen do
     end
   end
 
-  defp helper_functions do
+  # The erf/expm1 approximations are f32-only — every op that calls them is in
+  # @f64_unsafe_ops, so an f64 shader never needs (and must not declare) them.
+  defp helper_functions({:f, 64}), do: ""
+
+  defp helper_functions(_type) do
     """
     float erf_approx(float x) {
         float a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;

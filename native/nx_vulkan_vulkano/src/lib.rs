@@ -173,6 +173,7 @@ struct VkContext {
     set_allocator: Arc<StandardDescriptorSetAllocator>,
     device_name: String,
     device_type: String,
+    supports_f64: bool,
 }
 
 static CTX: OnceLock<VkContext> = OnceLock::new();
@@ -272,6 +273,7 @@ fn ctx() -> Result<&'static VkContext, String> {
         set_allocator,
         device_name,
         device_type,
+        supports_f64,
     };
 
     let _ = CTX.set(ctx);
@@ -2409,6 +2411,18 @@ fn device_name(env: Env) -> NifResult<Term> {
     }
 }
 
+/// Whether the physical device advertises `shaderFloat64`. The `_f64.spv`
+/// shaders and any generated f64 kernel need it; without it, pipeline creation
+/// for those fails at dispatch time, so callers must gate on this and take a
+/// host fallback instead.
+#[rustler::nif]
+fn device_supports_f64(env: Env) -> NifResult<Term> {
+    match ctx() {
+        Ok(c) => Ok((atoms::ok(), c.supports_f64).encode(env)),
+        Err(e) => Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    }
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -2445,6 +2459,7 @@ rustler::init!(
         conv_im2col,
         conv_gemm,
         device_name,
+        device_supports_f64,
     ],
     load = load
 );

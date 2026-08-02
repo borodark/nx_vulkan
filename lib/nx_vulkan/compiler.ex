@@ -9,13 +9,35 @@ defmodule Nx.Vulkan.Compiler do
   supports.
 
   At `__compile__` time it traces the `defn` to an `Nx.Defn.Expr` tree. If the
-  single output is a same-shape f32 elementwise chain (see `Nx.Vulkan.Codegen`),
-  it generates one GLSL shader for the whole chain, compiles it once (cached by
+  single output is a same-shape elementwise chain (see `Nx.Vulkan.Codegen`), it
+  generates one GLSL shader for the whole chain, compiles it once (cached by
   source hash), and returns a function that uploads the inputs, issues ONE
   `dispatch_generated` call, and hands back a GPU-resident result. Anything it
-  can't fuse — tuple outputs, reductions, batched/non-f32 dot/conv, broadcasting between
-  differing shapes, non-f32 — falls through to `Nx.Defn.Evaluator`, so results
-  are always correct; the worst case is "no fusion, same as eager."
+  can't fuse — tuple outputs, batched dot, broadcasting between differing
+  shapes, integer dtypes — falls through to `Nx.Defn.Evaluator`, so results are
+  always correct; the worst case is "no fusion, same as eager."
+
+  ## Dtypes
+
+  `{:f, 32}` and `{:f, 64}` both fuse; the generated shaders are parameterised
+  on the element type and every buffer is sized by it. A graph must be of ONE
+  float dtype throughout — mixed precision would need a cast stage this compiler
+  does not emit, so it falls back.
+
+  Two f64 caveats:
+
+    * **No f64 transcendentals exist in SPIR-V** (GLSL.std.450 defines
+      exp/log/pow/tanh for 16- and 32-bit floats only), so an f64 tree
+      containing one falls back whole-graph rather than silently boundary-casting
+      through f32. f64 arithmetic, `sqrt`, `abs`, `sign`, `min`/`max`,
+      `floor`/`ceil`/`round` all fuse — GLSL.std.450 covers 64-bit for those.
+    * f64 fusion requires the device to advertise `shaderFloat64`
+      (`Nx.Vulkan.Device.f64?/0`, override `NXV_F64=0|1`). glslangValidator
+      compiles fp64 GLSL regardless of the device, so the failure would
+      otherwise surface only at dispatch.
+
+  f64 matmul is ~1/32 rate on consumer NVIDIA cards, so f64 fusion is about
+  coverage, not speed.
 
   ## Usage
 
@@ -143,7 +165,7 @@ defmodule Nx.Vulkan.Compiler do
   # elementwise chain, the reduce is contiguous, and `reduce_beneficial?/3` says
   # the parallel reduce wins on this GPU.
   defp fuse_reduce(result, inner, reduce_op, axes, scale) do
-    with true <- match?(%T{type: {:f, 32}}, inner),
+    with true <- float_tensor?(inner),
          true <- Codegen.fusable?(inner),
          {:ok, outer, rsize, inner_stride} <- reduce_dims(inner.shape, axes),
          true <- reduce_beneficial?(outer * inner_stride, rsize, inner_stride) do
@@ -163,7 +185,7 @@ defmodule Nx.Vulkan.Compiler do
   end
 
   defp fuse_elementwise(result) do
-    if Codegen.fusable?(result) do
+    if float_tensor?(result) and Codegen.fusable?(result) do
       {glsl, meta} = Codegen.emit_elementwise(result)
 
       case Codegen.compile_cached(glsl) do
@@ -187,7 +209,13 @@ defmodule Nx.Vulkan.Compiler do
   # three separate eager dispatches; a CNN layer `relu(conv(x, k) + b)` fuses the
   # same way around the conv.
 
-  @matmul_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+  # f32 matmul uses the f64-accumulator variant (the eager default — matches an
+  # f64 reference to f32 round-off); f64 uses the f64 GEMM. Both are tiled.
+  @matmul_f32_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+  @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
+
+  defp matmul_spv({:f, 32}), do: @matmul_f32_spv
+  defp matmul_spv({:f, 64}), do: @matmul_f64_spv
 
   # Transpose is NOT a view like reshape/squeeze — it permutes axes, so it moves
   # data and needs a real dispatch producing a new buffer. Reuse the eager
@@ -201,8 +229,8 @@ defmodule Nx.Vulkan.Compiler do
   defp ebytes({:f, 32}), do: 4
   defp ebytes({:f, 64}), do: 8
 
-  defp try_multistage(%T{type: {:f, 32}} = result) do
-    if has_boundary?(result) do
+  defp try_multistage(%T{type: type} = result) do
+    if supported_type?(type) and has_boundary?(result) do
       try do
         {ref, state} = plan_node(result, new_plan_state(result))
 
@@ -218,7 +246,7 @@ defmodule Nx.Vulkan.Compiler do
     end
   end
 
-  # non-f32 single tensor: not schedulable
+  # non-float single tensor: not schedulable
   defp try_multistage(%T{}), do: :fallback
 
   # Composite output (a tuple / container of tensors): plan every leaf through ONE
@@ -230,7 +258,7 @@ defmodule Nx.Vulkan.Compiler do
   defp try_multistage(result) do
     leaves = Composite.flatten_list([result])
 
-    if leaves != [] and Enum.all?(leaves, &match?(%T{type: {:f, 32}}, &1)) and
+    if leaves != [] and Enum.all?(leaves, &float_tensor?/1) and
          Enum.any?(leaves, &has_boundary?/1) do
       try do
         {template, {refs_rev, state}} =
@@ -353,13 +381,19 @@ defmodule Nx.Vulkan.Compiler do
   end
 
   defp plan_new(%T{data: %Expr{op: :dot, args: [a, ca, ba, b, cb, bb]}} = node, state) do
-    dot_2d_f32!(node, a, ca, ba, b, cb, bb)
+    dot_2d!(node, a, ca, ba, b, cb, bb)
     {a_ref, state} = plan_node(a, state)
     {b_ref, state} = plan_node(b, state)
     {m, k} = {elem(a.shape, 0), elem(a.shape, 1)}
     n = elem(b.shape, 1)
     {sid, state} = new_sid(state)
-    state = add_stage(state, {:dot, sid, a_ref, b_ref, m, n, k})
+
+    state =
+      add_stage(
+        state,
+        {:dot, sid, a_ref, b_ref, m, n, k, ebytes(node.type), matmul_spv(node.type)}
+      )
+
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -372,9 +406,8 @@ defmodule Nx.Vulkan.Compiler do
   # envelope matches `VulkanoBackend.transpose/3` exactly (2-D, `[1,0]`,
   # f32/f64); higher rank or any other permutation throws :unschedulable.
   defp plan_new(%T{data: %Expr{op: :transpose, args: [inp, axes]}} = node, state) do
-    unless tuple_size(inp.shape) == 2 and axes == [1, 0] and
-             node.type in [{:f, 32}, {:f, 64}],
-           do: throw(:unschedulable)
+    unless tuple_size(inp.shape) == 2 and axes == [1, 0] and supported_type?(node.type),
+      do: throw(:unschedulable)
 
     {in_ref, state} = plan_node(inp, state)
     {m, n} = {elem(inp.shape, 0), elem(inp.shape, 1)}
@@ -407,7 +440,7 @@ defmodule Nx.Vulkan.Compiler do
   # Evaluator instead (still correct), keeping behaviour consistent with try_fuse.
   defp plan_new(%T{data: %Expr{op: op, args: [inner, red_opts]}} = node, state)
        when op in [:sum, :product, :reduce_max, :reduce_min] do
-    unless match?(%T{type: {:f, 32}}, inner), do: throw(:unschedulable)
+    unless float_tensor?(inner), do: throw(:unschedulable)
 
     {outer, rsize, inner_stride} =
       case reduce_dims(inner.shape, red_opts[:axes]) do
@@ -438,7 +471,13 @@ defmodule Nx.Vulkan.Compiler do
     spv = compile!(glsl)
     n_out = max(Nx.size(node), 1)
     {sid, state} = new_sid(state)
-    state = add_stage(state, {:reduce, sid, spv, input_refs, {outer, rsize, inner_stride}, n_out})
+
+    state =
+      add_stage(
+        state,
+        {:reduce, sid, spv, input_refs, {outer, rsize, inner_stride}, n_out, ebytes(node.type)}
+      )
+
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -460,7 +499,7 @@ defmodule Nx.Vulkan.Compiler do
     {glsl, _} = Codegen.emit_region(node, inputs)
     spv = compile!(glsl)
     {sid, state} = new_sid(state)
-    state = add_stage(state, {:fused, sid, spv, input_refs, Nx.size(node)})
+    state = add_stage(state, {:fused, sid, spv, input_refs, Nx.size(node), ebytes(node.type)})
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -510,8 +549,23 @@ defmodule Nx.Vulkan.Compiler do
     not fusable_elementwise?(node) or Map.has_key?(memo, id) or MapSet.member?(shared, id)
   end
 
-  defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)
+  defp fusable_elementwise?(%T{data: %Expr{op: op}, type: t}),
+    do: supported_type?(t) and Codegen.fusable_op?(op, t)
+
   defp fusable_elementwise?(_), do: false
+
+  # f32 and f64 are the two dtypes the generated shaders cover; everything else
+  # (integers, f16, u8 masks) stays on the Evaluator. f64 additionally requires
+  # the device to advertise shaderFloat64 — without it, pipeline creation for an
+  # f64 kernel fails at DISPATCH time (glslangValidator compiles fp64 GLSL
+  # happily regardless), which would crash rather than degrade. Gating here
+  # keeps the fallback whole-graph and correct.
+  defp float_tensor?(%T{type: type}), do: supported_type?(type)
+  defp float_tensor?(_), do: false
+
+  defp supported_type?({:f, 32}), do: true
+  defp supported_type?({:f, 64}), do: Nx.Vulkan.Device.f64?()
+  defp supported_type?(_), do: false
 
   defp has_boundary?(%T{data: %Expr{op: op}}) when op in @boundary_ops, do: true
 
@@ -533,7 +587,7 @@ defmodule Nx.Vulkan.Compiler do
     sr = rank - 2
 
     ok =
-      t == {:f, 32} and it == {:f, 32} and kt == {:f, 32} and
+      supported_type?(t) and it == t and kt == t and
         sr >= 1 and sr <= 3 and
         Keyword.get(opts, :feature_group_size, 1) == 1 and
         Keyword.get(opts, :batch_group_size, 1) == 1 and
@@ -547,9 +601,11 @@ defmodule Nx.Vulkan.Compiler do
   defp identity_perm?(nil, _rank), do: true
   defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
 
-  defp dot_2d_f32!(%T{type: t}, %T{shape: as, type: at} = _a, ca, ba, %T{shape: bs, type: bt}, cb, bb) do
+  # A plain 2-D `a @ b` with all three tensors the same float dtype. Mixed
+  # precision would need a cast stage we don't emit, so it falls back.
+  defp dot_2d!(%T{type: t}, %T{shape: as, type: at} = _a, ca, ba, %T{shape: bs, type: bt}, cb, bb) do
     ok =
-      t == {:f, 32} and at == {:f, 32} and bt == {:f, 32} and
+      supported_type?(t) and at == t and bt == t and
         tuple_size(as) == 2 and tuple_size(bs) == 2 and
         ca == [1] and cb == [0] and ba == [] and bb == []
 
@@ -595,11 +651,11 @@ defmodule Nx.Vulkan.Compiler do
     result
   end
 
-  defp exec_stage({:dot, sid, a_ref, b_ref, m, n, k}, values, params) do
+  defp exec_stage({:dot, sid, a_ref, b_ref, m, n, k, eb, spv}, values, params) do
     {a, values} = resolve(a_ref, values, params)
     {b, values} = resolve(b_ref, values, params)
-    {:ok, out} = NativeV.buf_alloc(m * n * 4)
-    :ok = NativeV.matmul(out, a, b, m, n, k, @matmul_spv)
+    {:ok, out} = NativeV.buf_alloc(m * n * eb)
+    :ok = NativeV.matmul(out, a, b, m, n, k, spv)
     Map.put(values, {:stage, sid}, out)
   end
 
@@ -613,9 +669,9 @@ defmodule Nx.Vulkan.Compiler do
     Map.put(values, {:stage, sid}, out)
   end
 
-  defp exec_stage({:fused, sid, spv, input_refs, n_elems}, values, params) do
+  defp exec_stage({:fused, sid, spv, input_refs, n_elems, eb}, values, params) do
     {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
-    {:ok, out} = NativeV.buf_alloc(n_elems * 4)
+    {:ok, out} = NativeV.buf_alloc(n_elems * eb)
     :ok = NativeV.dispatch_generated(out, in_refs, n_elems, spv)
     Map.put(values, {:stage, sid}, out)
   end
@@ -650,9 +706,9 @@ defmodule Nx.Vulkan.Compiler do
   # reduce stage: parallel workgroup-per-slot tree reduce (dispatch_generated_reduce)
   # over the fusable inner chain, writing outer*inner slots. Inputs may be earlier
   # stages' buffers.
-  defp exec_stage({:reduce, sid, spv, input_refs, {outer, rsize, inner}, n_out}, values, params) do
+  defp exec_stage({:reduce, sid, spv, input_refs, {outer, rsize, inner}, n_out, eb}, values, params) do
     {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
-    {:ok, out} = NativeV.buf_alloc(n_out * 4)
+    {:ok, out} = NativeV.buf_alloc(n_out * eb)
     :ok = NativeV.dispatch_generated_reduce(out, in_refs, outer, rsize, inner, spv)
     Map.put(values, {:stage, sid}, out)
   end
@@ -752,7 +808,7 @@ defmodule Nx.Vulkan.Compiler do
       end)
 
     n = Nx.size(template)
-    {:ok, out_ref} = NativeV.buf_alloc(n * 4)
+    {:ok, out_ref} = NativeV.buf_alloc(n * ebytes(template.type))
     :ok = NativeV.dispatch_generated(out_ref, in_refs, n, spv_path)
 
     data = %VulkanoBackend{ref: out_ref, shape: template.shape, type: template.type}
@@ -768,7 +824,7 @@ defmodule Nx.Vulkan.Compiler do
       end)
 
     n_out = max(Nx.size(template), 1)
-    {:ok, out_ref} = NativeV.buf_alloc(n_out * 4)
+    {:ok, out_ref} = NativeV.buf_alloc(n_out * ebytes(template.type))
     :ok = NativeV.dispatch_generated_reduce(out_ref, in_refs, outer, rsize, inner, spv_path)
 
     data = %VulkanoBackend{ref: out_ref, shape: template.shape, type: template.type}

@@ -472,6 +472,209 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "f64 fusion — the generated shaders are dtype-parameterised" do
+    defp b64(list), do: Nx.tensor(list, type: :f64, backend: Nx.BinaryBackend)
+
+    # For f64 the reference is `Nx.Defn.Evaluator` — the fallback this compiler
+    # defers to — not an eagerly-computed expression. The two genuinely differ
+    # when a bare Elixir float literal is involved: eager Nx types it f32 and
+    # then promotes (carrying an f32-rounded constant), while inside a traced
+    # graph the constant is already f64. Fusion must equal the fallback.
+    defp evaluated(fun, args), do: apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), args)
+
+    defp close64?(got, ref, tol \\ 1.0e-12) do
+      match?(%VulkanoBackend{}, got.data) and Nx.shape(got) == Nx.shape(ref) and
+        Nx.type(got) == {:f, 64} and
+        Nx.to_flat_list(got)
+        |> Enum.zip(Nx.to_flat_list(ref))
+        |> Enum.all?(fn {a, c} -> abs(a - c) <= tol * max(1.0, abs(c)) end)
+    end
+
+    setup do
+      x = Nx.iota({8, 4}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({4, 3}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      %{a: b64([1.0, 2.0, 3.0, 4.0]), b: b64([0.5, 1.5, 2.5, 3.5]), x: x, w: w}
+    end
+
+    test "elementwise chain fuses at f64", %{a: a, b: b} do
+      fun = fn p, q -> Nx.add(Nx.multiply(p, q), Nx.multiply(p, 2.0)) end
+      got = jit(fun).(a, b)
+      assert close64?(got, evaluated(fun, [a, b]))
+    end
+
+    test "f64 arithmetic keeps double precision (not an f32 round trip)", %{a: a} do
+      # 0.1 is not representable in binary; at f32 it rounds to
+      # 0.100000001490116..., so an f32 round trip anywhere shows up at ~1e-9.
+      fun = fn p -> Nx.add(p, 0.1) end
+      got = jit(fun).(a)
+      assert close64?(got, evaluated(fun, [a]))
+      assert hd(Nx.to_flat_list(got)) == 1.1
+    end
+
+    test "broadcast operands fuse at f64", %{x: x} do
+      row = b64([0.1, 0.2, 0.3, 0.4])
+      fun = fn p, r -> Nx.multiply(Nx.add(p, r), 2.0) end
+      got = jit(fun).(x, row)
+      assert close64?(got, evaluated(fun, [x, row]))
+    end
+
+    test "full sum reduces at f64 in one fused dispatch" do
+      t = Nx.iota({256}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      fun = fn p -> Nx.sum(Nx.multiply(p, p)) end
+      got = jit(fun).(t)
+      assert close64?(got, evaluated(fun, [t]))
+    end
+
+    test "mean fuses at f64 (sum with a baked /n)" do
+      t = Nx.iota({4, 64}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      fun = fn p -> Nx.mean(p, axes: [1]) end
+      got = jit(fun).(t)
+      assert close64?(got, evaluated(fun, [t]))
+      assert Nx.shape(got) == {4}
+    end
+
+    test "reduce_max fuses at f64 (element-typed accumulator)" do
+      t = Nx.iota({4, 64}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      fun = fn p -> Nx.reduce_max(Nx.multiply(p, -1.0), axes: [1]) end
+      got = jit(fun).(t)
+      assert close64?(got, evaluated(fun, [t]))
+    end
+
+    test "2-D dot runs the f64 GEMM as a stage", %{x: x, w: w} do
+      fun = fn p, q -> Nx.dot(p, q) end
+      got = jit(fun).(x, w)
+      assert close64?(got, evaluated(fun, [x, w]))
+      assert Nx.shape(got) == {8, 3}
+    end
+
+    test "relu(x @ W + b) fuses end-to-end at f64", %{x: x, w: w} do
+      bias = b64([0.1, 0.2, 0.3])
+      fun = fn p, q, r -> Nx.max(Nx.add(Nx.dot(p, q), r), 0.0) end
+      got = jit(fun).(x, w, bias)
+      assert close64?(got, evaluated(fun, [x, w, bias]))
+    end
+
+    test "x @ Wᵀ fuses at f64 (transpose stage picks the f64 shader)", %{x: x} do
+      w = Nx.iota({3, 4}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn p, q -> Nx.dot(p, Nx.transpose(q)) end
+      got = jit(fun).(x, w)
+      assert close64?(got, evaluated(fun, [x, w]))
+      assert Nx.shape(got) == {8, 3}
+    end
+
+    test "conv fuses at f64" do
+      i = Nx.iota({1, 2, 5, 5}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      k = Nx.iota({3, 2, 3, 3}, type: :f64, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn p, q -> Nx.max(Nx.conv(p, q), 0.0) end
+      got = jit(fun).(i, k)
+      assert close64?(got, evaluated(fun, [i, k]))
+      assert Nx.shape(got) == {1, 3, 3, 3}
+    end
+
+    # GLSL.std.450 has no f64 exp/log/pow/tanh — those trees must host-fall-back
+    # rather than silently boundary-cast through f32.
+    for {name, fun} <- [
+          exp: &Nx.exp/1,
+          log: &Nx.log/1,
+          tanh: &Nx.tanh/1,
+          sigmoid: &Nx.sigmoid/1,
+          erf: &Nx.erf/1
+        ] do
+      test "f64 #{name} falls back to the Evaluator (no f64 transcendental in SPIR-V)", %{a: a} do
+        f = unquote(Macro.escape(fun))
+        got = jit(fn p -> f.(Nx.multiply(p, 2.0)) end).(a)
+        refute match?(%VulkanoBackend{}, got.data)
+        assert close?(got, f.(Nx.multiply(a, 2.0)))
+      end
+    end
+
+    test "f64 pow falls back but stays correct", %{a: a, b: b} do
+      got = jit(fn p, q -> Nx.pow(p, q) end).(a, b)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.pow(a, b))
+    end
+
+    test "an f64 transcendental inside a dot graph drops the whole graph", %{x: x, w: w} do
+      fun = fn p, q -> Nx.tanh(Nx.dot(p, q)) end
+      got = jit(fun).(x, w)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, evaluated(fun, [x, w]))
+    end
+
+    test "f64 sqrt/abs/sign DO fuse (GLSL.std.450 covers 64-bit for these)", %{a: a} do
+      fun = fn p -> Nx.multiply(Nx.sqrt(Nx.abs(p)), Nx.sign(p)) end
+      got = jit(fun).(a)
+      assert close64?(got, evaluated(fun, [a]))
+    end
+
+    test "mixed f32/f64 graph is not fused (would need a cast stage)", %{w: w} do
+      x32 = Nx.iota({8, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      fun = fn p, q -> Nx.dot(p, q) end
+      got = jit(fun).(x32, w)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, Nx.dot(x32, w))
+    end
+
+    # A3: the dispatch NIFs bind byte buffers and push element COUNTS, so they
+    # are element-agnostic — an f64 add is bit-exact, not merely close, provided
+    # Elixir allocated n*8 and the shader declared `double`. A wrong ebytes or a
+    # `float` decl shows up here immediately.
+    test "f64 fused add is BIT-EXACT vs BinaryBackend", %{a: a, b: b} do
+      got = jit(fn p, q -> Nx.add(p, q) end).(a, b)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == Nx.to_flat_list(Nx.add(a, b))
+    end
+
+    test "f64 buffers are 8 bytes/element (a 4-byte alloc would truncate)" do
+      t = Nx.tensor(Enum.map(1..64, &(&1 * 1.0)), type: :f64, backend: Nx.BinaryBackend)
+      got = jit(fn p -> Nx.multiply(p, p) end).(t)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == Nx.to_flat_list(Nx.multiply(t, t))
+    end
+
+    test "Device.f64?/0 agrees with the NIF capability bit" do
+      assert {:ok, bit} = Nx.Vulkan.NativeV.device_supports_f64()
+      assert is_boolean(bit)
+      assert Nx.Vulkan.Device.f64?() == bit
+    end
+
+    test "NXV_F64=0 sends f64 graphs to the Evaluator (still correct)", %{x: x, w: w} do
+      System.put_env("NXV_F64", "0")
+
+      try do
+        fun = fn p, q -> Nx.max(Nx.dot(p, q), 0.0) end
+        got = jit(fun).(x, w)
+        refute match?(%VulkanoBackend{}, got.data)
+        assert close?(got, evaluated(fun, [x, w]))
+
+        ew = jit(fn p -> Nx.multiply(p, 2.0) end).(x)
+        refute match?(%VulkanoBackend{}, ew.data)
+      after
+        System.delete_env("NXV_F64")
+      end
+    end
+
+    test "NXV_F64=0 leaves f32 fusion untouched", %{} do
+      System.put_env("NXV_F64", "0")
+
+      try do
+        a32 = bin([1.0, 2.0, 3.0, 4.0])
+        got = jit(fn p -> Nx.multiply(p, 2.0) end).(a32)
+        assert match?(%VulkanoBackend{}, got.data)
+        assert close?(got, Nx.multiply(a32, 2.0))
+      after
+        System.delete_env("NXV_F64")
+      end
+    end
+
+    test "integer graphs still fall back" do
+      i = Nx.iota({8}, type: :s32, backend: Nx.BinaryBackend)
+      got = jit(fn p -> Nx.add(p, 1) end).(i)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == Nx.to_flat_list(Nx.add(i, 1))
+    end
+  end
+
   describe "transpose is a real stage boundary (moves data, unlike reshape)" do
     setup do
       x = Nx.iota({8, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
