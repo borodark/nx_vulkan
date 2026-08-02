@@ -49,6 +49,78 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 
 Roadmap and future work: [`ROADMAP.md`](ROADMAP.md).
 
+## The `Nx.Defn` fusion compiler (thrust 3)
+
+EXLA's structural edge over an eager backend is whole-graph compilation:
+it fuses a chain of ops into one kernel instead of dispatching each
+separately. `Nx.Vulkan.Compiler` is an `Nx.Defn.Compiler` that does the
+same for the cases it supports — the closest this project comes to
+closing that gap.
+
+```elixir
+Nx.Defn.jit(&my_fun/2, compiler: Nx.Vulkan.Compiler).(a, b)
+```
+
+It traces a `defn` to an expression DAG and compiles it to a **stage
+schedule** that runs on-device with GPU-resident intermediates and no
+fallback to the interpreter:
+
+- **Elementwise fusion** — a same-shape f32/f64 chain becomes one
+  generated GLSL shader, one dispatch (3.62× over eager per-op on a
+  10-op chain). Broadcasting, CSE-within-a-shader, and scalar constants
+  are baked in.
+- **Parallel fused reductions** — an elementwise chain feeding
+  `sum`/`product`/`max`/`min`/`mean` fuses into one workgroup-per-slot
+  tree reduce (f64 accumulator, matches `BinaryBackend`).
+- **Multi-stage split at boundaries** — a graph with a `dot`, `conv`,
+  `reduce`, or `transpose` splits into stages: each boundary is a stage,
+  each maximal elementwise region between boundaries is one shader whose
+  inputs may be earlier stages' buffers. `reshape`/`squeeze` are
+  zero-copy view boundaries (no dispatch); `transpose` moves data.
+- **Multi-output** — a `defn` returning a tuple compiles to one shared
+  schedule; subexpressions common to several outputs are computed once.
+- **f32 and f64** — the codegen is dtype-parameterised (f64 gated on the
+  device advertising `shader_float64`; f64 transcendentals host-fall-back
+  rather than silently losing precision).
+
+Whole layers fuse end-to-end: `relu(x @ W + b)`, `relu(conv(x, k) + b)`,
+a CNN classifier head (`conv → flatten → dense`), softmax and layernorm
+reduction patterns, and transposed-weight layers (`x @ Wᵀ`). Anything
+unsupported falls back to `Nx.Defn.Evaluator`, so results are always
+correct — worst case is "no fusion, same as eager."
+
+## Standing
+
+The fusion compiler is the goal this effort set out to reach: a credible
+**#2 compute backend** for `elixir-nx`, with EXLA's whole-graph
+compilation now present in the one place a Vulkan backend can offer it —
+on any GPU with a driver, CUDA or not.
+
+- **Correctness first.** Every fused result is checked exact against
+  `Nx.BinaryBackend`. The suite — **863 doctests, 361 tests, 0 failures**
+  — is green on both a 2012 Kepler (GT 650M, FreeBSD) and a 2021 Ampere
+  (RTX 3060 Ti, Linux), with the f64 fused path active on both.
+- **Fusion's win is structural.** It removes dispatches and intermediate
+  buffers and keeps the interpreter out of the loop — not faster kernels.
+  On matmul/conv-dominated graphs the wall-clock gain over the
+  already-on-GPU eager path is modest; it grows with the elementwise
+  work around the boundary.
+- **Every heuristic is fleet-validated, never assumed.** Win/loss
+  crossovers are hardware-specific, so they are measured across the
+  fleet (Kepler + Ampere), not the local box. The many-slot reduce is
+  device-class-gated because it wins on weak GPUs and regresses on
+  strong ones. Cross-stage CSE was built, raced, and found to **never
+  win on either device class** (recompute is cheaper than the dispatch
+  it takes to avoid) — so it ships **default-off**, opt-in via
+  `NXV_CSE=1`. See
+  [`bench_results/CSE_SOFTMAX_RACE.md`](bench_results/CSE_SOFTMAX_RACE.md)
+  and the write-up,
+  [*Compute It Twice: When CSE Lost the Race*](https://www.dataalienist.com/blog-compute-it-twice.html).
+
+Building on a compute kernel of your own? See the
+[`vulkan-nx-compute`](.claude/skills/vulkan-nx-compute/) skill for the
+shader → NIF → Nx playbook and the hard-won parity/dispatch gotchas.
+
 ## Position vs EXLA and EMLX
 
 | | EXLA | EMLX | Nx.Vulkan.VulkanoBackend |
@@ -172,6 +244,7 @@ file's comment; bump when upstream rustler emits a corrected
 
 ## Blog series
 
+- [*Compute It Twice: When CSE Lost the Race*](http://www.dataalienist.com/blog-compute-it-twice.html) — the `Nx.Defn` fusion compiler; why cross-stage CSE never won the fleet race
 - [*The Backend That Didn't Need to Know*](http://www.dataalienist.com/blog-backend-didnt-need-to-know.html) — the C++→vulkano migration; descriptor pool debugging; autograd was free
 - [*The GPU That Doesn't Need CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html) — the FreeBSD Vulkan story (spirit-era)
 - [*A Walkable Path Under the Mountain*](http://www.dataalienist.com/blog-walkable-path.html) — eXMC + zed integration
