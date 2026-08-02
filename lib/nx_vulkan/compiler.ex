@@ -189,6 +189,18 @@ defmodule Nx.Vulkan.Compiler do
 
   @matmul_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
 
+  # Transpose is NOT a view like reshape/squeeze — it permutes axes, so it moves
+  # data and needs a real dispatch producing a new buffer. Reuse the eager
+  # backend's 2-D shaders (same envelope: 2-D, [1,0], f32/f64).
+  @transpose_f32_spv Path.expand("../../priv/shaders/transpose_f32.spv", __DIR__)
+  @transpose_f64_spv Path.expand("../../priv/shaders/transpose_f64.spv", __DIR__)
+
+  defp transpose_spv({:f, 32}), do: @transpose_f32_spv
+  defp transpose_spv({:f, 64}), do: @transpose_f64_spv
+
+  defp ebytes({:f, 32}), do: 4
+  defp ebytes({:f, 64}), do: 8
+
   defp try_multistage(%T{type: {:f, 32}} = result) do
     if has_boundary?(result) do
       try do
@@ -251,7 +263,7 @@ defmodule Nx.Vulkan.Compiler do
   def __hoist_ids__(result), do: do_hoist_ids(result)
 
   # Boundary ops — a reference through one of these definitely crosses a stage.
-  @boundary_ops [:sum, :product, :reduce_max, :reduce_min, :dot, :conv]
+  @boundary_ops [:sum, :product, :reduce_max, :reduce_min, :dot, :conv, :transpose]
 
   # Cross-stage CSE: the set of node ids worth materialising once and reading as a
   # buffer, rather than re-inlining into every consumer. A fusable node qualifies
@@ -348,6 +360,26 @@ defmodule Nx.Vulkan.Compiler do
     n = elem(b.shape, 1)
     {sid, state} = new_sid(state)
     state = add_stage(state, {:dot, sid, a_ref, b_ref, m, n, k})
+    ref = {:stage, sid}
+    {ref, memoize(state, node, ref)}
+  end
+
+  # 2-D transpose as a stage: unlike reshape/squeeze (row-major views that alias
+  # the input buffer) a transpose permutes axes, so it must materialise a new
+  # contiguous buffer via the eager backend's transpose shader. Covering it lets
+  # `x @ Wᵀ` — the standard dense-layer form — schedule as transpose stage +
+  # matmul stage instead of dropping the whole graph to the Evaluator. The
+  # envelope matches `VulkanoBackend.transpose/3` exactly (2-D, `[1,0]`,
+  # f32/f64); higher rank or any other permutation throws :unschedulable.
+  defp plan_new(%T{data: %Expr{op: :transpose, args: [inp, axes]}} = node, state) do
+    unless tuple_size(inp.shape) == 2 and axes == [1, 0] and
+             node.type in [{:f, 32}, {:f, 64}],
+           do: throw(:unschedulable)
+
+    {in_ref, state} = plan_node(inp, state)
+    {m, n} = {elem(inp.shape, 0), elem(inp.shape, 1)}
+    {sid, state} = new_sid(state)
+    state = add_stage(state, {:transpose, sid, in_ref, m, n, ebytes(node.type), transpose_spv(node.type)})
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -481,9 +513,7 @@ defmodule Nx.Vulkan.Compiler do
   defp fusable_elementwise?(%T{data: %Expr{op: op}, type: {:f, 32}}), do: Codegen.fusable_op?(op)
   defp fusable_elementwise?(_), do: false
 
-  defp has_boundary?(%T{data: %Expr{op: op}})
-       when op in [:dot, :conv, :sum, :product, :reduce_max, :reduce_min],
-       do: true
+  defp has_boundary?(%T{data: %Expr{op: op}}) when op in @boundary_ops, do: true
 
   defp has_boundary?(%T{data: %Expr{args: args}}) do
     Enum.any?(args, fn
@@ -570,6 +600,16 @@ defmodule Nx.Vulkan.Compiler do
     {b, values} = resolve(b_ref, values, params)
     {:ok, out} = NativeV.buf_alloc(m * n * 4)
     :ok = NativeV.matmul(out, a, b, m, n, k, @matmul_spv)
+    Map.put(values, {:stage, sid}, out)
+  end
+
+  # transpose stage: 2-D axis permutation into a fresh contiguous buffer. `m`/`n`
+  # are the INPUT dims (the shader reads a[m][n], writes out[n][m]), matching
+  # `VulkanoBackend.transpose/3`.
+  defp exec_stage({:transpose, sid, in_ref, m, n, eb, spv}, values, params) do
+    {a, values} = resolve(in_ref, values, params)
+    {:ok, out} = NativeV.buf_alloc(m * n * eb)
+    :ok = NativeV.transpose_2d(out, a, m, n, spv)
     Map.put(values, {:stage, sid}, out)
   end
 

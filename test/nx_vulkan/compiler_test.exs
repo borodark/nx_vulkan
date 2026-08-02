@@ -472,6 +472,78 @@ defmodule Nx.Vulkan.CompilerTest do
     end
   end
 
+  describe "transpose is a real stage boundary (moves data, unlike reshape)" do
+    setup do
+      x = Nx.iota({8, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({3, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      %{x: x, w: w}
+    end
+
+    test "bare 2-D transpose runs as a single transpose stage", %{x: x} do
+      got = jit(fn a -> Nx.transpose(a) end).(x)
+      assert ms_close?(got, Nx.transpose(x))
+      assert Nx.shape(got) == {4, 8}
+    end
+
+    test "x @ Wᵀ — the standard dense form — fuses as transpose + matmul", %{x: x, w: w} do
+      fun = fn a, ww -> Nx.dot(a, Nx.transpose(ww)) end
+      got = jit(fun).(x, w)
+      assert ms_close?(got, fun.(x, w))
+      assert Nx.shape(got) == {8, 3}
+    end
+
+    test "relu(transpose(x @ W)): matmul + transpose + fused epilogue", %{x: x} do
+      w = Nx.iota({4, 3}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn a, ww -> Nx.max(Nx.transpose(Nx.dot(a, ww)), 0.0) end
+      got = jit(fun).(x, w)
+      assert ms_close?(got, fun.(x, w))
+      assert Nx.shape(got) == {3, 8}
+    end
+
+    test "transpose feeding an elementwise region", %{x: x} do
+      fun = fn a -> Nx.tanh(Nx.multiply(Nx.transpose(a), 2.0)) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+    end
+
+    # B5: transpose materialises a contiguous buffer, so a reshape over it is a
+    # valid view and may alias it — unlike a reshape over a non-contiguous view.
+    test "reshape over a transpose aliases the transposed buffer", %{x: x} do
+      fun = fn a -> Nx.reshape(Nx.transpose(a), {2, 16}) end
+      got = jit(fun).(x)
+      assert ms_close?(got, fun.(x))
+      assert Nx.shape(got) == {2, 16}
+    end
+
+    test "transposed weight reused by two consumers computes the transpose once", %{x: x, w: w} do
+      # wᵀ feeds a dot AND an elementwise region feeding a second dot; it is
+      # materialised once (memoised) and both consumers read that buffer.
+      fun = fn a, ww ->
+        t = Nx.transpose(ww)
+        Nx.add(Nx.dot(a, t), Nx.dot(a, Nx.multiply(t, 2.0)))
+      end
+
+      got = jit(fun).(x, w)
+      assert ms_close?(got, fun.(x, w))
+    end
+
+    test "higher-rank transpose falls back to the Evaluator (still correct)" do
+      a = Nx.iota({2, 3, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      got = jit(fn t -> Nx.transpose(t, axes: [0, 2, 1]) end).(a)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert Nx.to_flat_list(got) == Nx.to_flat_list(Nx.transpose(a, axes: [0, 2, 1]))
+    end
+
+    test "non-[1,0] 3-D permutation feeding a dot falls back (still correct)" do
+      a = Nx.iota({2, 3, 4}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.01)
+      w = Nx.iota({2, 5}, type: :f32, backend: Nx.BinaryBackend) |> Nx.multiply(0.02)
+      fun = fn t, ww -> Nx.dot(Nx.transpose(t, axes: [2, 1, 0]), [2], [], ww, [0], []) end
+      got = jit(fun).(a, w)
+      refute match?(%VulkanoBackend{}, got.data)
+      assert close?(got, fun.(a, w))
+    end
+  end
+
   describe "multi-stage split (reduce boundaries) — layernorm/softmax patterns fuse" do
     setup do
       # {4, 64}: reduce over axis 1 -> outer=4, rsize=64, inner=1, slots=4 (in the
