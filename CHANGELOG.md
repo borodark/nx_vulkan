@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-08-02)
+
+The fusion compiler release. First release since 0.1.0.
 
 ### Added
 
