@@ -1,0 +1,67 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// Broadcasting comparison -> u8 (rank <= 4). Keeps mask-producing ops (x>0,
+// a==b, …) on the GPU. Output is u8 but written as packed u32 words (4 results
+// per word), so no 8-bit-storage extension is needed. Each thread writes one
+// word; the output buffer is padded to a 4-byte multiple by the caller.
+// Spec constant 0: 0=eq 1=ne 2=lt 3=le 4=gt 5=ge. Params: [rank, out[4],a[4],b[4]].
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { double a[]; };
+layout(std430, binding = 1) readonly buffer B { double b[]; };
+layout(std430, binding = 2) writeonly buffer O { uint o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+uint cmp(double x, double y) {
+    bool r;
+    switch (OP) {
+        case 0: r = (x == y); break;
+        case 1: r = (x != y); break;
+        case 2: r = (x < y); break;
+        case 3: r = (x <= y); break;
+        case 4: r = (x > y); break;
+        case 5: r = (x >= y); break;
+        default: r = false;
+    }
+    return r ? 1u : 0u;
+}
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    uint nwords = (p.n + 3u) / 4u;
+    if (word >= nwords) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint packed = 0u;
+    for (uint j = 0u; j < 4u; ++j) {
+        uint gid = word * 4u + j;
+        if (gid >= p.n) break;
+
+        uint idx = gid, aidx = 0u, bidx = 0u, as = 1u, bs = 1u;
+        for (int d = int(p.rank) - 1; d >= 0; --d) {
+            uint od = outd[d];
+            uint coord = idx % od;
+            idx = idx / od;
+            aidx += ((ad[d] == 1u) ? 0u : coord) * as; as *= ad[d];
+            bidx += ((bd[d] == 1u) ? 0u : coord) * bs; bs *= bd[d];
+        }
+        packed |= cmp(a[aidx], b[bidx]) << (j * 8u);
+    }
+    o[word] = packed;
+}

@@ -1,0 +1,74 @@
+#version 450
+
+// Pad as a type-generic copy: for each output element, map its coords back
+// through the per-dim padding config {low, high, interior}. A coordinate that
+// lands in an edge pad, an interior gap, or outside the source writes the pad
+// value; otherwise it copies the source element (`ews` u32 words). Works for
+// any 4/8-byte dtype (f32/f64/s32/s64/…); rank <= 4. `low`/`high` may be
+// negative (Nx cropping); `interior` is non-negative.
+//
+// Params: [rank, ews, S[4], O[4], low[4], interior[4]] where S = source dims,
+// O = output dims. Pad value is a separate buffer (ews u32 words).
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; };
+layout(std430, binding = 2) readonly buffer P { int prm[]; };
+layout(std430, binding = 3) readonly buffer PV { uint pv[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    int S[4];
+    int O[4];
+    int lo[4];
+    int itr[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        S[i] = prm[2 + i];
+        O[i] = prm[6 + i];
+        lo[i] = prm[10 + i];
+        itr[i] = prm[14 + i];
+    }
+
+    // Walk dims high->low, decoding the output flat index into coords and
+    // accumulating the corresponding source flat index. If any dim maps to a
+    // pad position, emit the pad value.
+    uint idx = gid;
+    uint sidx = 0u;
+    uint sstride = 1u;
+    bool pad = false;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        int od = O[d];
+        int oc = int(idx % uint(od));
+        idx = idx / uint(od);
+
+        int step = itr[d] + 1;          // stride in expanded (interior) space
+        int pos = oc - lo[d];           // position within the interior-padded run
+        // Guard: GLSL / and % are undefined for negative operands, so only
+        // divide once pos is known non-negative.
+        if (pos < 0) {
+            pad = true;
+        } else if ((pos % step) != 0) {
+            pad = true;                 // interior gap
+        } else {
+            int sc = pos / step;
+            if (sc >= S[d]) pad = true; // past the high edge
+            else sidx += uint(sc) * sstride;
+        }
+        sstride *= uint(S[d]);
+    }
+
+    if (pad) {
+        for (uint w = 0u; w < ews; ++w) o[gid * ews + w] = pv[w];
+    } else {
+        for (uint w = 0u; w < ews; ++w) o[gid * ews + w] = inp[sidx * ews + w];
+    }
+}

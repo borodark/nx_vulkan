@@ -1,0 +1,63 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// FFT stage 0: load the input row into the complex work buffer in
+// bit-reversed index order (the permutation a decimation-in-time FFT
+// consumes). Real inputs get imag=0; complex inputs are copied verbatim.
+// For the inverse transform the 1/N normalisation is folded in here
+// (the DFT is linear, so pre-scaling the input pre-scales the output),
+// which avoids a separate scaling pass.
+//
+// Dispatched over batch*n invocations (one per source element).
+
+layout(local_size_x = 64) in;
+
+// Real input: batch*n doubles. Complex input: batch*n*2 doubles (re,im).
+layout(std430, binding = 0) readonly buffer In { double inp[]; };
+// Complex output: batch*n*2 doubles (re,im), bit-reversed within each row.
+layout(std430, binding = 1) writeonly buffer Out { double outp[]; };
+
+layout(push_constant) uniform Push {
+    uint n;          // transform length (power of two)
+    uint logn;       // log2(n)
+    uint batch;      // number of independent rows
+    uint is_complex; // 1 if input is interleaved complex, 0 if real
+    uint inverse;    // 1 for ifft (apply 1/n scaling), 0 for fft
+} p;
+
+uint bitrev(uint x, uint bits) {
+    uint r = 0u;
+    for (uint i = 0u; i < bits; ++i) {
+        r = (r << 1) | (x & 1u);
+        x >>= 1;
+    }
+    return r;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total = p.batch * p.n;
+    if (gid >= total) return;
+
+    uint b = gid / p.n;      // row
+    uint i = gid % p.n;      // source position within row
+    uint j = bitrev(i, p.logn);  // destination position
+
+    double re, im;
+    if (p.is_complex == 1u) {
+        re = inp[(b * p.n + i) * 2u];
+        im = inp[(b * p.n + i) * 2u + 1u];
+    } else {
+        re = inp[b * p.n + i];
+        im = 0.0lf;
+    }
+
+    if (p.inverse == 1u) {
+        double inv = 1.0lf / double(p.n);
+        re *= inv;
+        im *= inv;
+    }
+
+    outp[(b * p.n + j) * 2u]      = re;
+    outp[(b * p.n + j) * 2u + 1u] = im;
+}

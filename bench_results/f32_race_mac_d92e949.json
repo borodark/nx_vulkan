@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-07-29T01:21:28.595859Z",
+  "otp": "27",
+  "device": "llvmpipe (LLVM 19.1.7, 256 bits)",
+  "hostname": "mac",
+  "results": [
+    {
+      "op": "matmul 128x128x128",
+      "on_gpu": true,
+      "f64_ms": 66.329,
+      "f32_ms": 59.889,
+      "speedup": 1.11
+    },
+    {
+      "op": "matmul 256x256x256",
+      "on_gpu": true,
+      "f64_ms": 83.067,
+      "f32_ms": 87.105,
+      "speedup": 0.95
+    },
+    {
+      "op": "matmul 512x512x512",
+      "on_gpu": true,
+      "f64_ms": 239.901,
+      "f32_ms": 238.873,
+      "speedup": 1.0
+    },
+    {
+      "op": "conv 8->16ch 24sq",
+      "on_gpu": true,
+      "f64_ms": 1.516,
+      "f32_ms": 1.531,
+      "speedup": 0.99
+    },
+    {
+      "op": "conv 16->32ch 32sq",
+      "on_gpu": true,
+      "f64_ms": 7.444,
+      "f32_ms": 7.986,
+      "speedup": 0.93
+    },
+    {
+      "op": "elementwise add 1M",
+      "on_gpu": true,
+      "f64_ms": 6.504,
+      "f32_ms": 3.485,
+      "speedup": 1.87
+    },
+    {
+      "op": "elementwise tanh 1M",
+      "on_gpu": true,
+      "f64_ms": 3.834,
+      "f32_ms": 3.369,
+      "speedup": 1.14
+    },
+    {
+      "op": "sum 1M (full)",
+      "on_gpu": true,
+      "f64_ms": 1.898,
+      "f32_ms": 1.453,
+      "speedup": 1.31
+    },
+    {
+      "op": "sum 1024x1024 axis0",
+      "on_gpu": true,
+      "f64_ms": 3.223,
+      "f32_ms": 1.994,
+      "speedup": 1.62
+    }
+  ],
+  "commit": "d92e949",
+  "device_type": "Cpu"
+}

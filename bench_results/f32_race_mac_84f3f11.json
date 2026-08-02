@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-07-29T03:01:09.502496Z",
+  "otp": "27",
+  "device": "NVIDIA GeForce GT 650M",
+  "hostname": "mac",
+  "results": [
+    {
+      "op": "matmul 128x128x128",
+      "on_gpu": true,
+      "f64_ms": 1.046,
+      "f32_ms": 1.461,
+      "speedup": 0.72
+    },
+    {
+      "op": "matmul 256x256x256",
+      "on_gpu": true,
+      "f64_ms": 3.346,
+      "f32_ms": 5.659,
+      "speedup": 0.59
+    },
+    {
+      "op": "matmul 512x512x512",
+      "on_gpu": true,
+      "f64_ms": 21.449,
+      "f32_ms": 39.184,
+      "speedup": 0.55
+    },
+    {
+      "op": "conv 8->16ch 24sq",
+      "on_gpu": true,
+      "f64_ms": 1.585,
+      "f32_ms": 1.484,
+      "speedup": 1.07
+    },
+    {
+      "op": "conv 16->32ch 32sq",
+      "on_gpu": true,
+      "f64_ms": 14.69,
+      "f32_ms": 10.119,
+      "speedup": 1.45
+    },
+    {
+      "op": "elementwise add 1M",
+      "on_gpu": true,
+      "f64_ms": 7.711,
+      "f32_ms": 1.854,
+      "speedup": 4.16
+    },
+    {
+      "op": "elementwise tanh 1M",
+      "on_gpu": true,
+      "f64_ms": 2.0,
+      "f32_ms": 1.041,
+      "speedup": 1.92
+    },
+    {
+      "op": "sum 1M (full)",
+      "on_gpu": true,
+      "f64_ms": 255.736,
+      "f32_ms": 134.673,
+      "speedup": 1.9
+    },
+    {
+      "op": "sum 1024x1024 axis0",
+      "on_gpu": true,
+      "f64_ms": 1.398,
+      "f32_ms": 0.75,
+      "speedup": 1.87
+    }
+  ],
+  "commit": "84f3f11",
+  "device_type": "DiscreteGpu",
+  "f32_gemm_accumulator": "f64"
+}

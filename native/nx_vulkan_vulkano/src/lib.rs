@@ -171,6 +171,9 @@ struct VkContext {
     mem_allocator: Arc<StandardMemoryAllocator>,
     cmd_allocator: Arc<StandardCommandBufferAllocator>,
     set_allocator: Arc<StandardDescriptorSetAllocator>,
+    device_name: String,
+    device_type: String,
+    supports_f64: bool,
 }
 
 static CTX: OnceLock<VkContext> = OnceLock::new();
@@ -203,19 +206,23 @@ fn ctx() -> Result<&'static VkContext, String> {
         })
         .ok_or_else(|| "no compute-capable Vulkan device".to_string())?;
 
-    eprintln!(
-        "[nx_vulkan_vulkano] device: {} ({:?})",
-        physical.properties().device_name,
-        physical.properties().device_type
-    );
+    let device_name = physical.properties().device_name.clone();
+    let device_type = format!("{:?}", physical.properties().device_type);
+
+    eprintln!("[nx_vulkan_vulkano] device: {device_name} ({device_type})");
 
     // Enable shaderFloat64 if the device supports it; required by the
     // _f64.spv shaders. Falls back gracefully on devices without it
     // (those will keep using the f32 paths + host fallback for f64).
     let supports_f64 = physical.supported_features().shader_float64;
+    // robust_buffer_access makes out-of-bounds reads return 0 instead of
+    // faulting — needed by the select shader, which reads a u8 `pred` buffer as
+    // u32 words and may touch up to 3 bytes past the end on the tail word.
+    let supports_robust = physical.supported_features().robust_buffer_access;
 
     let enabled_features = vulkano::device::Features {
         shader_float64: supports_f64,
+        robust_buffer_access: supports_robust,
         ..Default::default()
     };
 
@@ -264,6 +271,9 @@ fn ctx() -> Result<&'static VkContext, String> {
         mem_allocator,
         cmd_allocator,
         set_allocator,
+        device_name,
+        device_type,
+        supports_f64,
     };
 
     let _ = CTX.set(ctx);
@@ -1216,6 +1226,433 @@ fn apply_binary<'a>(
     }
 }
 
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushBcast {
+    n: u32,
+    rank: u32,
+}
+
+/// Broadcasting elementwise binary op. Bindings: a, b, out, params (shapes) at
+/// 0..3. Push: {n, rank}. `op_code` spec constant selects the op. Keeps
+/// broadcast ops (bias-add, scaling, relu) on the GPU instead of host-falling-
+/// back. n = output element count.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_binary_broadcast<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Broadcasting comparison -> u8 (packed as u32). Bindings: a, b, out, params
+/// at 0..3. Push: {n, rank}. `op_code` spec constant selects eq/ne/lt/le/gt/ge.
+/// One thread per output u32 word (4 u8 results); dispatch ceil(n/4) threads.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_compare<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let nwords = n.div_ceil(4);
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [nwords.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Broadcasting select: out = pred ? t : f. Bindings: pred, t, f, out, params
+/// at 0..4. Push: {n, rank}. pred is a u8 tensor read as u32 words in the shader
+/// (needs robust_buffer_access for the tail). Keeps masking / where / relu-grad
+/// on the GPU.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_select<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    pred_ref: ResourceArc<VulkanoTensor>,
+    t_ref: ResourceArc<VulkanoTensor>,
+    f_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, pred_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, t_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, f_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(4, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Strided slice (type-generic u32-word copy). Bindings: in, out, params at
+/// 0..2. Push: {n, rank} where n = output element count. Params carry element
+/// word count + source/output dims + start/stride. Keeps slice on the GPU.
+#[rustler::nif(schedule = "DirtyIo")]
+fn apply_slice<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Pad (type-generic copy). Bindings: in 0, out 1, params 2, pad-value 3. Push:
+/// {n, rank} where n = output element count. Params carry element word count +
+/// source/output dims + per-dim low + interior. Elements landing in an edge
+/// pad, an interior gap, or outside the source get the pad value. Keeps pad on
+/// the GPU.
+#[rustler::nif(schedule = "DirtyIo")]
+fn apply_pad<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    padval_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, padval_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Gather (leading-prefix axes). Bindings: in 0, out 1, indices 2, params 3.
+/// Push: {n, K} where n = output element count, K = number of indexed leading
+/// axes. Params carry element word count + index word count + inner block size
+/// + per-leading-axis strides. Keeps gather on the GPU for the common case.
+#[rustler::nif(schedule = "DirtyIo")]
+fn apply_gather<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    idx_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, idx_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Generic JIT-shader dispatch (thrust 3 — the Defn fusion compiler). Runs a
+/// runtime-generated shader whose layout is: input buffers at bindings
+/// 0..k-1, output buffer at binding k, push constant {n = element count}.
+/// `in_refs` is the ordered list of input buffers the codegen assigned to
+/// bindings 0..k-1. One dispatch replaces a whole fused elementwise chain.
+#[rustler::nif(schedule = "DirtyIo")]
+fn dispatch_generated<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_refs: Vec<ResourceArc<VulkanoTensor>>,
+    n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let mut writes: Vec<WriteDescriptorSet> = in_refs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| WriteDescriptorSet::buffer(i as u32, r.buf.clone()))
+            .collect();
+        writes.push(WriteDescriptorSet::buffer(
+            in_refs.len() as u32,
+            out_ref.buf.clone(),
+        ));
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            writes,
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Generic JIT fused-reduce dispatch (thrust 3). A runtime-generated shader
+/// that fuses an elementwise chain into a reduction: inputs at bindings
+/// 0..k-1, output at k, push {outer, reduce_size, inner, op} (the reduce op is
+/// baked into the generated shader; `op` is passed 0 and ignored). One
+/// invocation per output slot; dispatch ceil(outer*inner/256) workgroups.
+#[rustler::nif(schedule = "DirtyIo")]
+fn dispatch_generated_reduce<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_refs: Vec<ResourceArc<VulkanoTensor>>,
+    outer: u32,
+    reduce_size: u32,
+    inner: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let mut writes: Vec<WriteDescriptorSet> = in_refs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| WriteDescriptorSet::buffer(i as u32, r.buf.clone()))
+            .collect();
+        writes.push(WriteDescriptorSet::buffer(
+            in_refs.len() as u32,
+            out_ref.buf.clone(),
+        ));
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            writes,
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        // Parallel tree reduce: one workgroup per output slot (each workgroup's
+        // 256 threads cooperatively reduce that slot's axis). The shader
+        // grid-strides over slots, so cap the launch at 65535 workgroups
+        // (maxComputeWorkGroupCount[0]) and let the loop cover any excess.
+        let n_slots = outer * inner;
+        let groups = n_slots.min(65535).max(1);
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushReduceAxis {
+                outer,
+                reduce_size,
+                inner,
+                op: 0,
+            },
+            [groups, 1, 1],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Elementwise dtype cast (e.g. f32<->f64). Bindings: in at 0, out at 1 (which
+/// may have a different element size). Push: uint n (element count). The shader
+/// determines the source/dest types; no op_code.
+#[rustler::nif(schedule = "DirtyIo")]
+fn cast<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise unary op. `op_code` selects:
 ///   0=exp 1=log 2=sqrt 3=abs 4=neg 5=sigmoid 6=tanh 7=relu
 ///   8=ceil 9=floor 10=sign 11=reciprocal 12=square
@@ -1609,6 +2046,383 @@ fn matmul<'a>(
     }
 }
 
+// Register-blocked matmul dispatch: identical bindings/push to `matmul` but
+// dispatches 32-wide output tiles (gx=ceil(N/32), gy=ceil(M/32)) for the
+// *_rb32 shaders (16×16 workgroup computes a 32×32 tile, 2×2 per thread). Not
+// wired as the backend default — the register-blocked kernels regressed on
+// Kepler; this NIF exists so `examples/matmul_rb_race.exs` can benchmark them
+// against the tiled default on other GPUs (e.g. Ampere). See F32_PLAN.md.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn matmul32<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    m: u32,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let gx = (n + 31) / 32;
+        let gy = (m + 31) / 32;
+        run_single_dispatch(context, &cached, set, PushMatmul { m, n, k }, [gx, gy, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+// -- FFT ------------------------------------------------------------------
+//
+// Radix-2 Cooley-Tukey (decimation-in-time), power-of-two length, over the
+// last axis, batched. Two shaders: a bit-reversed complex load, then log2(n)
+// in-place butterfly stages. Twiddles are computed here in f64 (GLSL fp64 has
+// no sin/cos) and uploaded as a table of n/2 complex entries reused across
+// stages. The whole transform is recorded into a single command buffer so
+// vulkano's AutoCommandBufferBuilder inserts the compute-compute barriers
+// between dependent stages automatically.
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushFftBitrev {
+    n: u32,
+    logn: u32,
+    batch: u32,
+    is_complex: u32,
+    inverse: u32,
+}
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushFftStage {
+    n: u32,
+    half_: u32,
+    batch: u32,
+    stride: u32,
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn fft<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    logn: u32,
+    batch: u32,
+    is_complex: u32,
+    inverse: u32,
+    bitrev_spv: String,
+    stage_spv: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        if n < 2 || (n & (n - 1)) != 0 {
+            return Err(format!("fft length must be a power of two >= 2, got {n}"));
+        }
+
+        // Twiddle table: n/2 complex entries, tw[t] = exp(sgn*2*pi*i*t/n).
+        // Forward DFT uses sgn = -1; inverse uses +1 (the 1/n scale is folded
+        // into the bit-reversed load).
+        let sgn = if inverse == 1 { 1.0f64 } else { -1.0f64 };
+        let half = (n / 2) as usize;
+        let mut tw_bytes: Vec<u8> = Vec::with_capacity(half * 16);
+        for t in 0..half {
+            let ang = sgn * std::f64::consts::TAU * (t as f64) / (n as f64);
+            tw_bytes.extend_from_slice(&ang.cos().to_le_bytes());
+            tw_bytes.extend_from_slice(&ang.sin().to_le_bytes());
+        }
+        let tw_buf = upload_buffer(
+            context.mem_allocator.clone(),
+            &tw_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+        )?;
+
+        let bitrev = get_or_create_pipeline(&bitrev_spv, None)?;
+        let stage = get_or_create_pipeline(&stage_spv, None)?;
+
+        let mut cmd = AutoCommandBufferBuilder::primary(
+            &context.cmd_allocator,
+            context.queue.queue_family_index(),
+            CommandBufferUsage::SimultaneousUse,
+        )
+        .map_err(|e| format!("cmd builder: {e}"))?;
+
+        // Stage 0: bit-reversed load, in_ref -> out_ref (complex).
+        let load_set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            bitrev.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("load descriptor set: {e}"))?;
+
+        let load_groups = (batch * n).div_ceil(64);
+        cmd.bind_pipeline_compute(bitrev.pipeline.clone())
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, bitrev.layout.clone(), 0, load_set)
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(bitrev.layout.clone(), 0, PushFftBitrev { n, logn, batch, is_complex, inverse })
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch([load_groups, 1, 1])
+            .map_err(|e| format!("dispatch: {e}"))?;
+
+        // Stages 1..=logn: in-place butterflies on out_ref.
+        let stage_groups = (batch * (n / 2)).div_ceil(64);
+        for s in 1..=logn {
+            let stage_half = 1u32 << (s - 1);
+            let m = 1u32 << s;
+            let stride = n / m;
+
+            let set = PersistentDescriptorSet::new(
+                &context.set_allocator,
+                stage.layout.set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, out_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(1, tw_buf.clone()),
+                ],
+                [],
+            )
+            .map_err(|e| format!("stage descriptor set: {e}"))?;
+
+            cmd.bind_pipeline_compute(stage.pipeline.clone())
+                .map_err(|e| format!("bind pipeline: {e}"))?
+                .bind_descriptor_sets(PipelineBindPoint::Compute, stage.layout.clone(), 0, set)
+                .map_err(|e| format!("bind descriptor: {e}"))?
+                .push_constants(stage.layout.clone(), 0, PushFftStage { n, half_: stage_half, batch, stride })
+                .map_err(|e| format!("push_constants: {e}"))?
+                .dispatch([stage_groups, 1, 1])
+                .map_err(|e| format!("dispatch: {e}"))?;
+        }
+
+        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let future = sync::now(context.device.clone())
+            .then_execute(context.queue.clone(), cmd_buf)
+            .map_err(|e| format!("then_execute: {e}"))?;
+        future.flush().map_err(|e| format!("flush: {e}"))?;
+        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
+        unsafe { future.signal_finished(); }
+        drop(future);
+        drop(tw_buf);
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+// -- conv (im2col + GEMM) -------------------------------------------------
+//
+// Two shaders: conv_im2col unfolds the input into a column matrix A (M x K),
+// then conv_gemm multiplies A by the flattened kernel and writes the output in
+// canonical {N, Cout, O_total} layout. Covers spatial rank <= 3, feature and
+// batch groups == 1, identity permutations; the Elixir side gates this and
+// host-falls-back otherwise. Per-dim conv parameters ride in a 21-int params
+// buffer (see conv_im2col_f64.comp); scalars go in push constants.
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushConvIm2col {
+    n: u32,
+    cin: u32,
+    o_total: u32,
+    k_total: u32,
+    k: u32,
+}
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushConvGemm {
+    n: u32,
+    cout: u32,
+    o_total: u32,
+    k: u32,
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn conv_im2col<'a>(
+    env: Env<'a>,
+    col_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    cin: u32,
+    o_total: u32,
+    k_total: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, col_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let groups = (n * o_total).saturating_mul(k).div_ceil(64);
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushConvIm2col { n, cin, o_total, k_total, k },
+            [groups, 1, 1],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn conv_gemm<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    col_ref: ResourceArc<VulkanoTensor>,
+    kernel_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    cout: u32,
+    o_total: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, col_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, kernel_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        // Tiled conv GEMM: C = A·Wᵀ over (M = N·O_total rows, Cout cols), 16×16
+        // workgroups. global x over Cout, global y over M.
+        let m = n.saturating_mul(o_total);
+        let gx = cout.div_ceil(16);
+        let gy = m.div_ceil(16);
+        run_single_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, [gx, gy, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+// Shared single-dispatch helper: bind pipeline + descriptor set + push, run
+// one dispatch, wait for the queue to drain. Used by conv_im2col/conv_gemm.
+fn run_single_dispatch<P: BufferContents>(
+    context: &VkContext,
+    cached: &CachedPipeline,
+    set: Arc<PersistentDescriptorSet>,
+    push: P,
+    groups: [u32; 3],
+) -> Result<(), String> {
+    let mut cmd = AutoCommandBufferBuilder::primary(
+        &context.cmd_allocator,
+        context.queue.queue_family_index(),
+        CommandBufferUsage::SimultaneousUse,
+    )
+    .map_err(|e| format!("cmd builder: {e}"))?;
+
+    cmd.bind_pipeline_compute(cached.pipeline.clone())
+        .map_err(|e| format!("bind pipeline: {e}"))?
+        .bind_descriptor_sets(PipelineBindPoint::Compute, cached.layout.clone(), 0, set)
+        .map_err(|e| format!("bind descriptor: {e}"))?
+        .push_constants(cached.layout.clone(), 0, push)
+        .map_err(|e| format!("push_constants: {e}"))?
+        .dispatch(groups)
+        .map_err(|e| format!("dispatch: {e}"))?;
+
+    let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+    let future = sync::now(context.device.clone())
+        .then_execute(context.queue.clone(), cmd_buf)
+        .map_err(|e| format!("then_execute: {e}"))?;
+    future.flush().map_err(|e| format!("flush: {e}"))?;
+    context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
+    unsafe { future.signal_finished(); }
+    drop(future);
+    Ok(())
+}
+
+/// Physical device name + type, for labelling benchmark/parity reports across
+/// hosts (e.g. "NVIDIA GeForce GT 650M" vs "llvmpipe (...)").
+#[rustler::nif]
+fn device_name(env: Env) -> NifResult<Term> {
+    match ctx() {
+        Ok(c) => Ok((atoms::ok(), c.device_name.clone(), c.device_type.clone()).encode(env)),
+        Err(e) => Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    }
+}
+
+/// Whether the physical device advertises `shaderFloat64`. The `_f64.spv`
+/// shaders and any generated f64 kernel need it; without it, pipeline creation
+/// for those fails at dispatch time, so callers must gate on this and take a
+/// host fallback instead.
+#[rustler::nif]
+fn device_supports_f64(env: Env) -> NifResult<Term> {
+    match ctx() {
+        Ok(c) => Ok((atoms::ok(), c.supports_f64).encode(env)),
+        Err(e) => Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    }
+}
+
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
@@ -1627,10 +2441,25 @@ rustler::init!(
         buf_upload_into,
         concat_buffers,
         apply_binary,
+        cast,
+        apply_slice,
+        apply_pad,
+        apply_gather,
+        dispatch_generated,
+        dispatch_generated_reduce,
+        apply_select,
+        apply_compare,
+        apply_binary_broadcast,
         apply_unary,
         reduce_axis,
         transpose_2d,
         matmul,
+        matmul32,
+        fft,
+        conv_im2col,
+        conv_gemm,
+        device_name,
+        device_supports_f64,
     ],
     load = load
 );

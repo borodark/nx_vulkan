@@ -1,0 +1,66 @@
+#version 450
+
+
+// Broadcasting f64 elementwise binary op (rank <= 4). Keeps bias-add / scaling /
+// relu-via-max etc. on the GPU instead of host-falling-back. Spec constant 0
+// selects the op (same codes as elementwise_binary, minus pow which fp64 lacks):
+//   0=add 1=mul 2=sub 3=div 5=max 6=min
+// Params buffer: [rank, out[4], a[4], b[4]] (shapes left-aligned; broadcast dims
+// are size 1). Output element gid -> per-dim coords -> a/b indices with a dim
+// contributing coord 0 wherever its size is 1 (NumPy broadcasting).
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint idx = gid;
+    uint a_idx = 0u;
+    uint b_idx = 0u;
+    uint a_stride = 1u;
+    uint b_stride = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = outd[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        a_idx += ((ad[d] == 1u) ? 0u : coord) * a_stride;
+        b_idx += ((bd[d] == 1u) ? 0u : coord) * b_stride;
+        a_stride *= ad[d];
+        b_stride *= bd[d];
+    }
+
+    float x = a[a_idx];
+    float y = b[b_idx];
+    float r;
+    switch (OP) {
+        case 0: r = x + y; break;
+        case 1: r = x * y; break;
+        case 2: r = x - y; break;
+        case 3: r = x / y; break;
+        case 5: r = max(x, y); break;
+        case 6: r = min(x, y); break;
+        default: r = 0.0;
+    }
+    o[gid] = r;
+}

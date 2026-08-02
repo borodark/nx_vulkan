@@ -1,0 +1,85 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// Register-blocked f64 matmul. A 16×16 workgroup computes a 32×32 output tile
+// (2×2 per thread, accumulated in registers), streaming 32×16 / 16×32 tiles of
+// A and B through shared memory. Raises arithmetic intensity over plain 16×16
+// tiling; f64-exact. The f64-ALU rate is the remaining ceiling on rate-limited
+// GPUs.
+//
+// BM×BN = 32×32, BK = 16, TM×TN = 2×2. C = A*B, A MxK row-major, B KxN
+// row-major. Dispatch: 32-wide output tiles, local 16×16. Boundary-safe.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer A { double a[]; };
+layout(std430, binding = 1) readonly buffer B { double b[]; };
+layout(std430, binding = 2) writeonly buffer O { double o[]; };
+
+layout(push_constant) uniform Push {
+    uint m;
+    uint n;
+    uint k;
+} p;
+
+const uint BM = 32u;
+const uint BN = 32u;
+const uint BK = 16u;
+const uint TM = 2u;
+const uint TN = 2u;
+
+shared double As[BM][BK];
+shared double Bs[BK][BN];
+
+void main() {
+    uint rowBase = gl_WorkGroupID.y * BM;
+    uint colBase = gl_WorkGroupID.x * BN;
+    uint tRow = gl_LocalInvocationID.y;
+    uint tCol = gl_LocalInvocationID.x;
+    uint tid = tRow * 16u + tCol;
+
+    double acc[TM][TN];
+    for (uint i = 0u; i < TM; ++i)
+        for (uint j = 0u; j < TN; ++j)
+            acc[i][j] = 0.0lf;
+
+    uint tiles = (p.k + BK - 1u) / BK;
+    for (uint t = 0u; t < tiles; ++t) {
+        uint kBase = t * BK;
+
+        for (uint li = tid; li < BM * BK; li += 256u) {
+            uint r = li / BK;
+            uint c = li % BK;
+            uint gr = rowBase + r;
+            uint gk = kBase + c;
+            As[r][c] = (gr < p.m && gk < p.k) ? a[gr * p.k + gk] : 0.0lf;
+        }
+        for (uint li = tid; li < BK * BN; li += 256u) {
+            uint r = li / BN;
+            uint c = li % BN;
+            uint gk = kBase + r;
+            uint gc = colBase + c;
+            Bs[r][c] = (gk < p.k && gc < p.n) ? b[gk * p.n + gc] : 0.0lf;
+        }
+        barrier();
+
+        for (uint kk = 0u; kk < BK; ++kk) {
+            double regA[TM];
+            double regB[TN];
+            for (uint i = 0u; i < TM; ++i) regA[i] = As[tRow * TM + i][kk];
+            for (uint j = 0u; j < TN; ++j) regB[j] = Bs[kk][tCol * TN + j];
+            for (uint i = 0u; i < TM; ++i)
+                for (uint j = 0u; j < TN; ++j)
+                    acc[i][j] += regA[i] * regB[j];
+        }
+        barrier();
+    }
+
+    for (uint i = 0u; i < TM; ++i) {
+        for (uint j = 0u; j < TN; ++j) {
+            uint gr = rowBase + tRow * TM + i;
+            uint gc = colBase + tCol * TN + j;
+            if (gr < p.m && gc < p.n) o[gr * p.n + gc] = acc[i][j];
+        }
+    }
+}

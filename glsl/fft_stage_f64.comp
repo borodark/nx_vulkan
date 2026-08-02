@@ -1,0 +1,59 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// One radix-2 Cooley-Tukey (decimation-in-time) butterfly stage, in place.
+// Dispatched once per stage s = 1..logn over batch*(n/2) butterflies.
+//
+// Twiddles are precomputed on the host in f64 (GLSL fp64 has no sin/cos)
+// and passed as a table of n/2 complex entries: tw[t] = exp(sgn*2*pi*i*t/n),
+// with sgn baked in per-direction (forward: -, inverse: +). A stage whose
+// butterfly half-width is `half` (m = 2*half) uses tw[j * stride] where
+// stride = n/m, so a single table serves every stage.
+
+layout(local_size_x = 64) in;
+
+// Complex data, interleaved (re,im), mutated in place.
+layout(std430, binding = 0) buffer Buf { double d[]; };
+// Twiddle table: n/2 complex entries (n doubles).
+layout(std430, binding = 1) readonly buffer Twid { double tw[]; };
+
+layout(push_constant) uniform Push {
+    uint n;      // transform length
+    uint half_;  // butterfly half-width for this stage (m/2)
+    uint batch;  // number of rows
+    uint stride; // twiddle index step = n / m
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint per = p.n / 2u;                 // butterflies per row
+    if (gid >= p.batch * per) return;
+
+    uint b = gid / per;
+    uint t = gid % per;
+    uint m = p.half_ * 2u;
+    uint j = t % p.half_;                // position within the butterfly group
+    uint group = t / p.half_;
+    uint base = group * m + j;
+
+    uint top = b * p.n + base;
+    uint bot = top + p.half_;
+
+    uint tw_idx = j * p.stride;
+    double wr = tw[tw_idx * 2u];
+    double wi = tw[tw_idx * 2u + 1u];
+
+    double tr = d[top * 2u];
+    double ti = d[top * 2u + 1u];
+    double br = d[bot * 2u];
+    double bi = d[bot * 2u + 1u];
+
+    // w * bottom
+    double wbr = wr * br - wi * bi;
+    double wbi = wr * bi + wi * br;
+
+    d[top * 2u]      = tr + wbr;
+    d[top * 2u + 1u] = ti + wbi;
+    d[bot * 2u]      = tr - wbr;
+    d[bot * 2u + 1u] = ti - wbi;
+}

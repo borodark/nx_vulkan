@@ -1,0 +1,34 @@
+#version 450
+
+// f32 elementwise binary op. Spec constant 0 selects the op, matching the
+// f64 shader's convention (apply_binary passes op_code as spec constant 0):
+//   0=add 1=mul 2=sub 3=div 4=pow 5=max 6=min
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+
+    float x = a[i];
+    float y = b[i];
+    float r;
+    switch (OP) {
+        case 0: r = x + y; break;
+        case 1: r = x * y; break;
+        case 2: r = x - y; break;
+        case 3: r = x / y; break;
+        case 4: r = pow(x, y); break;
+        case 5: r = max(x, y); break;
+        case 6: r = min(x, y); break;
+        default: r = 0.0;
+    }
+    o[i] = r;
+}

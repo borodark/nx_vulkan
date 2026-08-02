@@ -1,0 +1,85 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// Register-blocked f32 matmul, f64 accumulator — accuracy-safe default of the
+// f32 matmul accumulator policy (:f64). Same 32×32-tile / 2×2-per-thread
+// register blocking as matmul_f32_f32acc, but the 2×2 outer product accumulates
+// in double and rounds to f32 only on store. Shared tiles stay f32; only the
+// accumulators/register fragments feeding the FMAs promote to double.
+//
+// BM×BN = 32×32, BK = 16, TM×TN = 2×2. C = A*B, A MxK, B KxN. Dispatch: 32-wide
+// output tiles, local 16×16. Boundary-safe.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform Push {
+    uint m;
+    uint n;
+    uint k;
+} p;
+
+const uint BM = 32u;
+const uint BN = 32u;
+const uint BK = 16u;
+const uint TM = 2u;
+const uint TN = 2u;
+
+shared float As[BM][BK];
+shared float Bs[BK][BN];
+
+void main() {
+    uint rowBase = gl_WorkGroupID.y * BM;
+    uint colBase = gl_WorkGroupID.x * BN;
+    uint tRow = gl_LocalInvocationID.y;
+    uint tCol = gl_LocalInvocationID.x;
+    uint tid = tRow * 16u + tCol;
+
+    double acc[TM][TN];
+    for (uint i = 0u; i < TM; ++i)
+        for (uint j = 0u; j < TN; ++j)
+            acc[i][j] = 0.0lf;
+
+    uint tiles = (p.k + BK - 1u) / BK;
+    for (uint t = 0u; t < tiles; ++t) {
+        uint kBase = t * BK;
+
+        for (uint li = tid; li < BM * BK; li += 256u) {
+            uint r = li / BK;
+            uint c = li % BK;
+            uint gr = rowBase + r;
+            uint gk = kBase + c;
+            As[r][c] = (gr < p.m && gk < p.k) ? a[gr * p.k + gk] : 0.0;
+        }
+        for (uint li = tid; li < BK * BN; li += 256u) {
+            uint r = li / BN;
+            uint c = li % BN;
+            uint gk = kBase + r;
+            uint gc = colBase + c;
+            Bs[r][c] = (gk < p.k && gc < p.n) ? b[gk * p.n + gc] : 0.0;
+        }
+        barrier();
+
+        for (uint kk = 0u; kk < BK; ++kk) {
+            double regA[TM];
+            double regB[TN];
+            for (uint i = 0u; i < TM; ++i) regA[i] = double(As[tRow * TM + i][kk]);
+            for (uint j = 0u; j < TN; ++j) regB[j] = double(Bs[kk][tCol * TN + j]);
+            for (uint i = 0u; i < TM; ++i)
+                for (uint j = 0u; j < TN; ++j)
+                    acc[i][j] += regA[i] * regB[j];
+        }
+        barrier();
+    }
+
+    for (uint i = 0u; i < TM; ++i) {
+        for (uint j = 0u; j < TN; ++j) {
+            uint gr = rowBase + tRow * TM + i;
+            uint gc = colBase + tCol * TN + j;
+            if (gr < p.m && gc < p.n) o[gr * p.n + gc] = float(acc[i][j]);
+        }
+    }
+}

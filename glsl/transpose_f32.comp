@@ -1,0 +1,22 @@
+#version 450
+
+// 2-D transpose for f32 tensors. O[j, i] = A[i, j]. Pure data movement (no
+// arithmetic), so f32 is exact. Same dispatch/push as transpose_f64.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform Push {
+    uint m;
+    uint n;
+} p;
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.y;
+    if (i >= p.m || j >= p.n) return;
+
+    o[j * p.m + i] = a[i * p.n + j];
+}

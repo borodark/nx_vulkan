@@ -11,6 +11,43 @@ conclusions from a Vulkan benchmark number.
 
 ---
 
+## 0. Nx.Backend parity — current status (2026-07-28, nx 0.13)
+
+> **This section is authoritative for parity; the older per-op table in §2 is
+> historical** (it predates the host-fallback batch and lists ops as
+> "not implemented" that are now implemented). See `docs/PARITY_STATUS.md` for
+> the full regenerated gap and bucket classification.
+
+`VulkanoBackend` implements **every** `Nx.Backend` callback nx 0.13 declares —
+`MapSet.difference(callbacks, impl)` is empty. Ops are either native f64 Vulkan
+shaders (hot kernels) or correct host fallbacks through `BinaryBackend`
+(incidental ops). Verified against a `BinaryBackend` reference in f64 by
+`test/nx_vulkan/parity_fallback_test.exs`.
+
+### Permanent skips (never implemented — fall back to EXLA / BinaryBackend)
+
+| Op | Why it is skipped |
+|---|---|
+| `from_pointer/5` (callback) | FFI handle — no computation to accelerate; `BinaryBackend` itself raises. Delegated to `Nx.BinaryBackend.from_pointer`. |
+| `to_pointer/2` (callback) | FFI handle — nothing to compute; transfers to `BinaryBackend` and delegates. |
+| `phase` (not a callback) | `Nx.phase` composes from primitives; it only means anything for complex inputs, and the shader ISA is f64-**real** with no complex type. Nothing to implement or accelerate. |
+
+### Native GPU shaders (Phase 2, landed) — with correct host-fallback tails
+
+`conv/4`, `fft/3`, `ifft/3` now run **real f64 Vulkan compute shaders** on the
+GPU for the common case, and host-fall-back (still correct) for the rest:
+
+| Op | On GPU | Host fallback (correct) |
+|---|---|---|
+| `fft` / `ifft` | last axis, power-of-two length == axis size, real-f64/complex-f64 input → c128 | other axes, padded/sliced/non-pow2 length, f32/int → c64, `fft2` |
+| `conv` | spatial rank 1–3, feature/batch groups == 1, identity permutations, f64 | groups > 1 (incl. depthwise), non-identity permutations, non-f64, rank > 3 |
+
+Follow-on GPU work (all currently correct via fallback): native 2-D `fft2`,
+mixed-radix (non-power-of-two) FFT, grouped/depthwise conv, and channels-last
+(permuted) conv. `phase` stays a permanent skip (complex-only).
+
+---
+
 ## 1. Compute precision
 
 > **Updated (post-f64 migration).** The f32-only limitation below is

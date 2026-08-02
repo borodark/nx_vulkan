@@ -47,11 +47,13 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     end
 
-    test "pad result is on BinaryBackend" do
+    # pad now runs a GPU type-generic copy shader (thrust 2) for static config +
+    # 4/8-byte dtypes — stays on VulkanoBackend.
+    test "pad (f32) stays on VulkanoBackend and is correct" do
       a = v(f32([1.0, 2.0, 3.0]))
       pv = v(Nx.tensor(0.0, type: :f32, backend: Nx.BinaryBackend))
       r = Nx.pad(a, pv, [{1, 1, 0}])
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0.0, 1.0, 2.0, 3.0, 0.0]
     end
 
@@ -62,10 +64,12 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [7.0, 7.0, 7.0, 7.0]
     end
 
-    test "slice result is on BinaryBackend" do
+    # slice now runs a GPU strided-copy shader (thrust 2) for static starts +
+    # 4/8-byte dtypes — stays on VulkanoBackend.
+    test "slice (static start, f32) stays on VulkanoBackend and is correct" do
       a = v(f32([1.0, 2.0, 3.0, 4.0, 5.0]))
       r = Nx.slice(a, [1], [3])
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [2.0, 3.0, 4.0]
     end
 
@@ -95,20 +99,24 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [11.0, 10.0, 13.0]
     end
 
-    test "gather result is on BinaryBackend" do
+    # gather now runs a GPU type-generic copy shader (thrust 2) for the common
+    # leading-prefix / default-all-axes case — stays on VulkanoBackend.
+    test "gather (default axes, f32) stays on VulkanoBackend and is correct" do
       a = v(f32([10.0, 20.0, 30.0, 40.0]))
-      idx = Nx.tensor([[0], [2], [3]], type: :s64, backend: Nx.BinaryBackend)
+      idx = v(Nx.tensor([[0], [2], [3]], type: :s64, backend: Nx.BinaryBackend))
       r = Nx.gather(a, idx)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [10.0, 30.0, 40.0]
     end
 
-    test "select result is on BinaryBackend" do
+    # select now runs a GPU broadcast shader (thrust 2) for u8 pred + f32/f64
+    # branches — stays on VulkanoBackend instead of host round-tripping.
+    test "select (u8 pred, f32) stays on VulkanoBackend and is correct" do
       pred = v(Nx.tensor([1, 0, 1], type: {:u, 8}, backend: Nx.BinaryBackend))
       on_t = v(f32([1.0, 2.0, 3.0]))
       on_f = v(f32([10.0, 20.0, 30.0]))
       r = Nx.select(pred, on_t, on_f)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [1.0, 20.0, 3.0]
     end
 
@@ -147,21 +155,23 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [0, 1]
     end
 
-    test "clip result is on BinaryBackend" do
+    # clip now composes from GPU broadcast min/max (thrust 2) — it stays on
+    # VulkanoBackend for same-type f32/f64 rather than host round-tripping.
+    test "clip (f32) stays on VulkanoBackend and is correct" do
       a = v(f32([-1.0, 0.5, 1.5, 3.0]))
       lo = v(Nx.tensor(0.0, type: :f32, backend: Nx.BinaryBackend))
       hi = v(Nx.tensor(2.0, type: :f32, backend: Nx.BinaryBackend))
       r = Nx.clip(a, lo, hi)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0.0, 0.5, 1.5, 2.0]
     end
 
-    test "clip with mixed-backend bounds" do
+    test "clip with mixed-backend bounds (bounds transferred to GPU)" do
       a = v(f32([-5.0, 0.0, 5.0]))
       lo = Nx.tensor(-1.0, type: :f32, backend: Nx.BinaryBackend)
       hi = Nx.tensor(1.0, type: :f32, backend: Nx.BinaryBackend)
       r = Nx.clip(a, lo, hi)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [-1.0, 0.0, 1.0]
     end
   end

@@ -53,21 +53,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   @impl true
-  def to_binary(%T{data: %__MODULE__{ref: ref}, shape: shape, type: type}, _limit) do
+  def to_binary(%T{data: %__MODULE__{ref: ref}, type: type}, limit) do
     {:ok, bin} = Nx.Vulkan.NativeV.buf_download(ref)
-    expected = byte_size_of(shape) * element_bytes(type)
-
-    cond do
-      byte_size(bin) == expected -> bin
-      byte_size(bin) > expected -> binary_part(bin, 0, expected)
-      true -> bin
-    end
+    # `limit` is the number of ELEMENTS Nx wants (already capped by Nx, and for
+    # vectorized tensors it counts the vectorized axes too — so don't clamp to
+    # `shape`). The download may carry slack from over-allocation; return exactly
+    # the first `limit` elements' bytes. (Previously the limit was ignored, so
+    # Nx.to_binary(t, k) returned the whole tensor — found via `doctest Nx`.)
+    want = limit * element_bytes(type)
+    binary_part(bin, 0, min(want, byte_size(bin)))
   end
 
   @impl true
   def backend_copy(%T{} = tensor, target_backend, opts) do
-    expected = byte_size_of(tensor.shape) * element_bytes(tensor.type)
-    bin = to_binary(tensor, expected)
+    # to_binary/2's limit is an element count — pass the full element count.
+    bin = to_binary(tensor, byte_size_of(tensor.shape))
     target_backend.from_binary(tensor, bin, opts)
   end
 
@@ -96,11 +96,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- creation
 
   @impl true
-  def constant(%T{shape: shape, type: type} = tensor, scalar, _opts) do
-    n = byte_size_of(shape)
-    bin = :binary.copy(encode_scalar(scalar, type), n)
-    {:ok, ref} = Nx.Vulkan.NativeV.buf_upload(bin)
-    put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  def constant(%T{shape: shape, type: type} = tensor, scalar, opts) do
+    case encode_scalar(scalar, type) do
+      :error ->
+        # dtypes without a native encoder (bf16/f8/complex) build on BinaryBackend
+        host_result(tensor, with_binary_backend(fn -> Nx.BinaryBackend.constant(tensor, scalar, opts) end))
+
+      bin when is_binary(bin) ->
+        n = byte_size_of(shape)
+        {:ok, ref} = Nx.Vulkan.NativeV.buf_upload(:binary.copy(bin, n))
+        put_in(tensor.data, %__MODULE__{ref: ref, shape: shape, type: type})
+    end
   end
 
   @impl true
@@ -134,9 +140,23 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                 "../../priv/shaders/elementwise_binary_f64.spv",
                                 __DIR__
                               )
+  @elementwise_binary_f32_spv Path.expand(
+                                "../../priv/shaders/elementwise_binary_f32.spv",
+                                __DIR__
+                              )
 
   defp binary_spv({:f, 64}), do: @elementwise_binary_f64_spv
+  defp binary_spv({:f, 32}), do: @elementwise_binary_f32_spv
   defp binary_spv(_), do: nil
+
+  # Broadcasting elementwise binary (rank <= 4) — keeps bias-add / scaling /
+  # relu-via-max on the GPU instead of host-falling-back.
+  @bcast_binary_f64_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f64.spv", __DIR__)
+  @bcast_binary_f32_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f32.spv", __DIR__)
+
+  defp bcast_binary_spv({:f, 64}), do: @bcast_binary_f64_spv
+  defp bcast_binary_spv({:f, 32}), do: @bcast_binary_f32_spv
+  defp bcast_binary_spv(_), do: nil
 
   for {op, code} <- @binary_ops do
     @impl true
@@ -161,10 +181,52 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
       else
-        binary_op_host_fallback(unquote(op), out, a_v, b_v)
+        bspv = bcast_binary_spv(type)
+
+        if bspv != nil and unquote(code) != 4 and bcast_shape_ok?(a_v, b_v, out) do
+          # coerce mismatched-dtype operands (e.g. f32 scalar with f64 tensor)
+          # to the output type on the GPU, else fall back.
+          case {coerce_to(a_v, type), coerce_to(b_v, type)} do
+            {%T{} = ca, %T{} = cb} -> gpu_bcast_binary(out, ca, cb, unquote(code), bspv)
+            _ -> binary_op_host_fallback(unquote(op), out, a_v, b_v)
+          end
+        else
+          binary_op_host_fallback(unquote(op), out, a_v, b_v)
+        end
       end
     end
   end
+
+  # Broadcast GPU path is valid when both operands are on this backend and the
+  # output rank is 1..4 (Nx guarantees a,b broadcast to out.shape). Dtype
+  # mismatches are handled by coerce_to; pow is excluded above (fp64 has no pow).
+  defp bcast_shape_ok?(%T{} = a, %T{} = b, %T{shape: os}) do
+    match?(%__MODULE__{}, a.data) and match?(%__MODULE__{}, b.data) and
+      tuple_size(os) >= 1 and tuple_size(os) <= 4
+  end
+
+  defp bcast_shape_ok?(_a, _b, _out), do: false
+
+  defp gpu_bcast_binary(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
+    rank = tuple_size(out.shape)
+    outl = Tuple.to_list(out.shape)
+    al = pad_left(Tuple.to_list(a.shape), rank)
+    bl = pad_left(Tuple.to_list(b.shape), rank)
+
+    params =
+      for v <- [rank] ++ pad4(outl) ++ pad4(al) ++ pad4(bl), into: <<>>, do: <<v::signed-32-little>>
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(out.type))
+
+    :ok = Nx.Vulkan.NativeV.apply_binary_broadcast(out_ref, a_ref, b_ref, params_ref, n, rank, code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
+  end
+
+  defp pad_left(list, rank), do: List.duplicate(1, rank - length(list)) ++ list
+  defp pad4(list), do: (list ++ [1, 1, 1, 1]) |> Enum.take(4)
 
   defp binary_op_host_fallback(op, out, a, b) do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
@@ -195,8 +257,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                "../../priv/shaders/elementwise_unary_f64.spv",
                                __DIR__
                              )
+  @elementwise_unary_f32_spv Path.expand(
+                               "../../priv/shaders/elementwise_unary_f32.spv",
+                               __DIR__
+                             )
 
   defp unary_spv({:f, 64}), do: @elementwise_unary_f64_spv
+  defp unary_spv({:f, 32}), do: @elementwise_unary_f32_spv
   defp unary_spv(_), do: nil
 
   for {op, code} <- @unary_ops do
@@ -274,27 +341,242 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # Multi-arg ops — host fallback
+  # conv — native im2col + GEMM on the GPU for the common case (f64, or f32 with
+  # an f64 accumulator in the GEMM); host fallback otherwise. Nx hands the
+  # backend fully-resolved strides, padding ({lo,hi} per spatial dim),
+  # input/kernel dilation, group sizes and permutations, plus an output template
+  # already in output-permutation layout.
+  @conv_im2col_f64_spv Path.expand("../../priv/shaders/conv_im2col_f64.spv", __DIR__)
+  @conv_gemm_f64_spv Path.expand("../../priv/shaders/conv_gemm_f64.spv", __DIR__)
+  @conv_im2col_f32_spv Path.expand("../../priv/shaders/conv_im2col_f32.spv", __DIR__)
+  # conv's GEMM is a matmul, so it honours the same f32 accumulator policy
+  # (f32_matmul_accumulator/0): :f64 accumulator by default, :f32 for speed on
+  # f64-rate-limited GPUs. im2col is pure f32 movement (no accumulator).
+  @conv_gemm_f32_f64acc_spv Path.expand("../../priv/shaders/conv_gemm_f32_f64acc.spv", __DIR__)
+  @conv_gemm_f32_f32acc_spv Path.expand("../../priv/shaders/conv_gemm_f32_f32acc.spv", __DIR__)
+
+  defp conv_spvs({:f, 64}), do: {@conv_im2col_f64_spv, @conv_gemm_f64_spv}
+
+  defp conv_spvs({:f, 32}) do
+    gemm =
+      case f32_matmul_accumulator() do
+        :f32 -> @conv_gemm_f32_f32acc_spv
+        _ -> @conv_gemm_f32_f64acc_spv
+      end
+
+    {@conv_im2col_f32_spv, gemm}
+  end
+
+  defp conv_spvs(_), do: nil
+
   @impl true
   def conv(out, inp, kernel, opts) do
-    inp_bin = Nx.backend_transfer(ensure_on_backend(inp), Nx.BinaryBackend)
-    kernel_bin = Nx.backend_transfer(ensure_on_backend(kernel), Nx.BinaryBackend)
-    result = Nx.conv(inp_bin, kernel_bin, opts)
-    host_result(out, result)
+    i = ensure_on_backend(inp)
+    k = ensure_on_backend(kernel)
+
+    if conv_gpu_ok?(i, k, out, opts) do
+      gpu_conv(out, i, k, opts)
+    else
+      inp_bin = Nx.backend_transfer(i, Nx.BinaryBackend)
+      kernel_bin = Nx.backend_transfer(k, Nx.BinaryBackend)
+      # BinaryBackend.conv calls the high-level Nx.pad internally; with the
+      # process default backend still VulkanoBackend that would dispatch to our
+      # GPU pad and hand conv a Vulkan tensor it then can't to_binary. Pin the
+      # default to BinaryBackend for the whole composed op.
+      host_result(out, with_binary_backend(fn -> Nx.conv(inp_bin, kernel_bin, opts) end))
+    end
   end
 
-  @impl true
-  def fft(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.fft(t_bin, opts)
-    host_result(out, result)
+  # GPU path covers: spatial rank 1..3, feature/batch groups == 1, identity
+  # permutations, f64 or f32 input/kernel/output (all three must match). Any
+  # strides, padding and input/kernel dilation are honoured (folded into the
+  # im2col index math). Groups > 1, non-identity permutations, mixed/other
+  # dtypes and higher rank fall back.
+  defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, %T{type: ot}, opts) do
+    rank = tuple_size(ishape)
+    sr = rank - 2
+
+    match?(%__MODULE__{}, i.data) and match?(%__MODULE__{}, k.data) and
+      i.type == ot and k.type == ot and ot in [{:f, 64}, {:f, 32}] and
+      sr >= 1 and sr <= 3 and
+      Keyword.get(opts, :feature_group_size, 1) == 1 and
+      Keyword.get(opts, :batch_group_size, 1) == 1 and
+      identity_perm?(opts[:input_permutation], rank) and
+      identity_perm?(opts[:kernel_permutation], tuple_size(kshape)) and
+      identity_perm?(opts[:output_permutation], rank)
   end
 
+  defp conv_gpu_ok?(_i, _k, _out, _opts), do: false
+
+  defp identity_perm?(nil, _rank), do: true
+  defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
+
+  defp gpu_conv(
+         %T{type: type, shape: oshape} = out,
+         %T{shape: ishape, data: %__MODULE__{ref: in_ref}},
+         %T{shape: kshape, data: %__MODULE__{ref: k_ref}},
+         opts
+       ) do
+    p = conv_plan(type, ishape, kshape, oshape, opts)
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(p.params_bin)
+    {:ok, col_ref} = Nx.Vulkan.NativeV.buf_alloc(p.m * p.k_cols * p.ebytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_im2col(
+        col_ref,
+        in_ref,
+        params_ref,
+        p.n,
+        p.cin,
+        p.o_total,
+        p.k_total,
+        p.k_cols,
+        p.im2col_spv
+      )
+
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(p.n * p.cout * p.o_total * p.ebytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.conv_gemm(
+        out_ref,
+        col_ref,
+        k_ref,
+        p.n,
+        p.cout,
+        p.o_total,
+        p.k_cols,
+        p.gemm_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
+  end
+
+  @doc false
+  # Shared conv geometry: resolves shapes + fully-materialised opts into the
+  # buffer dims, SPV paths and the packed int params blob consumed by
+  # conv_im2col / conv_gemm. Pure — no device calls — so the Nx.Defn multi-stage
+  # compiler can compute it once at compile time and reuse it, while the eager
+  # backend calls it per dispatch. `oshape` is the output-permutation-layout
+  # shape (identity perms only reach here). Reads the f32 accumulator policy at
+  # call time via conv_spvs/1.
+  def conv_plan(type, ishape, kshape, oshape, opts) do
+    {im2col_spv, gemm_spv} = conv_spvs(type)
+    ebytes = element_bytes(type)
+    rank = tuple_size(ishape)
+    sr = rank - 2
+    n = elem(ishape, 0)
+    cin = elem(ishape, 1)
+    cout = elem(kshape, 0)
+
+    spatial = fn shape -> for ax <- 0..(sr - 1)//1, do: elem(shape, 2 + ax) end
+    d = spatial.(ishape)
+    kdims = spatial.(kshape)
+    odims = spatial.(oshape)
+    pad_lo = Enum.map(opts[:padding], fn {lo, _hi} -> lo end)
+
+    # Pad each per-dim list to length 3 with its identity default so the
+    # rank-3 shaders can treat rank 1/2 uniformly (unused dims size 1).
+    order = [
+      {d, 1},
+      {odims, 1},
+      {kdims, 1},
+      {opts[:strides], 1},
+      {pad_lo, 0},
+      {opts[:input_dilation], 1},
+      {opts[:kernel_dilation], 1}
+    ]
+
+    params_bin =
+      for {list, default} <- order, v <- pad3(list, default), into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    o_total = Enum.product(odims)
+    k_total = Enum.product(kdims)
+
+    %{
+      im2col_spv: im2col_spv,
+      gemm_spv: gemm_spv,
+      ebytes: ebytes,
+      params_bin: params_bin,
+      n: n,
+      cin: cin,
+      cout: cout,
+      o_total: o_total,
+      k_total: k_total,
+      k_cols: cin * k_total,
+      m: n * o_total
+    }
+  end
+
+  defp pad3([a], d), do: [a, d, d]
+  defp pad3([a, b], d), do: [a, b, d]
+  defp pad3([a, b, c], _d), do: [a, b, c]
+
+  # fft / ifft — native f64 Cooley-Tukey on the GPU for the common case;
+  # host fallback otherwise. Nx resolves :length and :axis to concrete ints
+  # before dispatch and sets out.type = to_complex(input) (f64 -> c128).
+  @fft_bitrev_spv Path.expand("../../priv/shaders/fft_bitrev_load_f64.spv", __DIR__)
+  @fft_stage_spv Path.expand("../../priv/shaders/fft_stage_f64.spv", __DIR__)
+
   @impl true
-  def ifft(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.ifft(t_bin, opts)
-    host_result(out, result)
+  def fft(out, tensor, opts), do: do_fft(out, tensor, opts, false)
+
+  @impl true
+  def ifft(out, tensor, opts), do: do_fft(out, tensor, opts, true)
+
+  defp do_fft(out, tensor, opts, inverse?) do
+    t = ensure_on_backend(tensor)
+    length = Keyword.fetch!(opts, :length)
+    axis = Keyword.fetch!(opts, :axis)
+    rank = tuple_size(t.shape)
+
+    if fft_gpu_ok?(t, out, axis, length, rank) do
+      gpu_fft(out, t, length, inverse?)
+    else
+      op = if inverse?, do: :ifft, else: :fft
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      host_result(out, apply(Nx, op, [t_bin, opts]))
+    end
+  end
+
+  # GPU path covers: last axis, no pad/slice (length == that axis's size),
+  # power-of-two length >= 2, real-f64 or complex-f64 input, c128 output.
+  # Everything else (other axes, padded/sliced/non-pow2 lengths, f32/int
+  # inputs that map to c64) falls back to BinaryBackend, still correct.
+  defp fft_gpu_ok?(%T{shape: shape, type: type} = t, %T{type: {:c, 128}}, axis, length, rank) do
+    match?(%__MODULE__{}, t.data) and rank >= 1 and axis == rank - 1 and
+      elem(shape, axis) == length and pow2?(length) and length >= 2 and
+      type in [{:f, 64}, {:c, 128}]
+  end
+
+  defp fft_gpu_ok?(_t, _out, _axis, _length, _rank), do: false
+
+  defp pow2?(n), do: n > 0 and Bitwise.band(n, n - 1) == 0
+
+  defp gpu_fft(out, %T{shape: shape, type: type, data: %__MODULE__{ref: in_ref}}, length, inverse?) do
+    n = length
+    logn = trunc(:math.log2(n))
+    batch = div(byte_size_of(shape), n)
+    is_complex = if type == {:c, 128}, do: 1, else: 0
+    inv = if inverse?, do: 1, else: 0
+    out_bytes = batch * n * element_bytes({:c, 128})
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+
+    :ok =
+      Nx.Vulkan.NativeV.fft(
+        out_ref,
+        in_ref,
+        n,
+        logn,
+        batch,
+        is_complex,
+        inv,
+        @fft_bitrev_spv,
+        @fft_stage_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: {:c, 128}})
   end
 
   @impl true
@@ -311,8 +593,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- reductions
 
   @reduce_axis_f64_spv Path.expand("../../priv/shaders/reduce_axis_f64.spv", __DIR__)
+  @reduce_axis_f32_spv Path.expand("../../priv/shaders/reduce_axis_f32.spv", __DIR__)
 
   defp reduce_spv({:f, 64}), do: @reduce_axis_f64_spv
+  defp reduce_spv({:f, 32}), do: @reduce_axis_f32_spv
   defp reduce_spv(_), do: nil
 
   @impl true
@@ -416,7 +700,16 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # ---------------------------------------------------------------- shape / movement
 
-  @transpose_spv Path.expand("../../priv/shaders/transpose.spv", __DIR__)
+  # The legacy transpose.spv is an f32 shader — it strides the buffer as
+  # 4-byte floats and silently corrupts f64 data. The f64-first backend uses
+  # transpose_f64.spv for the (only) GPU-accelerated case (2-D [1,0] f64);
+  # every other shape/type host-falls-back.
+  @transpose_f64_spv Path.expand("../../priv/shaders/transpose_f64.spv", __DIR__)
+  @transpose_f32_spv Path.expand("../../priv/shaders/transpose_f32.spv", __DIR__)
+
+  defp transpose_spv({:f, 64}), do: @transpose_f64_spv
+  defp transpose_spv({:f, 32}), do: @transpose_f32_spv
+  defp transpose_spv(_), do: nil
 
   # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
   # The buffer might be physically larger than the new shape implies
@@ -433,79 +726,204 @@ defmodule Nx.Vulkan.VulkanoBackend do
     put_in(out.data, %__MODULE__{ref: ref, shape: new_shape, type: type})
   end
 
-  # 2D transpose. Higher-rank transposes (axis permutations) fall back
-  # to BinaryBackend until we wire a general-rank shader.
+  # 2-D f64 transpose runs the f64 shader on the GPU. Higher-rank axis
+  # permutations, non-[1,0] axes and non-f64 types host-fall-back (correct,
+  # avoids the old raise and the f32-shader-on-f64 corruption).
   @impl true
   def transpose(
         %T{shape: out_shape, type: type} = out,
-        %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+        %T{shape: in_shape, data: %__MODULE__{ref: a_ref}} = tensor,
         axes
       ) do
-    rank = tuple_size(in_shape)
+    spv = transpose_spv(type)
 
-    case {rank, axes} do
-      {2, [1, 0]} ->
-        m = elem(in_shape, 0)
-        n = elem(in_shape, 1)
-        n_bytes = m * n * element_bytes(type)
-        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+    if spv != nil and tuple_size(in_shape) == 2 and axes == [1, 0] do
+      m = elem(in_shape, 0)
+      n = elem(in_shape, 1)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
 
-        :ok =
-          Nx.Vulkan.NativeV.transpose_2d(
-            out_ref,
-            a_ref,
-            m,
-            n,
-            @transpose_spv
-          )
+      :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, spv)
 
-        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
-
-      _ ->
-        raise "transpose rank=#{rank} axes=#{inspect(axes)}: only 2D [1,0] supported in stage 4"
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+    else
+      t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+      host_result(out, Nx.transpose(t_bin, axes: axes))
     end
   end
 
   # ---------------------------------------------------------------- host-fallback ops
 
-  # as_type — Nx-level cast via BinaryBackend. For f32↔f32 (no-op) we
-  # just rewrap. For real casts we round-trip through host.
-  @impl true
-  def as_type(%T{type: type} = out, %T{type: source_type, data: %__MODULE__{ref: ref}} = tensor) do
-    if type == source_type do
-      put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
-    else
-      bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-      bin_cast = Nx.as_type(bin_in, type)
-      host_result(out, bin_cast)
+  # as_type — same-type is a rewrap; f32<->f64 casts run a GPU shader; other
+  # dtype pairs round-trip through BinaryBackend.
+  @cast_f32_to_f64_spv Path.expand("../../priv/shaders/cast_f32_to_f64.spv", __DIR__)
+  @cast_f64_to_f32_spv Path.expand("../../priv/shaders/cast_f64_to_f32.spv", __DIR__)
+
+  defp cast_spv({:f, 32}, {:f, 64}), do: @cast_f32_to_f64_spv
+  defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
+  defp cast_spv(_from, _to), do: nil
+
+  # Coerce an on-GPU tensor to `to` type via the f32<->f64 cast shader so
+  # mixed-dtype ops (e.g. f64 tensor + f32 scalar literal) stay on the GPU.
+  # Returns the coerced %T{} (a no-op when already `to`), or nil when the pair
+  # can't be cast on the GPU (non-f32/f64, or not on this backend).
+  defp coerce_to(%T{type: to} = t, to), do: t
+
+  defp coerce_to(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
+    case cast_spv(from, to) do
+      nil ->
+        nil
+
+      spv ->
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(to))
+        :ok = Nx.Vulkan.NativeV.cast(out_ref, ref, n, spv)
+        %{t | type: to, data: %__MODULE__{ref: out_ref, shape: shape, type: to}}
     end
   end
 
-  # Comparison ops — host-fallback. The elementwise_binary.spv catalog
-  # has op codes 7/8/9 (equal/less/greater) but its output is f32, not
-  # u8 (the type Nx expects from a comparison). Routing through
-  # BinaryBackend keeps the Nx type contract correct. Scholar uses
-  # comparison + select heavily; this unblocks the classical-ML target.
-  for op <- [:equal, :not_equal, :less, :less_equal, :greater, :greater_equal] do
+  defp coerce_to(_t, _to), do: nil
+
+  @impl true
+  def as_type(%T{type: type} = out, %T{type: source_type, shape: shape, data: %__MODULE__{ref: ref}} = tensor) do
+    cond do
+      type == source_type ->
+        put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+
+      cast_spv(source_type, type) != nil ->
+        # f32<->f64 widening/narrowing on the GPU (mixed precision).
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+        :ok = Nx.Vulkan.NativeV.cast(out_ref, ref, n, cast_spv(source_type, type))
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: type})
+
+      true ->
+        bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+        host_result(out, Nx.as_type(bin_in, type))
+    end
+  end
+
+  # Comparison ops — GPU broadcast -> u8 (packed as u32 words in the shader) when
+  # both operands share an f32/f64 type; host fallback otherwise. Same-type
+  # f32 comparisons (e.g. x > 0.0) keep the relu-grad mask on the GPU.
+  @compare_ops [equal: 0, not_equal: 1, less: 2, less_equal: 3, greater: 4, greater_equal: 5]
+  @compare_f32_spv Path.expand("../../priv/shaders/compare_f32.spv", __DIR__)
+  @compare_f64_spv Path.expand("../../priv/shaders/compare_f64.spv", __DIR__)
+
+  defp compare_spv({:f, 32}), do: @compare_f32_spv
+  defp compare_spv({:f, 64}), do: @compare_f64_spv
+  defp compare_spv(_), do: nil
+
+  for {op, code} <- @compare_ops do
     @impl true
     def unquote(op)(out, a, b) do
       a_v = ensure_on_backend(a)
       b_v = ensure_on_backend(b)
-      a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
-      b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
-      result = apply(Nx, unquote(op), [a_bin, b_bin])
-      host_result(out, result)
+      # comparison happens at the merged input type; coerce both operands to it
+      # (handles f64 tensor vs f32 scalar) then compare -> u8.
+      merged = Nx.Type.merge(a_v.type, b_v.type)
+      spv = compare_spv(merged)
+
+      cast =
+        if spv != nil and match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data) and
+             tuple_size(out.shape) >= 1 and tuple_size(out.shape) <= 4 do
+          {coerce_to(a_v, merged), coerce_to(b_v, merged)}
+        end
+
+      case cast do
+        {%T{} = ca, %T{} = cb} ->
+          gpu_compare(out, ca, cb, unquote(code), spv)
+
+        _ ->
+          a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+          b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+          host_result(out, apply(Nx, unquote(op), [a_bin, b_bin]))
+      end
     end
   end
 
-  # select(cond, on_true, on_false) — host-fallback.
+  defp gpu_compare(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
+    rank = tuple_size(out.shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(pad_left(Tuple.to_list(a.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(b.shape), rank)),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    # u8 output written as u32 words — pad the buffer to a 4-byte multiple.
+    padded = div(n + 3, 4) * 4
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(padded)
+
+    :ok = Nx.Vulkan.NativeV.apply_compare(out_ref, a_ref, b_ref, params_ref, n, rank, code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
+  end
+
+  # select(pred, on_true, on_false) — GPU broadcast select (masking / where /
+  # relu-grad) when pred is u8 and on_true/on_false/out share an f32/f64 type;
+  # host fallback otherwise.
+  @select_f32_spv Path.expand("../../priv/shaders/select_f32.spv", __DIR__)
+  @select_f64_spv Path.expand("../../priv/shaders/select_f64.spv", __DIR__)
+
+  defp select_spv({:f, 32}), do: @select_f32_spv
+  defp select_spv({:f, 64}), do: @select_f64_spv
+  defp select_spv(_), do: nil
+
   @impl true
-  def select(out, pred, on_true, on_false) do
-    pred_bin = Nx.backend_transfer(ensure_on_backend(pred), Nx.BinaryBackend)
-    t_bin = Nx.backend_transfer(ensure_on_backend(on_true), Nx.BinaryBackend)
-    f_bin = Nx.backend_transfer(ensure_on_backend(on_false), Nx.BinaryBackend)
-    result = Nx.select(pred_bin, t_bin, f_bin)
-    host_result(out, result)
+  def select(%T{type: type, shape: os} = out, pred, on_true, on_false) do
+    p = ensure_on_backend(pred)
+    t = ensure_on_backend(on_true)
+    f = ensure_on_backend(on_false)
+    spv = select_spv(type)
+
+    shape_ok? =
+      spv != nil and p.type == {:u, 8} and match?(%__MODULE__{}, p.data) and
+        match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, f.data) and
+        tuple_size(os) >= 1 and tuple_size(os) <= 4
+
+    # coerce the branches to the output type on the GPU (handles a f32 scalar 0.0
+    # against an f64 tensor); pred stays u8.
+    branches = if shape_ok?, do: {coerce_to(t, type), coerce_to(f, type)}
+
+    case branches do
+      {%T{} = ct, %T{} = cf} ->
+        gpu_select(out, p, ct, cf, spv)
+
+      _ ->
+        pred_bin = Nx.backend_transfer(p, Nx.BinaryBackend)
+        t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+        f_bin = Nx.backend_transfer(f, Nx.BinaryBackend)
+        host_result(out, with_binary_backend(fn -> Nx.select(pred_bin, t_bin, f_bin) end))
+    end
+  end
+
+  defp gpu_select(out, %T{data: %__MODULE__{ref: p_ref}} = p, %T{data: %__MODULE__{ref: t_ref}} = t, %T{data: %__MODULE__{ref: f_ref}} = f, spv) do
+    rank = tuple_size(out.shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(pad_left(Tuple.to_list(p.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(t.shape), rank)) ++
+              pad4(pad_left(Tuple.to_list(f.shape), rank)),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(out.type))
+
+    :ok = Nx.Vulkan.NativeV.apply_select(out_ref, p_ref, t_ref, f_ref, params_ref, n, rank, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # all/3, any/3 — boolean reductions, host-fallback.
@@ -555,26 +973,106 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # GPU-side slice shader for contiguous prefixes; until then this is
   # correct but copies through host memory.
   @impl true
+  @slice_spv Path.expand("../../priv/shaders/slice.spv", __DIR__)
+
   def slice(out, tensor, start_indices, lengths, strides) do
-    # Delegate to Nx-level slice on BinaryBackend; result stays on host
-    # (Tier 1 of SHAPE_C_PLAN.md — avoid the upload-back round trip).
-    bin_in = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-    bin_result = Nx.slice(bin_in, start_indices, lengths, strides: strides)
-    host_result(out, bin_result)
+    t = ensure_on_backend(tensor)
+    eb = element_bytes(t.type)
+    rank = tuple_size(t.shape)
+
+    # GPU strided copy when starts are static integers, the dtype is 4/8-byte,
+    # and rank 1..4. Dynamic (tensor) starts, sub-word dtypes and higher rank
+    # host-fall-back. (Dynamic starts must transfer to BinaryBackend too, else
+    # Nx.slice calls BinaryBackend.to_binary on a VulkanoBackend index — a bug
+    # found via `doctest Nx`.)
+    if Enum.all?(start_indices, &is_integer/1) and rem(eb, 4) == 0 and
+         match?(%__MODULE__{}, t.data) and rank >= 1 and rank <= 4 do
+      gpu_slice(out, t, start_indices, strides, eb)
+    else
+      bin_in = Nx.backend_transfer(t, Nx.BinaryBackend)
+      bin_idx = Enum.map(start_indices, &maybe_transfer_idx/1)
+      host_result(out, Nx.slice(bin_in, bin_idx, lengths, strides: strides))
+    end
+  end
+
+  defp gpu_slice(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, starts, strides, eb) do
+    rank = tuple_size(out.shape)
+    ews = div(eb, 4)
+
+    params =
+      for v <-
+            [rank, ews] ++
+              pad4(Tuple.to_list(sshape)) ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(starts) ++
+              pad4(strides),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+
+    :ok = Nx.Vulkan.NativeV.apply_slice(out_ref, in_ref, params_ref, n, rank, @slice_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # ---------------------------------------------------------------- sampler-path host fallbacks
 
-  # Nx.Backend.pad/4 callback. The Nx sampler uses pad to extend tensors
-  # along arbitrary axes (NUTS leapfrog scratch buffers, batched chain
-  # padding, etc.). No GPU pad shader yet — round-trip through
-  # BinaryBackend. Pad value comes in as a tensor; transfer it too.
+  @pad_spv Path.expand("../../priv/shaders/pad.spv", __DIR__)
+
+  # Nx.Backend.pad/4 callback. GPU path: a type-generic copy that maps each
+  # output element back through the per-axis {low, high, interior} config —
+  # elements in an edge pad, an interior gap, or outside the source get the pad
+  # value (shader handles negative low/high cropping). Runs for 4/8-byte dtypes,
+  # rank 1..4, scalar same-type pad value. Everything else host-falls-back.
   @impl true
   def pad(out, tensor, pad_value, padding_config) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    pv_bin = Nx.backend_transfer(ensure_on_backend(pad_value), Nx.BinaryBackend)
-    result = Nx.pad(t_bin, pv_bin, padding_config)
-    host_result(out, result)
+    t = ensure_on_backend(tensor)
+    pv = ensure_on_backend(pad_value)
+    eb = element_bytes(t.type)
+    rank = tuple_size(t.shape)
+
+    if match?(%__MODULE__{}, t.data) and rem(eb, 4) == 0 and rank >= 1 and rank <= 4 and
+         pv.type == t.type and tuple_size(pv.shape) == 0 do
+      gpu_pad(out, t, pv, padding_config, eb)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend)
+      host_result(out, Nx.pad(t_bin, pv_bin, padding_config))
+    end
+  end
+
+  defp gpu_pad(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, pv, padding_config, eb) do
+    rank = tuple_size(out.shape)
+    ews = div(eb, 4)
+    lows = Enum.map(padding_config, fn {lo, _hi, _int} -> lo end)
+    interiors = Enum.map(padding_config, fn {_lo, _hi, int} -> int end)
+
+    params =
+      for v <-
+            [rank, ews] ++
+              pad4(Tuple.to_list(sshape)) ++
+              pad4(Tuple.to_list(out.shape)) ++
+              pad4(lows) ++
+              pad4(interiors),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+
+    pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend) |> Nx.to_binary()
+    {:ok, padval_ref} = Nx.Vulkan.NativeV.buf_upload(pv_bin)
+
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+
+    :ok = Nx.Vulkan.NativeV.apply_pad(out_ref, in_ref, params_ref, padval_ref, n, rank, @pad_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # put_slice: write `slice` into `tensor` at `start_indices`. Used by
@@ -633,12 +1131,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @impl true
   def concatenate(out, tensors, axis) do
     cond do
-      axis == 0 and all_vulkano?(tensors) ->
+      # GPU byte-append is only valid when every input already has the output
+      # type — a raw concat can't cast. Mixed-type concat (e.g. f32+u8+s64) must
+      # host-fall-back so Nx casts to the merged type first (found via doctest Nx).
+      axis == 0 and all_vulkano?(tensors) and Enum.all?(tensors, &(&1.type == out.type)) ->
         concat_vulkano(out, tensors)
 
       true ->
         bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
-        result = Nx.concatenate(bins, axis: axis)
+        result = with_binary_backend(fn -> Nx.concatenate(bins, axis: axis) end)
         host_result(out, result)
     end
   end
@@ -679,22 +1180,65 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # gather: pick elements at given index tuples. Underpins take/
   # take_diagonal in Nx 0.10's lowering.
   @impl true
+  @gather_spv Path.expand("../../priv/shaders/gather.spv", __DIR__)
+
   def gather(out, tensor, indices, opts \\ []) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.gather(t_bin, i_bin, opts)
-    host_result(out, result)
+    t = ensure_on_backend(tensor)
+    idx = ensure_on_backend(indices)
+    ishape = t.shape
+    rank = tuple_size(ishape)
+    idx_rank = tuple_size(idx.shape)
+    k = if idx_rank > 0, do: elem(idx.shape, idx_rank - 1), else: 0
+
+    axes =
+      case opts[:axes] do
+        nil -> if k > 0, do: Enum.to_list(0..(k - 1)), else: []
+        given -> Nx.Shape.normalize_axes(ishape, given, t.names)
+      end
+
+    eb = element_bytes(t.type)
+    ib = element_bytes(idx.type)
+
+    # GPU path: the indexed axes are a leading prefix [0..K-1] (no transpose
+    # needed — includes the default all-axes gather), value + index dtypes are
+    # 4/8-byte, rank 1..4, both operands GPU-resident.
+    if match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, idx.data) and
+         axes == Enum.to_list(0..(k - 1)) and rem(eb, 4) == 0 and rem(ib, 4) == 0 and
+         rank >= 1 and rank <= 4 and k >= 1 do
+      gpu_gather(out, t, idx, k, eb, ib)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      i_bin = Nx.backend_transfer(idx, Nx.BinaryBackend)
+      host_result(out, with_binary_backend(fn -> Nx.gather(t_bin, i_bin, opts) end))
+    end
   end
 
-  # take: pick along a single axis. Common in trajectory selection.
-  # The Nx.Backend.take/4 callback's 4th arg is a keyword (e.g.
-  # `[axis: 0]`), NOT a bare integer — forward it through verbatim.
-  @impl true
-  def take(out, tensor, indices, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.take(t_bin, i_bin, opts)
-    host_result(out, result)
+  defp gpu_gather(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, idx, k, eb, ib) do
+    dims = Tuple.to_list(sshape)
+    ews = div(eb, 4)
+    idx_words = div(ib, 4)
+    # count = product of the trailing (non-indexed) dims; per-leading-axis
+    # stride = product of dims after that axis (row-major).
+    count = dims |> Enum.drop(k) |> Enum.reduce(1, &(&1 * &2))
+
+    strides =
+      for j <- 0..(k - 1) do
+        dims |> Enum.drop(j + 1) |> Enum.reduce(1, &(&1 * &2))
+      end
+
+    params =
+      for v <- [k, ews, idx_words, count] ++ pad4(strides), into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(out.shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+    %__MODULE__{ref: idx_ref} = idx.data
+
+    :ok = Nx.Vulkan.NativeV.apply_gather(out_ref, in_ref, idx_ref, params_ref, n, k, @gather_spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
   # argmax / argmin: indices of extrema along an axis. Used by
@@ -719,41 +1263,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # GPU later; for now, Tier 1 host fallback keeps the contract.
   @impl true
   def clip(out, tensor, min, max) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    min_bin = Nx.backend_transfer(ensure_on_backend(min), Nx.BinaryBackend)
-    max_bin = Nx.backend_transfer(ensure_on_backend(max), Nx.BinaryBackend)
-    result = Nx.clip(t_bin, min_bin, max_bin)
+    # clip = min(max(t, lo), hi) — composes from our broadcast max/min, so it
+    # stays on the GPU (same-type f32/f64) instead of host round-tripping. Mixed
+    # types (e.g. f32 tensor, integer bounds) fall back per-op, still correct.
+    t = ensure_on_backend(tensor)
+    lo = ensure_on_backend(min)
+    hi = ensure_on_backend(max)
+    result = Nx.min(Nx.max(t, lo), hi)
     host_result(out, result)
   end
 
-  # --- Tier 1 parity batch (2026-05-26) — see docs/NX_PARITY_RESEARCH.md ---
-  # Each implements the Nx.Backend callback via Nx.BinaryBackend (download,
-  # invoke Nx.<op>, return on BinaryBackend per Tier 1 contract). No
-  # GPU acceleration yet; can be promoted to compute shaders later when
-  # profiling justifies (top candidates per family in research doc).
-
-  # all_close: pairwise tolerance check. Returns a 0-arity boolean tensor.
-  @impl true
-  def all_close(out, a, b, opts) do
-    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
-    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
-    result = Nx.all_close(a_bin, b_bin, opts)
-    host_result(out, result)
-  end
+  # --- Tier 1 parity batch — host-fallback Nx.Backend callbacks ---
+  # Each downloads to BinaryBackend, invokes Nx.<op>, returns on
+  # BinaryBackend (host_result contract). No GPU shader yet; promotable
+  # later when profiling justifies. (nx 0.13 note: all_close, logical_not,
+  # cumulative_*, top_k, take_along_axis and the small-linalg family are no
+  # longer Nx.Backend callbacks — Nx routes them through block/4 or composes
+  # them from primitives, so they need no explicit clause here.)
 
   # product: multiplicative reduction. Same shape as sum but with *.
   @impl true
   def product(out, tensor, opts) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     result = Nx.product(t_bin, opts)
-    host_result(out, result)
-  end
-
-  # logical_not: elementwise boolean inversion. Returns u8 tensor.
-  @impl true
-  def logical_not(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.logical_not(t_bin)
     host_result(out, result)
   end
 
@@ -766,31 +1298,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  # cumulative_max / cumulative_min / cumulative_product: prefix scans.
-  # cumulative_sum already passes via Nx composition; the others need
-  # explicit callbacks.
-  @impl true
-  def cumulative_max(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_max(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def cumulative_min(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_min(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def cumulative_product(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.cumulative_product(t_bin, opts)
-    host_result(out, result)
-  end
-
-  # sort / argsort / top_k / take_along_axis — sort family
+  # sort / argsort — sort family (both still Nx.Backend callbacks)
   @impl true
   def sort(out, tensor, opts) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
@@ -805,36 +1313,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
-  @impl true
-  def top_k(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.top_k(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def take_along_axis(out, tensor, indices, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    i_bin = Nx.backend_transfer(ensure_on_backend(indices), Nx.BinaryBackend)
-    result = Nx.take_along_axis(t_bin, i_bin, opts)
-    host_result(out, result)
-  end
-
-  # all / any — boolean reductions
-  @impl true
-  def all(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.all(t_bin, opts)
-    host_result(out, result)
-  end
-
-  @impl true
-  def any(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.any(t_bin, opts)
-    host_result(out, result)
-  end
-
   # bitcast: reinterpret bytes as different type without conversion
   @impl true
   def bitcast(out, tensor) do
@@ -844,74 +1322,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # to_batched: split leading axis into chunks. Returns a stream of tensors.
+  # nx 0.13 encodes the batch size in the `out` template's leading dim (opts
+  # carries only :leftover), so derive it from there — reading opts[:batch_size]
+  # yields nil and crashes Nx.to_batched/3.
   @impl true
-  def to_batched(out, tensor, opts) do
+  def to_batched(%T{shape: out_shape}, tensor, opts) do
+    batch_size = elem(out_shape, 0)
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    Nx.to_batched(t_bin, opts[:batch_size], opts)
+    Nx.to_batched(t_bin, batch_size, opts)
   end
 
-  # --- Round 2: linalg family (8 callbacks, all delegate to Nx.LinAlg) ---
-  # Most return a SINGLE tensor; lu/qr/svd/eigh return a tuple. The tuple
-  # cases skip host_result/2 (which takes a single tensor) and rebuild
-  # each component as a BinaryBackend tensor explicitly.
-
-  @impl true
-  def cholesky(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.LinAlg.cholesky(t_bin)
-    host_result(out, result)
-  end
-
-  @impl true
-  def determinant(out, tensor) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.LinAlg.determinant(t_bin)
-    host_result(out, result)
-  end
-
-  @impl true
-  def solve(out, a, b) do
-    a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
-    b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
-    result = Nx.LinAlg.solve(a_bin, b_bin)
-    host_result(out, result)
-  end
-
+  # --- linalg: triangular_solve is the only remaining Nx.Backend callback ---
+  # nx 0.13 dropped cholesky/determinant/solve/qr/lu/svd/eigh from the
+  # behaviour and routes each through the block/4 callback (a Nx.Block.LinAlg.*
+  # struct); our block/4 transfers to BinaryBackend, so those ops need no
+  # explicit clause here. triangular_solve stayed a callback.
   @impl true
   def triangular_solve(out, a, b, opts) do
     a_bin = Nx.backend_transfer(ensure_on_backend(a), Nx.BinaryBackend)
     b_bin = Nx.backend_transfer(ensure_on_backend(b), Nx.BinaryBackend)
     result = Nx.LinAlg.triangular_solve(a_bin, b_bin, opts)
     host_result(out, result)
-  end
-
-  # Tuple-return decompositions — each element rebuilt as BinaryBackend.
-  @impl true
-  def qr({q_out, r_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {q, r} = Nx.LinAlg.qr(t_bin, opts)
-    {host_result(q_out, q), host_result(r_out, r)}
-  end
-
-  @impl true
-  def lu({p_out, l_out, u_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {p, l, u} = Nx.LinAlg.lu(t_bin, opts)
-    {host_result(p_out, p), host_result(l_out, l), host_result(u_out, u)}
-  end
-
-  @impl true
-  def svd({u_out, s_out, vt_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {u, s, vt} = Nx.LinAlg.svd(t_bin, opts)
-    {host_result(u_out, u), host_result(s_out, s), host_result(vt_out, vt)}
-  end
-
-  @impl true
-  def eigh({eigenvals_out, eigenvecs_out}, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    {evals, evecs} = Nx.LinAlg.eigh(t_bin, opts)
-    {host_result(eigenvals_out, evals), host_result(eigenvecs_out, evecs)}
   end
 
   # --- Round 2: window family (7 callbacks) ---
@@ -958,7 +1389,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
     iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
-    result = Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts)
+    result = with_binary_backend(fn -> Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts) end)
     host_result(out, result)
   end
 
@@ -967,7 +1398,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
     iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
-    result = Nx.window_scatter_min(t_bin, s_bin, iv_bin, dimensions, opts)
+    result = with_binary_backend(fn -> Nx.window_scatter_min(t_bin, s_bin, iv_bin, dimensions, opts) end)
     host_result(out, result)
   end
 
@@ -991,21 +1422,53 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # ---------------------------------------------------------------- linalg
 
   @matmul_f64_spv Path.expand("../../priv/shaders/matmul_f64.spv", __DIR__)
+  # f32 matmul keeps data in f32; the accumulator width is a policy (see
+  # F32_PLAN.md). Default :f64 matches a f64-accumulating reference to f32
+  # round-off; :f32 is 1.4-1.7x faster on f64-rate-limited GPUs (Kepler/consumer
+  # Ampere) at the cost of precision that degrades with K. Opt into the f32 path
+  # via the tensor's dtype; f64 storage stays the default.
+  @matmul_f32_f64acc_spv Path.expand("../../priv/shaders/matmul_f32_f64acc.spv", __DIR__)
+  @matmul_f32_f32acc_spv Path.expand("../../priv/shaders/matmul_f32_f32acc.spv", __DIR__)
+
+  @doc """
+  Accumulator width for the f32 GPU GEMM path — governs both `dot`/matmul **and**
+  conv's GEMM: `:f64` (default, accuracy-safe) or `:f32` (faster on f64-rate-
+  limited GPUs, precision degrades ~√K). Set with `put_f32_matmul_accumulator/1`
+  or `config :nx_vulkan, :f32_matmul_accumulator`.
+  """
+  def f32_matmul_accumulator, do: Application.get_env(:nx_vulkan, :f32_matmul_accumulator, :f64)
+
+  @doc "Set the f32 GEMM accumulator policy (`:f64` | `:f32`). See `f32_matmul_accumulator/0`."
+  def put_f32_matmul_accumulator(width) when width in [:f32, :f64] do
+    Application.put_env(:nx_vulkan, :f32_matmul_accumulator, width)
+  end
+
+  defp matmul_spv({:f, 64}), do: @matmul_f64_spv
+
+  defp matmul_spv({:f, 32}) do
+    case f32_matmul_accumulator() do
+      :f32 -> @matmul_f32_f32acc_spv
+      _ -> @matmul_f32_f64acc_spv
+    end
+  end
+
+  defp matmul_spv(_), do: nil
 
   # Dot product (matmul) — Nx callback signature:
   #   dot(out, a, contracting_axes_a, batched_axes_a,
   #            b, contracting_axes_b, batched_axes_b)
   #
   # Fast path: rank-2 × rank-2, contracting [1] of a vs [0] of b
-  # (standard matmul A·B). f32 and f64 supported via separate SPVs.
-  # Everything else routes through BinaryBackend.
+  # (standard matmul A·B). f64 and f32 (f64-accumulator) run native shaders;
+  # everything else routes through BinaryBackend.
   @impl true
   def dot(%T{shape: out_shape, type: type} = out, a, axes_a, batched_a, b, axes_b, batched_b) do
     a_v = ensure_on_backend(a)
     b_v = ensure_on_backend(b)
+    spv = matmul_spv(type)
 
     fast_path =
-      type == {:f, 64} and a_v.type == type and b_v.type == type and
+      spv != nil and a_v.type == type and b_v.type == type and
         tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
         axes_a == [1] and axes_b == [0] and
         batched_a == [] and batched_b == []
@@ -1020,7 +1483,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
       out_bytes = m * n * element_bytes(type)
       {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, @matmul_f64_spv)
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else
@@ -1053,6 +1516,22 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # lazily on first touch.
   defp host_result(%T{} = out, %T{} = result), do: %{out | data: result.data}
 
+  # Run a composed Nx fallback with BinaryBackend as the *process default* so any
+  # intermediate tensors Nx materialises inside the composition (constants, iota,
+  # broadcasts) land on BinaryBackend. Without this, when VulkanoBackend is the
+  # default backend (the normal way the backend is used), those intermediates
+  # leak onto VulkanoBackend and Nx crashes mixing them with our BinaryBackend
+  # inputs. Surfaced by `doctest Nx` (window_scatter_*, reflect, …).
+  defp with_binary_backend(fun) do
+    prev = Nx.default_backend(Nx.BinaryBackend)
+
+    try do
+      fun.()
+    after
+      Nx.default_backend(prev)
+    end
+  end
+
   defp byte_size_of(shape) when is_tuple(shape) do
     shape |> Tuple.to_list() |> Enum.reduce(1, &(&1 * &2))
   end
@@ -1067,8 +1546,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp element_bytes({:u, 16}), do: 2
   defp element_bytes({:u, 32}), do: 4
   defp element_bytes({:u, 64}), do: 8
+  defp element_bytes({:f, 16}), do: 2
+  defp element_bytes({:f, 8}), do: 1
   defp element_bytes({:bf, 16}), do: 2
+  defp element_bytes({:c, 64}), do: 8
+  defp element_bytes({:c, 128}), do: 16
 
+  defp encode_scalar(s, {:f, 16}), do: <<s / 1.0::float-16-native>>
   defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
   defp encode_scalar(s, {:f, 64}), do: <<s / 1.0::float-64-native>>
   defp encode_scalar(s, {:s, 8}), do: <<trunc(s)::signed-8>>
@@ -1079,5 +1563,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp encode_scalar(s, {:u, 16}), do: <<trunc(s)::unsigned-16-native>>
   defp encode_scalar(s, {:u, 32}), do: <<trunc(s)::unsigned-32-native>>
   defp encode_scalar(s, {:u, 64}), do: <<trunc(s)::unsigned-64-native>>
-  defp encode_scalar(s, {:bf, 16}), do: <<s / 1.0::float-16-native>>
+  # bf16 / f8 / complex: no correct native bitstring encoder (bf16 ≠ IEEE f16),
+  # so signal fallback — constant/3 builds these via BinaryBackend.
+  defp encode_scalar(_s, _type), do: :error
 end

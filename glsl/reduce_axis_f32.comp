@@ -1,0 +1,50 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// f32 axis reduction with an f64 accumulator for sum. Collapses the middle
+// `reduce_size` axis of a (outer, reduce_size, inner) view; one invocation per
+// output slot. op: 0=sum (f64 accumulator, matches BinaryBackend which sums in
+// f64), 1=max, 2=min. Same (outer, reduce_size, inner, op) push layout as the
+// f64 shader.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint slots = p.outer * p.inner;
+    if (gid >= slots) return;
+
+    uint outr = gid / p.inner;
+    uint inr = gid % p.inner;
+    uint base = outr * p.reduce_size * p.inner + inr;
+
+    if (p.op == 0u) {
+        double acc = 0.0lf;
+        for (uint r = 0u; r < p.reduce_size; ++r) {
+            acc += double(a[base + r * p.inner]);
+        }
+        o[gid] = float(acc);
+    } else if (p.op == 1u) {
+        float acc = a[base];
+        for (uint r = 1u; r < p.reduce_size; ++r) {
+            acc = max(acc, a[base + r * p.inner]);
+        }
+        o[gid] = acc;
+    } else {
+        float acc = a[base];
+        for (uint r = 1u; r < p.reduce_size; ++r) {
+            acc = min(acc, a[base + r * p.inner]);
+        }
+        o[gid] = acc;
+    }
+}
