@@ -196,9 +196,13 @@ saved elementwise dispatches/intermediates + no Evaluator fallback); it grows
 with heavier elementwise epilogues. Codegen was generalised so region leaves can
 be `{:param, pidx}` or `{:stage, node_id}` buffers.
 
-Next increments: (a) conv as a boundary op (reuse the conv im2col/gemm shaders);
-(b) reduce as a boundary (materialise `mean(x)` etc. so `x - mean(x)` layernorm
-patterns fuse); (c) tuple/multi-output; (d) f64 fusion.
+Next increments — **all DONE (2026-08, merged to `main`)**: (a) conv as a
+boundary op ✓; (b) reduce as a boundary (`mean(x)` materialised so `x - mean(x)`
+layernorm / softmax patterns fuse) ✓; (c) tuple/multi-output ✓; (d) f64 fusion ✓;
+plus reshape/squeeze view boundaries and transpose as a data-movement boundary.
+Cross-stage CSE was built and raced — it never wins on either device class
+(recompute beats the dispatch it saves), so it ships default-off (`NXV_CSE=1`).
+See [`bench_results/CSE_SOFTMAX_RACE.md`](bench_results/CSE_SOFTMAX_RACE.md).
 
 ### 4. Package, document, position
 Hex release, README with the portability pitch + a support matrix (OS × GPU

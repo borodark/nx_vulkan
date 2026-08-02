@@ -10,17 +10,19 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 
 ## Status snapshot
 
-**Phase 3 in progress** (July 2026): the vulkano backend covers
-stages 1–8 of [the roadmap](docs/VULKANO_BACKEND_ROADMAP.md). Main
-branch is stable across Linux + Ampere (RTX 3060 Ti) and FreeBSD +
-Kepler (GT 650M, GT 750M). D90 vulkano-only architecture merged
-2026-07-13.
+**Fusion compiler shipped** (August 2026): on top of the eager backend
+(roadmap stages 1–8) the `Nx.Defn` fusion compiler landed — whole-graph
+fusion with a multi-stage split at dot/conv/reduce/transpose boundaries,
+f32 and f64. Main branch is stable across Linux + Ampere (RTX 3060 Ti)
+and FreeBSD + Kepler (GT 650M, GT 750M): **863 doctests, 361 tests, 0
+failures** on the fleet. The vulkano-only architecture (C++ spirit
+backend dropped) merged 2026-07-13.
 
 | Feature | Status |
 |---|---|
 | Vulkano buffer lifecycle | ✓ |
-| 24 native compute ops via specialised SPVs | ✓ |
-| f64 shader paths (binary/unary/reduce) | ✓ |
+| Native compute op set via specialised SPVs | ✓ |
+| Native **f32 and f64** shader paths (elementwise/matmul/conv/reduce/transpose) | ✓ |
 | Pipeline cache (correctness + perf) | ✓ |
 | Cross-host validation (Linux + 2× FreeBSD) | ✓ |
 | Axon training step end-to-end | ✓ |
@@ -33,24 +35,33 @@ Kepler (GT 650M, GT 750M). D90 vulkano-only architecture merged
 | f64 matmul (`matmul_f64.spv`) | ✓ |
 | Scholar native linalg shaders (SVD/QR/cholesky/solve) | mid-2026 |
 | Polynomial f64 log/exp (behind config) — exmc side | ✓ (default: f32-cast) |
-| Custom `Nx.Defn` compiler | 2026 H2 |
-| Conv / FFT / sort / scatter | 2026 H2–Q4 |
+| Custom `Nx.Defn` compiler (whole-graph fusion) | ✓ |
+| Native f32 compute (elementwise/matmul/conv/reduce/transpose) | ✓ |
+| Conv (im2col + GEMM) / FFT | ✓ |
+| sort / scatter | 2026 Q4 |
 
 ## Open items
 
-**Op coverage — the long tail.** Convolutions, FFTs, sort, scatter,
-`Nx.LinAlg.solve`/`qr`/`svd`, complex types, sparse ops. Most have
-host-fallback paths that work today but are slow. Native shaders
-for each are 50–100 LOC of vulkano apiece. Estimated effort to
-reach feature parity with EXLA: 6–12 months of focused work,
-parallelisable.
+**Op coverage — the long tail.** Convolutions and FFTs now have native
+GPU shaders (conv = im2col + GEMM, in f32 and f64; conv is also a fusion
+boundary). Still on host-fallback: sort, scatter,
+`Nx.LinAlg.solve`/`qr`/`svd`, complex types, sparse ops — they work
+today but are slow. Native shaders for each are 50–100 LOC of vulkano
+apiece. Estimated effort to reach feature parity with EXLA: 6–12 months
+of focused work, parallelisable.
 
-**Custom `Nx.Defn` compiler.** Today runs through
-`Nx.Defn.Evaluator`, which dispatches ops one at a time. EXLA
-compiles whole graphs to optimised HLO. A custom Defn compiler that
-batches dispatches, fuses elementwise chains, and caches compiled
-graphs would close most of the remaining perf gap. Estimated
-effort: 3–6 months.
+**Custom `Nx.Defn` compiler.** Done — `Nx.Vulkan.Compiler` (thrust 3).
+Eager execution still runs through `Nx.Defn.Evaluator` (one op per
+dispatch); passing `compiler: Nx.Vulkan.Compiler` to `Nx.Defn.jit`
+instead traces the whole graph and compiles it to a stage schedule:
+elementwise chains fuse to one generated shader, an elementwise chain
+feeding a reduction fuses to one parallel tree-reduce, and graphs with
+`dot`/`conv`/`reduce`/`transpose` boundaries split into on-device stages
+(`reshape`/`squeeze` are zero-copy views; tuples multi-output). f32 and
+f64. Whole dense/CNN layers, classifier heads, softmax, layernorm and
+`x @ Wᵀ` fuse with no interpreter fallback. Remaining perf-heuristic
+work (cross-stage CSE) was raced and left default-off. See the README's
+[fusion compiler section](README.md#the-nxdefn-fusion-compiler-thrust-3).
 
 **Persistent buffer pool.** Currently per-call buffer allocation
 through vulkano's `StandardMemoryAllocator`. Works but costs a
@@ -58,9 +69,10 @@ millisecond per dispatch that an explicit pool could reclaim.
 Mid-2026 work.
 
 **f64 matmul.** Done — `matmul_f64.spv` ships and rank-2 matmul runs
-natively in f64 (the backend is f64-only compute now; f32 inputs are
-cast). General `Nx.dot` axis configs outside rank-2×rank-2 still
-host-fall-back.
+natively in f64. The backend now dtype-dispatches **native f32** as
+well (matmul, conv, elementwise, reduce, transpose), with f64 the
+default accumulator policy; f32 is no longer merely cast. General
+`Nx.dot` axis configs outside rank-2×rank-2 still host-fall-back.
 
 **Scholar — linalg fast paths.** Linear regression (normal equation
 + SVD) now smoke-tests cleanly via a host-fallback `block/4`
@@ -85,8 +97,10 @@ that proved the migration was mechanical: same SPV bytes in,
 byte-identical chain tensors out, perf within ten percent on the
 bench target. It replaced spirit for the production path.
 
-The two coexist while we backfill the long tail of ops. Long-term,
-the spirit path retires. Full story:
+The spirit Elixir backend (`Nx.Vulkan.Backend`) and its `Nx.Vulkan.Fuse`
+macro were **dropped** (commit `bb94217`) once vulkano covered the
+production path; vulkano is now the only Elixir-facing backend. The
+`native/nx_vulkan_native` C++ crate directory is vestigial. Full story:
 [*The Backend That Didn't Need to Know*](http://www.dataalienist.com/blog-backend-didnt-need-to-know.html).
 
 ## Architecture
@@ -94,50 +108,32 @@ the spirit path retires. Full story:
 ```
    ┌─────────────────────────────────────────────────────────┐
    │  Nx layer                                                │
-   │  • Nx.Vulkan.VulkanoBackend  (current)                   │
-   │  • Nx.Vulkan.Backend         (legacy, C++ path)          │
-   └──────────────┬─────────────────────────┬─────────────────┘
-                  │                         │
-   ┌──────────────▼──────────┐  ┌──────────▼──────────────────┐
-   │  Nx.Vulkan.NativeV       │  │  Nx.Vulkan.Native            │
-   │  (Rustler crate          │  │  (Rustler crate              │
-   │   nx_vulkan_vulkano)     │  │   nx_vulkan_native)          │
-   │  • Arc<Buffer> resources │  │  • C++ shim NIFs             │
-   │  • pipeline cache        │  │  • opaque VkBuf* pointers    │
-   │  • specialisation        │  │                              │
-   └──────────┬───────────────┘  └─────────┬────────────────────┘
-              │                            │
-              │                       ┌────▼─────────┐
-              │                       │  C++ shim    │
-              │                       │  (legacy)    │
-              │                       └────┬─────────┘
-              │                            │
-              │                       ┌────▼─────────┐
-              │                       │   spirit     │
-              │                       │   (vendored) │
-              │                       └────┬─────────┘
-              │                            │
-              └──────────┬─────────────────┘
-                         ▼
+   │  • Nx.Vulkan.VulkanoBackend        (eager backend)       │
+   │  • Nx.Vulkan.Compiler              (Nx.Defn fusion JIT)  │
+   └──────────────────────────┬──────────────────────────────┘
+                              │
+   ┌──────────────────────────▼──────────────────────────────┐
+   │  Nx.Vulkan.NativeV  (Rustler crate nx_vulkan_vulkano)    │
+   │  • Arc<Buffer> resources   • pipeline cache              │
+   │  • specialisation          • generic dispatch (JIT SPVs) │
+   └──────────────────────────┬──────────────────────────────┘
+                              ▼
               ┌─────────────────────────┐
               │  Vulkan driver (loader) │
               └─────────────────────────┘
-                         │
-              ┌──────────▼──────────────┐
-              │  priv/shaders/*.spv      │
-              │  • elementwise_binary    │
-              │  • elementwise_unary     │
-              │  • reduce_axis           │
-              │  • matmul                │
-              │  • transpose             │
-              │  • synthesised chain     │
-              │    shaders (Mission II)  │
-              │  • 9 hand-written leap-  │
-              │    frog families         │
-              └──────────────────────────┘
+                              │
+              ┌───────────────▼─────────────────────────────┐
+              │  priv/shaders/*.spv (f32 + f64 variants)     │
+              │  • elementwise binary/unary  • reduce_axis   │
+              │  • matmul (tiled)  • conv (im2col + GEMM)     │
+              │  • transpose  • select / compare / cast      │
+              │  • synthesised leapfrog chain shaders        │
+              │  priv/shader_cache/gen_*.spv (JIT-generated) │
+              └──────────────────────────────────────────────┘
 ```
 
-The SPV catalog under `priv/shaders/` is shared by both backends.
+The SPV catalog under `priv/shaders/` backs the eager path; the fusion
+compiler generates and caches shaders under `priv/shader_cache/`.
 The synthesis pipeline that produces new chain shaders at runtime
 (`Nx.Vulkan.Synthesis`, `Nx.Vulkan.ShaderTemplate`,
 `Nx.Vulkan.ChainShaderSpecs`) lives in the Elixir layer and is

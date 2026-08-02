@@ -1,5 +1,10 @@
 # Fleet conformance + race — VulkanoBackend across 3 GPUs
 
+> ℹ️ **Dated snapshot (2026-07-30, @ `7ba0767`).** Test counts below
+> (839 doctests / 174 tests) are from before the fusion-compiler + f32
+> work landed. The current suite is **863 doctests, 361 tests, 0
+> failures** on the same three GPUs.
+
 Driven over SSH from mac-247, 2026-07-30, branch `f32-matmul-prototype` @
 `7ba0767`. "Use all 3 hosts to implement test and race."
 

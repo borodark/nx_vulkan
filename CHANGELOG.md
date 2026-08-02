@@ -2,9 +2,33 @@
 
 ## Unreleased
 
+### Added
+
+- **`Nx.Defn` fusion compiler (`Nx.Vulkan.Compiler`).** An
+  `Nx.Defn.Compiler` that traces a `defn` to a stage schedule running
+  on-device with GPU-resident intermediates and no interpreter fallback:
+  elementwise fusion (one shader, one dispatch), parallel fused
+  reductions (workgroup-per-slot tree reduce), and a multi-stage split at
+  `dot` / `conv` / `reduce` / `transpose` boundaries with `reshape` /
+  `squeeze` as zero-copy view boundaries and tuple/multi-output support.
+  Whole dense/CNN layers, classifier heads, softmax, layernorm, and
+  `x @ Wᵀ` fuse. Both f32 and f64. Cross-stage CSE exists but is
+  default-off (raced across the fleet, never wins; opt-in `NXV_CSE=1`).
+  Use: `Nx.Defn.jit(&fun/2, compiler: Nx.Vulkan.Compiler)`.
+- **Native f32 compute.** The hot ops (elementwise, matmul, conv, reduce,
+  transpose) now dtype-dispatch native **f32** shaders alongside f64,
+  instead of casting f32 to f64. f64 remains the default accumulator
+  policy (safe); f32 wins on bandwidth-bound ops and is available where a
+  workload opts into it. This supersedes the "f64-only compute" note
+  below for those ops.
+- **conv** (im2col + GEMM) and **transpose** as native GPU ops, in f32
+  and f64.
+
 ### Changed
 
-- **f64-only compute.** Native shaders — elementwise binary/unary,
+- **f64-only compute** *(later superseded — see "Native f32 compute"
+  under Added above; native f32 shaders were re-added for the hot ops).*
+  Native shaders — elementwise binary/unary,
   reductions, rank-2 matmul (`matmul_f64.spv`), and the leapfrog chain
   synth — now run in **f64**; f32 inputs are accepted and cast to f64.
   This supersedes 0.1.0's "elementwise f32 + f64 / matmul f32-only"

@@ -6,7 +6,8 @@ ecosystems — **exmc** (NUTS sampling on FreeBSD), **Axon** (neural
 networks, with autograd), **Scholar** (classical ML, with linalg).
 
 Previously: `Nx.Vulkan.Backend` (C++ spirit) was the Vulkan backend.
-The C++ path is now legacy; new work targets the vulkano path because:
+The C++ Elixir backend has since been **removed** (commit `bb94217`);
+`Nx.Vulkan.VulkanoBackend` is the only backend. It was preferred because:
 
 - Resource lifetimes are managed by Rust ownership
   (`Arc<Buffer>` + `Subbuffer<u8>`), eliminating the stale-handle
@@ -33,15 +34,15 @@ The C++ path is now legacy; new work targets the vulkano path because:
 | `VulkanoBackend` comparison (host fallback) | ✓ |
 | `VulkanoBackend` sampler-host ops (pad/put_slice/indexed_put/indexed_add/broadcast/concatenate/gather/take, all host fallback, Tier 1) | ✓ |
 | Defn integration via Evaluator (works when global default = VulkanoBackend) | ✓ |
-| Full Defn compiler that emits SPV from arbitrary defn graphs | ✗ |
+| Full Defn compiler (whole-graph fusion; generates + caches SPV) | ✓ (`Nx.Vulkan.Compiler`, thrust 3) |
 | Autograd primitives (forward op coverage is gradient coverage via `Nx.Defn.grad`) | ✓ |
 | Linalg ops (cholesky, solve, qr, svd) via host fallback through `block/4` | ✓ |
 | Linalg ops — native SPV implementations | ✗ |
 | Persistent buffer pool / `SubbufferAllocator` | ✗ |
-| Pipeline cache persisted to disk | ✗ |
+| Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
 | Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
 
-Test coverage: 193 spirit-backend tests + 46 new VulkanoBackend tests (31 SPV+storage + 15 host-fallback). Bench coverage: 309 op×shape rows on super-io (Linux + RTX 3060 Ti) and mac-248 (FreeBSD + GT 750M), committed to `bench_results/`.
+Test coverage (2026-08): **863 doctests, 361 tests, 0 failures** on the fleet — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
 ## Stage breakdown
 
@@ -128,10 +129,12 @@ half of EXLA's throughput on the same hardware where EXLA runs.
 
 ## Non-goals
 
-- ~~f64 compute~~ **(now shipped)** — the native shaders are f64 and
-  compute defaults to f64; f32 inputs are cast to f64. Consumer GPUs
-  are slower at f64, but correctness (EMLX-drop, f64-default) took
-  priority over the f32 speed path.
+- ~~f64 compute~~ **(shipped)** and ~~f32 compute~~ **(shipped)** — the
+  hot ops (elementwise, matmul, conv, reduce, transpose) have native f32
+  **and** f64 shaders and dtype-dispatch on the tensor type. f64 is the
+  default accumulator policy (correctness first; consumer GPUs are slower
+  at f64), but f32 is native — no longer merely cast — and wins on
+  bandwidth-bound ops.
 - CUDA-specific features (tensor cores, mixed precision) — vulkano
   abstracts over them, but extracting them is out of scope until
   stages 1–10 are done.

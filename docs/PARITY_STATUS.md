@@ -1,5 +1,12 @@
 # PARITY_STATUS — regenerated Nx.Backend gap for VulkanoBackend
 
+> ℹ️ **Dated snapshot (2026-07-28).** Its central claim — the name-only
+> Nx.Backend gap is empty, every callback implemented — still holds. But
+> it predates two later changes on `main`: native **f32** compute (this
+> doc's op list shows f64-only) and the `Nx.Vulkan.Compiler` fusion
+> compiler. Current suite: **863 doctests, 361 tests, 0 failures** (this
+> doc's "130 tests" is stale).
+
 **Date:** 2026-07-28
 **Host:** mac.247 (FreeBSD 15.0 Linux-compat layer), Vulkan via **llvmpipe (LLVM
 19.1.7)** — software rasteriser through the real vulkano stack. This is the

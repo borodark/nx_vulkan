@@ -18,7 +18,7 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 - **Portable Vulkan across vendors.** Same SPV blobs run on NVIDIA,
   AMD RADV, Intel, and via MoltenVK on macOS. The Rust vulkano crate
   keeps the driver surface pure Rust — no C++ FFI ownership traps.
-- **Enough coverage that Nx models Just Work.** 24 native ops plus a
+- **Enough coverage that Nx models Just Work.** A native op set plus a
   host-fallback long tail let real workloads (Axon training, eXMC
   NUTS sampling, Scholar linear regression) run today without
   op-by-op porting.
@@ -28,10 +28,15 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 
 ## What works today
 
-- **24 native compute ops** — elementwise binary/unary, reductions
+- **A native compute op set** — elementwise binary/unary, reductions
   (sum / max / min along any axis, leading, or trailing),
-  reshape / squeeze / transpose-2D, matmul. Compute is **f64**; f32
-  inputs are accepted and cast to f64.
+  reshape / squeeze / transpose-2D, matmul, conv (im2col + GEMM), FFT,
+  select / compare / cast / broadcast.
+  **Native f32 and f64** — the hot ops (elementwise, matmul, conv,
+  reduce, transpose) dtype-dispatch native f32 shaders as well as f64;
+  f64 is the default accumulator policy, f32 wins on bandwidth-bound ops.
+- **Whole-graph fusion** via `Nx.Vulkan.Compiler`, an `Nx.Defn.Compiler`
+  — see [The `Nx.Defn` fusion compiler](#the-nxdefn-fusion-compiler-thrust-3).
 - **Host fallback for the long tail** — slice, `as_type`, general
   `Nx.dot` axes, `Nx.LinAlg.SVD`/`QR`/`solve`/`cholesky` (via
   `Nx.Block.LinAlg`). Slow but correct.
@@ -132,8 +137,9 @@ shader → NIF → Nx playbook and the hard-won parity/dispatch gotchas.
 | **FreeBSD + NVIDIA** | ✗ | ✗ | **✓ only path** |
 | **Windows / WSL2** | partial via TF | ✗ | ✓ (Vulkan ships on Windows) |
 | **Op coverage** | full Nx surface (~200) | full Nx surface | 24 native, rest via host fallback |
+| **`Nx.Defn` fusion compiler** | ✓ XLA whole-graph | ✓ MLX | **✓ multi-stage split** (elementwise/reduce/dot/conv/transpose, f32+f64) |
 | **`Nx.Defn.grad` (autograd)** | full | full | **✓ free** (graph transformation) |
-| **fp64 compute** | full | none (Metal limit) | ✓ f64-only compute (binary/unary/reduce/matmul) |
+| **fp64 compute** | full | none (Metal limit) | ✓ native f32 **and** f64 (binary/unary/reduce/matmul/conv/transpose) |
 
 ### The autograd insight
 
@@ -145,7 +151,7 @@ executing forward primitives. Forward op coverage IS gradient
 coverage when running through `Nx.Defn.Evaluator`.
 
 That means **VulkanoBackend supports gradients for any function
-expressible in its 24 native ops + host-fallback long tail**. No
+expressible in its native ops + host-fallback long tail**. No
 backward callbacks were written. Validated by running a complete
 Axon training step (Dense → sigmoid → Dense → MSE →
 `Nx.Defn.value_and_grad`) on `Nx.Vulkan.VulkanoBackend`, with

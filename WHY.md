@@ -51,6 +51,9 @@ CUDA*](http://www.dataalienist.com/blog-vulkan-on-freebsd.html).
 There is an unfashionable decision at the core of this backend:
 **VulkanoBackend computes in f64 by default** — elementwise, reductions,
 matmul, and the fused leapfrog chain synth all run in double precision.
+(Native **f32** shaders now exist too, dtype-dispatched, for workloads
+that opt into the speed path; f64 remains the default and the conviction
+below is about that default.)
 
 This is unfashionable because consumer GPUs charge a steep tax for f64 (a
 Kepler runs f64 at roughly 1/24 of its f32 rate), and the entire ML industry
@@ -74,8 +77,8 @@ rewrites each forward op into backward ops expressed in terms of *more forward
 ops*. The backend never sees a "gradient op" — it just keeps executing forward
 primitives.
 
-So **forward-op coverage *is* gradient coverage.** We implemented 24 native
-ops (with a host fallback for the long tail) and got automatic differentiation
+So **forward-op coverage *is* gradient coverage.** We implemented a native op
+set (with a host fallback for the long tail) and got automatic differentiation
 for anything expressible in them, with no backward callbacks written. For a
 NUTS sampler — which is nothing but gradients of a log-density, over and over —
 that is the difference between a weekend and a year.

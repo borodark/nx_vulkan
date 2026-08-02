@@ -1,6 +1,28 @@
 # Limitations and Loose Ends
 
-**Status**: post-Phase 3 / Path A.2 (commit `bccdb92`)
+> ⚠️ **PARTIALLY SUPERSEDED (2026-08-02).** This document was written at
+> commit `bccdb92` (post-Phase 3) and predates three major changes now on
+> `main`, so several sections below are **out of date**:
+> - **Fusion is real.** The `Nx.Vulkan.Compiler` (`Nx.Defn.Compiler`)
+>   ships whole-graph fusion — elementwise chains, fused reductions, and a
+>   multi-stage split at dot/conv/reduce/transpose boundaries. The old
+>   §3–§5 below describe the *removed* `Nx.Vulkan.Fuse` macro /
+>   `fused_chain` prototype and its "No fusion" / "two inputs only" /
+>   "f64 only" / "no reductions" constraints — **all superseded**. See the
+>   [README fusion section](README.md#the-nxdefn-fusion-compiler-thrust-3).
+> - **Native f32 exists.** The "compute is f64, f32 cast to f64" claims are
+>   stale — the hot ops dtype-dispatch native f32 shaders.
+> - **conv is implemented** (native im2col + GEMM, f32/f64) and is a fusion
+>   boundary; `fft`/`ifft` are native too.
+> - The `Nx.Vulkan.Backend` (spirit C++) Elixir backend was **dropped**;
+>   references to it below are historical.
+> - Test counts below (e.g. "112/0") are stale: current suite is
+>   **863 doctests, 361 tests, 0 failures** on the fleet.
+>
+> The genuinely-still-true limitations (host-fallback long tail: sort,
+> scatter, native linalg; batched/non-2D dot; etc.) remain accurate.
+
+**Status**: post-Phase 3 / Path A.2 (commit `bccdb92`) — see banner above
 **Audience**: future contributors, anyone benchmarking, anyone wondering
 why a particular operator is slow.
 

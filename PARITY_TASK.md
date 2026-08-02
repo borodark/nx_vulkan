@@ -1,5 +1,13 @@
 # PARITY_TASK — bring VulkanoBackend to full Nx.Backend parity
 
+> ✅ **COMPLETED (2026-08).** This is the original task brief. Everything
+> it scopes shipped and is on `main`: the name-only Nx.Backend gap is
+> closed, and `conv` + `fft`/`ifft` are native GPU shaders (not "to
+> build"). Beyond parity, the `Nx.Vulkan.Compiler` fusion compiler and
+> native f32 landed. Current suite: **863 doctests, 361 tests, 0
+> failures** on the fleet. Kept for historical context — treat as an
+> archive, not a live task.
+
 **For:** the Claude instance running on **mac-247** (FreeBSD, GT 650M, Vulkan).
 **Branch:** `parity-tier1` (you are on it). Commit here; publish with
 `git push origin parity-tier1` — `origin` is the git server on **249**
