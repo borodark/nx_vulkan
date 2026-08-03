@@ -15,7 +15,7 @@ defmodule Nx.Vulkan.ShaderTemplate do
                          host-side normalizer × n)
 
   Call `render/1` with a `%FamilySpec{}` to get a GLSL source string.
-  Pipe to `Nx.Vulkan.Synthesis.compile/2` to land SPIR-V on
+  Pipe to `Nx.Vulkan.Synthesis.compile/1` to land SPIR-V on
   disk + load via Vulkan.
 
   See `Nx.Vulkan.ChainShaderSpecs` for the catalog of family specs.

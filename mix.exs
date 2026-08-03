@@ -11,7 +11,11 @@ defmodule Nx.Vulkan.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      dialyzer: [plt_add_apps: [:nx], ignore_warnings: ".dialyzer_ignore.exs"],
+      dialyzer: [
+        plt_add_apps: [:nx, :ex_unit, :mix],
+        plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
+        ignore_warnings: ".dialyzer_ignore.exs"
+      ],
       description: description(),
       package: package(),
       source_url: @source_url,
@@ -28,7 +32,10 @@ defmodule Nx.Vulkan.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "WHY.md",
+        "livebooks/intro_10min.livemd",
         "CHANGELOG.md",
+        "ROADMAP.md",
         "docs/VULKANO_BACKEND_ROADMAP.md"
       ]
     ]

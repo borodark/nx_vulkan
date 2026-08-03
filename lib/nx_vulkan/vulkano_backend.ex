@@ -1,7 +1,6 @@
 defmodule Nx.Vulkan.VulkanoBackend do
   @moduledoc """
-  Pure-Rust (vulkano) `Nx.Backend` implementation. f64-only compute;
-  f32 inputs are accepted and cast as needed.
+  Pure-Rust (vulkano) `Nx.Backend` implementation.
 
   Tensors are represented by:
 
@@ -14,22 +13,41 @@ defmodule Nx.Vulkan.VulkanoBackend do
   a freed `VkBuf*` is read back at the C++ layer) are structurally
   impossible: the `Subbuffer` cannot outlive its `Buffer`.
 
-  ## Status — storage-only baseline
+  ## Dtypes
 
-  This module implements **just the storage callbacks** required for
-  tensors to round-trip host↔GPU without crashing:
+  Native **f32 and f64** shaders for the hot ops; the tensor's dtype picks the
+  SPIR-V module at dispatch time. f64 is the
+  default accumulator policy because correctness came first; f32 wins on
+  bandwidth-bound work and is roughly 32× the rate for `dot` on consumer NVIDIA
+  cards. Other dtypes (integers, u8, …) take the host fallback below.
 
-    - `init/1`, `from_binary/3`, `to_binary/2`
-    - `backend_copy/3`, `backend_transfer/3`, `backend_deallocate/1`
-    - `inspect/2`, `constant/3`, `iota/3`, `eye/2`
+  ## Coverage
 
-  Compute ops (add / multiply / sum / matmul / …) are not yet
-  implemented. To use this backend for actual computation,
-  configure Nx to fall back via `Nx.BinaryBackend` for ops, or
-  call `Nx.backend_transfer(t, Nx.BinaryBackend)` before computing.
+  Storage callbacks: `init/1`, `from_binary/3`, `to_binary/2`,
+  `backend_copy/3`, `backend_transfer/3`, `backend_deallocate/1`,
+  `inspect/2`, `constant/3`, `iota/3`, `eye/2`.
 
-  The next port chunk will add per-op compute NIFs to
-  `Nx.Vulkan.NativeV` and wire them here.
+  Dispatched to the GPU as native shaders:
+
+    - elementwise binary — `add`, `multiply`, `subtract`, `divide`, `pow`,
+      `max`, `min`, plus a rank-≤4 broadcasting variant that keeps bias-add,
+      scaling, and relu-via-max resident instead of host-falling-back
+    - elementwise unary — `exp`, `log`, `sqrt`, `abs`, `negate`, `sigmoid`,
+      `tanh`, `floor`, `ceil`, `sign`
+    - `dot`, `conv` (im2col + GEMM), `transpose`
+    - reductions — `sum`, `reduce_max`, `reduce_min`
+
+  Everything else Nx asks for is still implemented, via a host fallback that
+  reads the tensor back, computes on `Nx.BinaryBackend`, and returns the result
+  to the GPU — `argsort`, `fft`, `triangular_solve`, the window ops, the trig
+  and bitwise families, and so on. Unsupported here means *slower*, not broken:
+  every `Nx` callback returns a correct result on this backend.
+
+  ## Eager vs. fused
+
+  Used directly, this backend is **eager** — one dispatch per op, with an
+  intermediate buffer between each. To fuse a chain of ops into a single shader
+  and keep intermediates on-device, jit through `Nx.Vulkan.Compiler` instead.
   """
 
   @behaviour Nx.Backend

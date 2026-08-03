@@ -1,10 +1,19 @@
 defmodule Nx.Vulkan.Node do
   @moduledoc """
-  Long-lived per-machine GPU node. A named `GenServer` that owns the
-  spirit `VkPipelineCache`, the persistent buffer registry, and the
-  watchdog/timeout layer. Clients submit work via `with_node/2` (or
-  the lower-level `exec/2`); the node serializes execution and
-  reports timeouts/dead-server/etc. as error tuples.
+  Long-lived per-machine GPU node. A named `GenServer` that serializes
+  GPU work and owns the watchdog/timeout layer. Clients submit work via
+  `with_node/2` (or the lower-level `exec/2`); the node runs it one call
+  at a time and reports timeouts/dead-server/etc. as error tuples.
+
+  Serialization is the point: concurrent processes dispatching to one
+  device is how you get descriptor-pool exhaustion and interleaved
+  push-constant state. Funnelling through a single process makes GPU
+  access a queue.
+
+  It no longer owns a pipeline cache — that belonged to the removed
+  C++/spirit backend, and vulkano manages its own caching internally.
+  `Nx.Vulkan.PipelineCache` survives as a no-op stub, and `init/1`
+  still calls it for callers that pass `load_pipeline_cache: false`.
 
   This is the GPU-only generic core. MCMC / NUTS / sampler-specific
   dispatch logic lives in `Exmc.NUTS.Vulkan.Dispatch` (or any other
@@ -25,8 +34,9 @@ defmodule Nx.Vulkan.Node do
   ## Generic dispatch
 
   `with_node/2` runs an arbitrary 0-arity function inside the GenServer
-  process. The function has access to the spirit pipeline cache (loaded
-  once at init) and may stash per-shader buffer state in process dict.
+  process, so every caller's GPU work is serialized against every other
+  caller's. The function may stash per-shader buffer state in the process
+  dictionary, which persists for the life of the node.
 
       result = Nx.Vulkan.Node.with_node(fn ->
         # any GPU work — uses Nx.Vulkan.NativeV NIFs directly,

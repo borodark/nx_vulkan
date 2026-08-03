@@ -1,0 +1,255 @@
+# MNIST — a conv net on Vulkan
+
+```elixir
+Mix.install([
+  {:nx_vulkan, path: Path.expand("../", __DIR__)},
+  {:axon, "~> 0.7"},
+  {:req, "~> 0.5"},
+  {:kino, "~> 0.12"}
+])
+```
+
+## What this notebook is
+
+The usual MNIST convolutional classifier, with every op dispatching through
+`Nx.Vulkan.VulkanoBackend` — conv included, as a native GPU shader (im2col +
+GEMM) rather than a host fallback.
+
+It also tells you the truth about where that helps and where it does not:
+
+* **Inference is where this backend wins today** — measured **~130×** over
+  `Nx.BinaryBackend` on a batch of 256 on an RTX 3060 Ti.
+* **Training is correct but backward-bound** — ~1.2×, because Nx's conv
+  *gradient* falls back to the host. The last section explains exactly why,
+  and it is a fixable gap, not a law of nature.
+
+Numbers here were measured on a 3060 Ti; a Kepler will be slower in absolute
+terms but shows the same shape.
+
+## 1. Get MNIST
+
+Same source and layout as the [Axon MNIST
+guide](https://axon.hexdocs.pm/mnist.html): IDX files from the CVDF mirror,
+reshaped to `{n, 1, 28, 28}` (NCHW) and scaled to 0–1.
+
+```elixir
+base = "https://storage.googleapis.com/cvdf-datasets/mnist/"
+
+fetch = fn name ->
+  %{body: body} = Req.get!(base <> name, decode_body: false)
+  :zlib.gunzip(body)
+end
+
+<<_::32, n_images::32, n_rows::32, n_cols::32, image_bytes::binary>> =
+  fetch.("train-images-idx3-ubyte.gz")
+
+<<_::32, _n_labels::32, label_bytes::binary>> = fetch.("train-labels-idx1-ubyte.gz")
+
+{n_images, n_rows, n_cols}
+```
+
+```elixir
+# Host-side tensors: keep the full corpus on BinaryBackend and move only the
+# batches we actually use to the GPU.
+images_all =
+  image_bytes
+  |> Nx.from_binary({:u, 8})
+  |> Nx.reshape({n_images, 1, n_rows, n_cols})
+  |> Nx.divide(255.0)
+  |> Nx.as_type(:f32)
+
+labels_all =
+  label_bytes
+  |> Nx.from_binary({:u, 8})
+  |> Nx.new_axis(-1)
+  |> Nx.equal(Nx.iota({1, 10}))
+  |> Nx.as_type(:f32)
+
+{Nx.shape(images_all), Nx.shape(labels_all)}
+```
+
+## 2. The model
+
+Two strided convolutions, then a softmax head.
+
+**Why strided convs instead of `max_pool`:** pooling is a host fallback in
+*both* directions on this backend — `window_max` forward and
+`window_scatter_max` backward — so each pool layer costs two GPU↔host round
+trips per step. A stride-2 conv downsamples the same way and stays on the
+device. Swap in `Axon.max_pool(kernel_size: 2, strides: 2, channels: :first)`
+if you want to feel the difference.
+
+**`channels: :first` is not optional here.** Axon defaults to `:last`, so an
+NCHW `{n, 1, 28, 28}` input silently becomes height 1 — and a 3×3 valid conv
+or a 2×2 pool over height 1 produces an empty tensor and a confusing crash
+deep in Nx. Every conv/pool layer needs the option.
+
+```elixir
+model =
+  Axon.input("input", shape: {nil, 1, 28, 28})
+  |> Axon.conv(8, kernel_size: 3, strides: 2, padding: :same,
+       activation: :relu, channels: :first)
+  |> Axon.conv(16, kernel_size: 3, strides: 2, padding: :same,
+       activation: :relu, channels: :first)
+  |> Axon.flatten()
+  |> Axon.dense(10, activation: :softmax)
+
+Axon.Display.as_graph(model, Nx.template({1, 1, 28, 28}, :f32))
+```
+
+```elixir
+vk = Nx.Vulkan.VulkanoBackend
+{init_fn, predict_fn} = Axon.build(model)
+
+init_params = init_fn.(%{"input" => Nx.template({32, 1, 28, 28}, :f32)}, Axon.ModelState.empty())
+
+# Axon holds parameters in a ModelState; move every tensor in it to a backend.
+move = fn state, backend ->
+  %{state | data:
+    Map.new(state.data, fn {layer, ps} ->
+      {layer, Map.new(ps, fn {k, v} -> {k, Nx.backend_transfer(v, backend)} end)}
+    end)}
+end
+
+params_vk = move.(init_params, vk)
+:ok
+```
+
+## 3. Train
+
+`Nx.Defn.grad` needs every tensor it differentiates to reach it as an
+**argument**, not as a closure capture — a GPU tensor captured in the closure
+raises `"a tensor captured as a closure inside the gradient function is on a
+non-default backend"`. So the step function takes params, x and y and is
+applied with `Nx.Defn.jit_apply/3`.
+
+Be honest with yourself about the clock before running this: at batch 32 a
+step is **~15 s** on a 3060 Ti (~18 s on `BinaryBackend`). The default below
+is 12 steps — about three minutes — enough to watch the loss fall. Raise
+`n_steps` if you want real accuracy and have the time.
+
+```elixir
+batch = 32
+n_steps = 12
+lr = 0.05
+
+loss_fn = fn params, x, y ->
+  Axon.Losses.categorical_cross_entropy(y, predict_fn.(params, %{"input" => x}),
+    reduction: :mean)
+end
+
+step_fn = fn params, x, y ->
+  Nx.Defn.value_and_grad(params, fn p -> loss_fn.(p, x, y) end)
+end
+
+sgd = fn params, grads ->
+  %{params | data:
+    Map.new(params.data, fn {layer, ps} ->
+      g = grads.data[layer]
+      {layer, Map.new(ps, fn {k, w} -> {k, Nx.subtract(w, Nx.multiply(g[k], lr))} end)}
+    end)}
+end
+
+batch_at = fn i ->
+  start = rem(i * batch, 1024)
+  x = images_all |> Nx.slice_along_axis(start, batch, axis: 0) |> Nx.backend_transfer(vk)
+  y = labels_all |> Nx.slice_along_axis(start, batch, axis: 0) |> Nx.backend_transfer(vk)
+  {x, y}
+end
+
+{trained, history} =
+  Enum.reduce(0..(n_steps - 1), {params_vk, []}, fn i, {params, hist} ->
+    {x, y} = batch_at.(i)
+    {us, {loss, grads}} =
+      :timer.tc(fn ->
+        Nx.Defn.jit_apply(step_fn, [params, x, y], compiler: Nx.Defn.Evaluator)
+      end)
+
+    l = Nx.to_number(loss)
+    IO.puts("step #{i}  loss=#{Float.round(l, 4)}  #{round(us / 1000)} ms")
+    {sgd.(params, grads), [l | hist]}
+  end)
+
+Enum.reverse(history)
+```
+
+The loss should fall from ~2.3 (chance, `ln 10`) as it goes. Run the cell
+again to continue from `trained` if you want more steps.
+
+## 4. Inference — where the GPU actually wins
+
+Conv *forward* is a native shader, so a big batch of predictions is where this
+backend earns its keep. Same parameters, same math, two backends.
+
+```elixir
+n_eval = 256
+
+x_host = Nx.slice_along_axis(images_all, 0, n_eval, axis: 0)
+y_host = Nx.slice_along_axis(labels_all, 0, n_eval, axis: 0)
+
+params_host = move.(trained, Nx.BinaryBackend)
+x_vk = Nx.backend_transfer(x_host, vk)
+
+time = fn f -> {us, v} = :timer.tc(f); {us / 1000, v} end
+
+{t_host, out_host} =
+  time.(fn -> predict_fn.(params_host, %{"input" => x_host}) end)
+
+# one warm-up pass so shader compilation is not counted
+_ = predict_fn.(trained, %{"input" => x_vk})
+
+{t_vk, out_vk} =
+  time.(fn ->
+    predict_fn.(trained, %{"input" => x_vk}) |> Nx.backend_transfer(Nx.BinaryBackend)
+  end)
+
+%{
+  binary_ms: Float.round(t_host, 1),
+  vulkan_ms: Float.round(t_vk, 1),
+  speedup: Float.round(t_host / t_vk, 1),
+  max_abs_diff: out_host |> Nx.subtract(out_vk) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+}
+```
+
+Two things to read off that map: the speedup, and `max_abs_diff` — the two
+backends agree to f32 rounding, so the speed is not bought with accuracy.
+
+```elixir
+predicted = out_vk |> Nx.argmax(axis: 1)
+actual = y_host |> Nx.argmax(axis: 1)
+
+accuracy =
+  Nx.equal(predicted, actual) |> Nx.mean() |> Nx.to_number()
+
+%{accuracy: accuracy, first_10_predicted: Nx.to_flat_list(predicted[0..9]),
+  first_10_actual: Nx.to_flat_list(actual[0..9])}
+```
+
+With only a dozen training steps this will be well short of the ~99% a fully
+trained MNIST CNN reaches — the point here is that the forward pass is fast
+and correct, not that twelve steps is enough training.
+
+## 5. Why training is slower than inference
+
+Both passes run the same convolution, but only one of them runs on the GPU.
+
+`Nx.Vulkan.VulkanoBackend.conv/4` dispatches to the native im2col + GEMM
+shaders when the convolution is in the layout those shaders expect — among
+other things, identity permutations for input, kernel, and output
+(`conv_gpu_ok?/4`). A forward conv satisfies that.
+
+Nx's conv *gradient* does not. It builds its backward convolutions with
+
+```
+conv_spec_transpose([dim0, dim1 | rest]) -> [dim1, dim0 | rest]
+```
+
+swapping the first two axes, so every backward conv carries a **non-identity
+permutation**, fails the check, and falls back to `Nx.BinaryBackend.conv` —
+pure Elixir, on the CPU. That single fallback is most of the ~15 s step, and
+it is why training measures ~1.2× while inference measures ~130×.
+
+Closing it means teaching the GPU path to transpose into its native layout
+instead of refusing the work. Until then the useful shape of this backend is:
+**train where you have EXLA, infer wherever you have Vulkan** — which is
+rather the point of a backend that runs on GPUs CUDA never shipped for.

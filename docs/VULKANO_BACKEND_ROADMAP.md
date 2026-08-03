@@ -101,7 +101,7 @@ existing Vulkan-aware compiler with vulkano backend.
 ### Stage 8 — Autograd primitives  *(DONE — forward op coverage IS gradient coverage. `Nx.Defn.grad` is a graph transformation; once forward ops exist, gradients automatic. Validated end-to-end on Axon training step on the spirit backend; vulkano path inherits via the same Defn substrate.)*
 
 For Axon: implement gradients of all stage-1–6 ops. Most are
-automatic via `Nx.Defn.Grad` once forward-pass ops exist; some need
+automatic via `Nx.Defn.grad/2` once forward-pass ops exist; some need
 custom adjoint impls.
 
 ### Stage 9 — Axon parity  *(DONE — Axon training loop ran end-to-end on VulkanoBackend; matches BinaryBackend reference to 8.6e-8 on the dense_0 kernel gradient sum.)*

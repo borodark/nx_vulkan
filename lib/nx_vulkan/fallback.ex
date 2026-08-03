@@ -10,9 +10,9 @@ defmodule Nx.Vulkan.Fallback do
   performance cliff shows up as nothing at all.
 
   That blindness is not hypothetical. Conv's backward pass ran entirely on the
-  CPU for the whole life of the conv shaders: `Nx.Defn.Grad` emits convolutions
-  with the first two axes swapped, those failed the identity-permutation gate,
-  and every gradient conv fell back. The suite stayed green, the doctests stayed
+  CPU for the whole life of the conv shaders: Nx.Defn.Grad (hidden, so not
+  linked) emits convolutions with the first two axes swapped, those failed the
+  identity-permutation gate, and every gradient conv fell back. The suite stayed green, the doctests stayed
   green, and a CNN training step took 30 seconds.
 
   This module makes the invisible thing countable:

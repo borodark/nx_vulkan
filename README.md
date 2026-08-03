@@ -38,7 +38,7 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 - **Whole-graph fusion** via `Nx.Vulkan.Compiler`, an `Nx.Defn.Compiler`
   — see [The `Nx.Defn` fusion compiler](#the-nxdefn-fusion-compiler-thrust-3).
 - **Host fallback for the long tail** — slice, `as_type`, general
-  `Nx.dot` axes, `Nx.LinAlg.SVD`/`QR`/`solve`/`cholesky` (via
+  `Nx.dot` axes, SVD/QR/solve/cholesky from `Nx.LinAlg` (via
   `Nx.Block.LinAlg`). Slow but correct.
 - **`Nx.Defn.grad` autograd**, for free — see [The autograd insight](#the-autograd-insight).
 - **Axon training step** end-to-end, gradient sum agrees to 1e-8
@@ -118,12 +118,12 @@ on any GPU with a driver, CUDA or not.
   win on either device class** (recompute is cheaper than the dispatch
   it takes to avoid) — so it ships **default-off**, opt-in via
   `NXV_CSE=1`. See
-  [`bench_results/CSE_SOFTMAX_RACE.md`](bench_results/CSE_SOFTMAX_RACE.md)
+  [`bench_results/CSE_SOFTMAX_RACE.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/CSE_SOFTMAX_RACE.md)
   and the write-up,
   [*Compute It Twice: When CSE Lost the Race*](https://www.dataalienist.com/blog-compute-it-twice.html).
 
 Building on a compute kernel of your own? See the
-[`vulkan-nx-compute`](.claude/skills/vulkan-nx-compute/) skill for the
+[`vulkan-nx-compute`](https://github.com/borodark/nx_vulkan/tree/main/.claude/skills/vulkan-nx-compute) skill for the
 shader → NIF → Nx playbook and the hard-won parity/dispatch gotchas.
 
 ## Position vs EXLA and EMLX
@@ -257,7 +257,7 @@ file's comment; bump when upstream rustler emits a corrected
 
 ## Sibling: zed
 
-[`zed`](../zed/) is the declarative ZFS + Elixir deploy tool that
+[`zed`](https://github.com/borodark/zed) is the declarative ZFS + Elixir deploy tool that
 orchestrates BEAM nodes. `nx_vulkan` is consumed *inside* deployed
 BEAM nodes — not as a zed dependency. See `specs/nx-vulkan-execution.md`
 in the zed repo for the integration story.

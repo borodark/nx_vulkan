@@ -48,7 +48,7 @@ defmodule Nx.Vulkan.GradTest do
 
   # Deterministic, non-degenerate data (no zeros, no ties) so gradients of
   # max/abs/sign-like ops are well defined and comparable.
-  defp gen(shape, backend, seed, type \\ {:f, 64}) do
+  defp gen(shape, backend, seed, type) do
     size = Tuple.product(shape)
     data = for i <- 1..size, do: :math.sin(seed * 0.7 + i * 0.41) + 1.5
     Nx.tensor(data, type: type, backend: backend) |> Nx.reshape(shape)

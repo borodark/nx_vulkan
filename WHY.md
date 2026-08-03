@@ -101,7 +101,7 @@ draws](http://www.dataalienist.com/blog-two-backends-one-posterior.html); the
 FreeBSD proof is [*A Posterior on Any
 GPU*](http://www.dataalienist.com/blog-a-posterior-on-any-gpu.html). Where the
 model doesn't fit the fast fused path, it takes the slower per-op path and
-still comes back correct — see [`LIMITATIONS.md`](LIMITATIONS.md).
+still comes back correct — see [`LIMITATIONS.md`](https://github.com/borodark/nx_vulkan/blob/main/LIMITATIONS.md).
 
 Reach is worth more than peak FLOPS when the alternative is *nothing at all*.
 

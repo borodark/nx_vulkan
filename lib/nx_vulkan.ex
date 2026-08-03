@@ -1,6 +1,6 @@
 defmodule Nx.Vulkan do
   @moduledoc """
-  Nx tensor backend on Vulkan compute (vulkano/Rust, f64-only).
+  Nx tensor backend on Vulkan compute (vulkano/Rust), in native f32 and f64.
 
   All compute dispatches go through `Nx.Vulkan.VulkanoBackend` which
   owns tensors as Rustler `ResourceArc<VulkanoTensor>` handles. The
@@ -13,10 +13,23 @@ defmodule Nx.Vulkan do
       t = Nx.tensor([1.0, 2.0, 3.0])
       Nx.sum(t)
 
-  ## JIT
+  ## Two execution paths
+
+  **Eager** — one GPU dispatch per op, with an intermediate buffer between
+  each. This is what you get from the backend on its own, and from `jit/2`
+  here, which routes ops through `Nx.Defn.Evaluator`:
 
       f = fn x -> Nx.add(x, x) end
-      Nx.Defn.jit(f, compiler: Nx.Defn.Evaluator).(Nx.tensor([1.0, 2.0]))
+      Nx.Vulkan.jit(f).(Nx.tensor([1.0, 2.0]))
+
+  **Fused** — `Nx.Vulkan.Compiler` traces the whole `defn` and emits one
+  shader per stage, keeping intermediates on-device. Whole dense and CNN
+  layers, softmax, and layernorm collapse into a single stage schedule:
+
+      Nx.Defn.jit(&my_fun/2, compiler: Nx.Vulkan.Compiler).(a, b)
+
+  Anything the fusion compiler cannot handle falls back to the evaluator, so
+  the fused path is never less correct than the eager one.
   """
 
   @doc """

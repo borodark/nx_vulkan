@@ -3,10 +3,10 @@
 Moved from README on 2026-07-13 so the main page stays focused on
 what already works. Milestones and forward-looking items live here.
 
-Plan history: [`PLAN_GPU_NODE.md`](PLAN_GPU_NODE.md) (Phase 1–2 era)
+Plan history: [`PLAN_GPU_NODE.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_GPU_NODE.md) (Phase 1–2 era)
 and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 (Phase 3+). Per-workstream notes in
-[`research/gpu_node/`](research/gpu_node/).
+[`research/gpu_node/`](https://github.com/borodark/nx_vulkan/tree/main/research/gpu_node).
 
 ## Status snapshot
 

@@ -28,8 +28,8 @@ Five sections, each timed:
 
 ## 1. Boot the backend
 
-The backend lazy-initialises on first NIF call. Trigger it by
-asking for the device name.
+The backend lazy-initialises on first NIF call. Any NIF will do —
+allocating a throwaway buffer is the cheapest trigger.
 
 ```elixir
 # Allocate a one-byte buffer just to force vulkano context init.
@@ -89,9 +89,12 @@ Nx.add(a, b) |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_list()
 
 Expected: `[11.0, 22.0, 33.0, 44.0]`.
 
-The shader is `elementwise_binary.spv`, specialised at constant
-ID 0 with op-code 0 (add). Subsequent calls with the same shader
-and op-code hit the pipeline cache and skip the
+The shader is `elementwise_binary_f32.spv`, specialised at
+constant ID 0 with op-code 0 (add). There is one such module per
+float width — `_f32` here because these tensors are f32; an f64
+tensor would dispatch `elementwise_binary_f64.spv`. Subsequent
+calls with the same shader and op-code hit the pipeline cache
+(keyed on exactly that pair, Rust-side) and skip the
 shader-module-build step.
 
 ### Elementwise unary
@@ -100,7 +103,7 @@ shader-module-build step.
 Nx.sigmoid(a) |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_list()
 ```
 
-`elementwise_unary.spv` op-code 5 (sigmoid). Result:
+`elementwise_unary_f32.spv` op-code 5 (sigmoid). Result:
 `[0.7310585975646973, 0.8807970881462097, ...]`.
 
 ### Reduction
@@ -124,8 +127,12 @@ Nx.dot(a, b) |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_list()
 ```
 
 Expected: `[[10.0, 13.0], [28.0, 40.0]]`. The shader is
-`matmul.spv` at 16×16 tile size; for these tiny matrices most of
-the cost is dispatch overhead.
+`matmul_f32_f64acc.spv` at 16×16 tile size — f32 storage with an
+f64 accumulator, which is the default for f32 matmul; switch it
+with `Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)`
+to get `matmul_f32_f32acc.spv`. An f64 tensor dispatches
+`matmul_f64.spv`. For these tiny matrices most of the cost is
+dispatch overhead.
 
 ## 4. Forward pass on an Axon model
 
@@ -157,16 +164,17 @@ out = predict_fn.(params_vk, %{"x" => x_vk})
 out |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.to_list()
 ```
 
-The forward pass runs: `Dense → sigmoid → Dense`, where every
-op dispatches through `VulkanoBackend`. Matmul → add (with
-broadcast) → sigmoid → matmul. Four shader dispatches total.
+The forward pass runs `Dense → sigmoid → Dense`, where every op
+dispatches through `VulkanoBackend`: matmul → bias-add (the
+broadcasting elementwise shader) → sigmoid → matmul → bias-add.
+`Axon.dense/2` adds a bias by default, so both layers pay one.
 
 ## 5. One training step with gradient
 
 This is the interesting one. We never wrote a backward callback
 for any of our ops. `Nx.Defn.grad` transforms the graph at
 compile time, inserting backward ops *expressed in terms of
-forward ops*. Our 24 forward ops therefore cover all the
+forward ops*. Our forward ops therefore already cover all the
 gradients they could conceivably need.
 
 ```elixir
@@ -232,9 +240,15 @@ The `examples/` directory in this repo has more:
 * `examples/full_bench.exs` — per-op latency curves, end-to-end
   workloads, robustness run. Cross-host comparison.
 
-The roadmap (`docs/VULKANO_BACKEND_ROADMAP.md`) lists the open
-work: persistent buffer pool, f64 matmul, custom `Nx.Defn`
-compiler, conv/FFT/sort/scatter for the long tail.
+Since this notebook was first written, three of its "open work"
+items have shipped: f64 matmul, conv, and the custom `Nx.Defn`
+compiler — `Nx.Vulkan.Compiler`, which fuses a whole `defn` into
+a stage schedule instead of dispatching op by op. Swap
+`compiler: Nx.Defn.Evaluator` above for
+`compiler: Nx.Vulkan.Compiler` to run the training step fused.
+The roadmap (`docs/VULKANO_BACKEND_ROADMAP.md`) tracks what is
+still open, including the persistent buffer pool and
+FFT/sort/scatter for the long tail.
 
 The blog post that tells the whole story:
 [*The Backend That Didn't Need to Know*](http://www.dataalienist.com/blog-backend-didnt-need-to-know.html).

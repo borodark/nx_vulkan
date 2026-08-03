@@ -41,3 +41,6 @@ Cargo.lock
 
 # Cached SPV blobs compiled by Nx.Vulkan.Synthesis at runtime
 /priv/shader_cache/
+
+# dialyzer PLTs (see mix.exs :dialyzer plt_file)
+/priv/plts/

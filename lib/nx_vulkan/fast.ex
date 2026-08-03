@@ -5,13 +5,14 @@ defmodule Nx.Vulkan.Fast do
   Each function is a composition of standard Nx ops that produces
   a mathematically-equivalent result to the fused shader that
   `Nx.Vulkan.VulkanoBackend` would dispatch. Cross-backend correctness
-  is guaranteed (EXLA, BinaryBackend, EMLX, VulkanoBackend).
+  is guaranteed (EXLA, BinaryBackend, VulkanoBackend).
 
   ## Note on Nx 0.12 migration
 
-  Prior to Nx 0.12, each function emitted `Nx.Defn.Expr.optional/3`
-  IR nodes for backend-specific fused dispatch. That API was removed
-  in Nx 0.12. The functions now call the fallback Nx ops directly.
+  Prior to Nx 0.12, each function emitted Nx.Defn.Expr.optional/3
+  IR nodes (an internal Nx API, so not linked here) for backend-specific
+  fused dispatch. That API was removed in Nx 0.12. The functions now call
+  the fallback Nx ops directly.
   The VulkanoBackend's per-op dispatch is fast enough that the
   fused-kernel optimization is not critical — the chain shader path
   (where performance matters) bypasses this module entirely.
