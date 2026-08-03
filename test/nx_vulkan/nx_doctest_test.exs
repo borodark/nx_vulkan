@@ -26,7 +26,12 @@ defmodule Nx.Vulkan.NxDoctestTest do
 
   # Native-shader float results differ from BinaryBackend in the last ULP, so
   # the doctest's `inspect` string doesn't match (values are within tolerance).
-  @rounding [exp: 1, tanh: 1, sigmoid: 1, sqrt: 1, log: 1, add: 2]
+  # standard_deviation joined this bucket when coerce_to/2 learned to convert
+  # rank-0 integer constants: the op used to host-fall-back on its `ddof`
+  # scalar and so matched BinaryBackend exactly. It now runs natively and lands
+  # 1 ULP away (6.3639607 vs 6.363961 — same f32 value, different inspect
+  # string). Moving an op onto the GPU is expected to cost the last digit.
+  @rounding [exp: 1, tanh: 1, sigmoid: 1, sqrt: 1, log: 1, add: 2, standard_deviation: 2]
 
   # Dtypes the f64-real, byte-addressed backend does not represent: complex
   # (skip set), f8 special values (e.g. :infinity in :f8_e4m3fn), and sub-byte

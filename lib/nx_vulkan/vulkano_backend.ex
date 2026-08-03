@@ -74,6 +74,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # Explicit-attribution form. The elementwise/reduce helpers are shared by
+  # dozens of callbacks, so __CALLER__.function would blame the helper and hide
+  # WHICH op fell back — they pass the real op instead.
+  defmacrop host_result(out, result, op) do
+    quote do
+      host_result_recorded(unquote(out), unquote(result), unquote(op))
+    end
+  end
+
   # ---------------------------------------------------------------- init
 
   @impl true
@@ -267,7 +276,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
     b_bin = Nx.backend_transfer(b, Nx.BinaryBackend)
     result = apply(Nx, op, [a_bin, b_bin])
-    host_result(out, result)
+    host_result(out, result, {op, 3})
   end
 
   # ---------------------------------------------------------------- elementwise unary
@@ -325,7 +334,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp unary_op_host_fallback(op, out, a) do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
     result = apply(Nx, op, [a_bin])
-    host_result(out, result)
+    host_result(out, result, {op, 2})
   end
 
   # Unary ops without GPU shader support — host fallback only.
@@ -949,6 +958,25 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Returns the coerced %T{} (a no-op when already `to`), or nil when the pair
   # can't be cast on the GPU (non-f32/f64, or not on this backend).
   defp coerce_to(%T{type: to} = t, to), do: t
+
+  # A rank-0 constant of a type the cast shader cannot convert.
+  #
+  # Nx materialises literals as {:s, 32}: relu is `max(x, 0)`, a mean divides by
+  # an integer count. The f32<->f64 cast shader has no integer path, so
+  # coerce_to/2 returned nil and the op host-fell-back — a FOUR-BYTE literal
+  # dragging a {32, 8, 14, 14} tensor to the CPU with it. In a training step
+  # that was max/3 x2, divide/3 x1 and greater/3 x2.
+  #
+  # Rebuilding the scalar at the target type is one 4-byte round trip, which is
+  # nothing against moving the tensor. backend_copy (not transfer) because the
+  # source may still be referenced elsewhere in the graph. Non-scalars of an
+  # uncastable type still fall back — converting those deserves a real shader.
+  defp coerce_to(%T{shape: {}} = t, to) do
+    t
+    |> Nx.backend_copy(Nx.BinaryBackend)
+    |> Nx.as_type(to)
+    |> Nx.backend_transfer(__MODULE__)
+  end
 
   defp coerce_to(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
     case cast_spv(from, to) do

@@ -106,6 +106,43 @@ defmodule Nx.Vulkan.FallbackTest do
              end) == 0
     end
 
+    test "an integer scalar operand does not drag its tensor to the host" do
+      # Nx materialises literals as rank-0 {:s, 32}: relu is max(x, 0), a mean
+      # divides by an integer count. The cast shader has no integer path, so
+      # these used to host-fall-back — a four-byte literal moving a whole
+      # tensor to the CPU. Worth five fallbacks per training step.
+      x = t({8, 4}, 1)
+      zero = Nx.tensor(0, backend: VulkanoBackend)
+      two = Nx.tensor(2, backend: VulkanoBackend)
+
+      assert Fallback.count_total(fn -> Nx.max(x, zero) end) == 0
+      assert Fallback.count_total(fn -> Nx.divide(x, two) end) == 0
+      assert Fallback.count_total(fn -> Nx.greater(x, zero) end) == 0
+    end
+
+    test "integer-scalar results still match BinaryBackend" do
+      x = t({6, 3}, 2)
+      xh = Nx.backend_copy(x, Nx.BinaryBackend)
+      zero = Nx.tensor(0, backend: VulkanoBackend)
+      zh = Nx.tensor(0, backend: Nx.BinaryBackend)
+
+      for {got, want} <- [
+            {Nx.max(x, zero), Nx.max(xh, zh)},
+            {Nx.divide(x, Nx.tensor(2, backend: VulkanoBackend)),
+             Nx.divide(xh, Nx.tensor(2, backend: Nx.BinaryBackend))},
+            {Nx.greater(x, zero), Nx.greater(xh, zh)}
+          ] do
+        d =
+          Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend) |> Nx.as_type({:f, 64}),
+            Nx.as_type(want, {:f, 64}))
+          |> Nx.abs()
+          |> Nx.reduce_max()
+          |> Nx.to_number()
+
+        assert d < 1.0e-12
+      end
+    end
+
     test "conv forward" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)
