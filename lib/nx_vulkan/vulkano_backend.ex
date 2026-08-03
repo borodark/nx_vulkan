@@ -406,8 +406,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   @impl true
   def conv(out, inp, kernel, opts) do
-    i = ensure_on_backend(inp) |> conv_coerce(out.type)
-    k = ensure_on_backend(kernel) |> conv_coerce(out.type)
+    i = ensure_on_backend(inp) |> coerce_operand(out.type)
+    k = ensure_on_backend(kernel) |> coerce_operand(out.type)
 
     cond do
       conv_gpu_ok?(i, k, out, opts) ->
@@ -447,28 +447,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp conv_gpu_core_ok?(_i, _k, _out, _opts), do: false
 
-  # Cast an operand to the conv's output dtype on-device.
+  # Cast an operand to an op's output dtype on-device.
   #
   # `Nx.Defn.Grad` seeds a gradient at Nx's *default* dtype, so the backward
-  # convolutions of a uniformly-f64 model routinely arrive as f64 x f32. The
-  # native shaders need a single dtype, and rejecting the mismatch dropped the
-  # whole conv — the expensive half of a training step — onto the host. The
-  # f32<->f64 cast is one shader (coerce_to/2), so paying it beats leaving.
+  # ops of a uniformly-f64 model routinely arrive as f64 x f32 — true of both
+  # conv and dot. The native shaders need a single dtype, and rejecting the
+  # mismatch dropped the op (the expensive half of a training step) onto the
+  # host. The f32<->f64 cast is one shader (coerce_to/2), so paying it beats
+  # leaving.
   #
-  # Semantics are unchanged: `Nx.BinaryBackend.conv/4` also converts its inputs
-  # to the output type, and `out.type` is the type Nx computed for this op.
-  # Anything coerce_to/2 can't cast (integers, tensors not on this backend) is
-  # returned untouched and handled by the gate as before.
-  defp conv_coerce(%T{type: ot} = tensor, ot), do: tensor
+  # Semantics are unchanged: BinaryBackend also converts its inputs to the
+  # output type, and `out.type` is the type Nx computed for the op. Anything
+  # coerce_to/2 can't cast (integers, tensors not on this backend) is returned
+  # untouched and handled by the gate as before.
+  defp coerce_operand(%T{type: ot} = tensor, ot), do: tensor
 
-  defp conv_coerce(%T{data: %__MODULE__{}} = tensor, ot) do
+  defp coerce_operand(%T{data: %__MODULE__{}} = tensor, ot) do
     case coerce_to(tensor, ot) do
       nil -> tensor
       coerced -> coerced
     end
   end
 
-  defp conv_coerce(tensor, _ot), do: tensor
+  defp coerce_operand(tensor, _ot), do: tensor
 
 
   # Already in the native layout — dispatch straight to the shaders.
@@ -1642,10 +1643,26 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Fast path: rank-2 × rank-2, contracting [1] of a vs [0] of b
   # (standard matmul A·B). f64 and f32 (f64-accumulator) run native shaders;
   # everything else routes through BinaryBackend.
+  #
+  # Rank-2 contractions over the OTHER axes are normalised into that form by
+  # transposing on-device first (dot_orient/4) rather than dropped to the host.
+  # This is the dense layer's backward pass: `y = x·W` contracts [1]/[0] and
+  # hits the shader, but Nx expresses its gradients as dot with permuted
+  # contraction axes rather than materialising transposes —
+  # `∂L/∂x = g·Wᵀ` arrives as [1]/[1] and `∂L/∂W = gᵀ·x` as [0]/[0] — so both
+  # used to miss. Every dense layer paid it twice per step, conv or no conv.
   @impl true
   def dot(%T{shape: out_shape, type: type} = out, a, axes_a, batched_a, b, axes_b, batched_b) do
-    a_v = ensure_on_backend(a)
-    b_v = ensure_on_backend(b)
+    {a_v, axes_a, b_v, axes_b} =
+      dot_orient(
+        ensure_on_backend(a) |> coerce_operand(type),
+        axes_a,
+        ensure_on_backend(b) |> coerce_operand(type),
+        axes_b,
+        batched_a,
+        batched_b
+      )
+
     spv = matmul_spv(type)
 
     fast_path =
@@ -1674,6 +1691,23 @@ defmodule Nx.Vulkan.VulkanoBackend do
       host_result(out, result)
     end
   end
+
+  # Rotate a rank-2 contraction into the canonical (M,K)·(K,N) the matmul
+  # shader expects: `a` must contract on axis 1, `b` on axis 0. A rank-2
+  # transpose is the tiled fast path, so the rotation is a single cheap
+  # dispatch — far cheaper than moving a matmul to the host.
+  #
+  # Only rank-2, single-axis, unbatched contractions are rotated. Anything else
+  # (higher rank, batched, multi-axis) is returned untouched for the gate below
+  # to reject as before.
+  defp dot_orient(%T{shape: as} = a, [aa], %T{shape: bs} = b, [ba], [], [])
+       when tuple_size(as) == 2 and tuple_size(bs) == 2 and aa in [0, 1] and ba in [0, 1] do
+    a = if aa == 0, do: Nx.transpose(a, axes: [1, 0]), else: a
+    b = if ba == 1, do: Nx.transpose(b, axes: [1, 0]), else: b
+    {a, [1], b, [0]}
+  end
+
+  defp dot_orient(a, axes_a, b, axes_b, _batched_a, _batched_b), do: {a, axes_a, b, axes_b}
 
   # ---------------------------------------------------------------- helpers
 

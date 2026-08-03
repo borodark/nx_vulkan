@@ -33,6 +33,22 @@ defmodule Nx.Vulkan.Fallback do
   point of every fallback path. Counting is process-local, so a fallback that
   happens inside another process (e.g. work funnelled through
   `Nx.Vulkan.Node`) is not counted by the caller's `count/1`.
+
+  ## The count is a lower bound
+
+  Only ops that reach *this* backend can be counted. Once a fallback puts a
+  tensor on `Nx.BinaryBackend`, Nx dispatches every subsequent op on that tensor
+  straight to `Nx.BinaryBackend` — this module's callbacks are never invoked, so
+  the downstream host work is invisible here.
+
+  That is not theoretical. A LeNet training step reported no `window_max` at all
+  while `dot/7` was still falling back: the dot dropped the pooling gradient
+  onto the host, and everything after it ran there unseen. Fixing `dot` kept the
+  tensor resident, and `window_scatter_max/6` promptly appeared in the census.
+
+  So a count going *up* after a fix can mean the fix worked and exposed
+  something that was already happening. Read the composition, not just the
+  total.
   """
 
   @key :nx_vulkan_fallback_counts

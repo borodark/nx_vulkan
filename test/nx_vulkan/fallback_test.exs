@@ -128,6 +128,33 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.conv(x, k, opts) end) == 0
     end
 
+    test "dot in every rank-2 contraction orientation" do
+      # y = x·W contracts [1]/[0] and always hit the shader. Its gradients do
+      # not: Nx emits ∂L/∂x = g·Wᵀ as [1]/[1] and ∂L/∂W = gᵀ·x as [0]/[0],
+      # permuting the contraction axes instead of materialising a transpose.
+      # Both used to fall back, so every dense layer paid it twice per step.
+      a = t({4, 6}, 1)
+      b_kn = t({6, 5}, 2)
+      b_nk = t({5, 6}, 2)
+
+      assert Fallback.count_total(fn -> Nx.dot(a, [1], [], b_kn, [0], []) end) == 0
+      assert Fallback.count_total(fn -> Nx.dot(a, [1], [], b_nk, [1], []) end) == 0
+      assert Fallback.count_total(fn -> Nx.dot(a, [0], [], t({4, 5}, 3), [0], []) end) == 0
+      assert Fallback.count_total(fn -> Nx.dot(a, [0], [], t({5, 4}, 3), [1], []) end) == 0
+    end
+
+    test "a dense-layer gradient performs no host dot" do
+      x = t({8, 6}, 1)
+      w = t({6, 4}, 2)
+
+      grad = fn ww, xx -> Nx.Defn.grad(ww, fn w2 -> Nx.sum(Nx.dot(xx, w2)) end) end
+
+      {_r, counts} =
+        Fallback.count(fn -> Nx.Defn.jit_apply(grad, [w, x], compiler: Nx.Defn.Evaluator) end)
+
+      assert counts[{:dot, 7}] == nil, "the dense gradient went back to the host: #{inspect(counts)}"
+    end
+
     test "conv gradient performs no host fallback at all" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)
