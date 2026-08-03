@@ -215,6 +215,17 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Explicit broadcast, rank <= 4. Semantics match
+  `Nx.broadcast(t, shape, axes: axes)` — input axis `i` lands on output axis
+  `axes[i]`, and an input axis of size 1 repeats.
+
+  Buffers: a, out, params — an int32 buffer laid out as
+  `[out_rank, in_rank, out[4], in[4], axes[4]]`.
+  """
+  def broadcast_nd(_out, _a, _params, _n, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   2D matmul. C = A · B where A is M×K row-major, B is K×N row-major,
   C is M×N row-major. All f32. Buffers: a (m*k*4), b (k*n*4), out
   (m*n*4).

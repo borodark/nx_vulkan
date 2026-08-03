@@ -173,6 +173,40 @@ defmodule Nx.Vulkan.FallbackTest do
       end
     end
 
+    test "broadcast — including the relu-gradient zero fill" do
+      # Had no shader at all and always went to the host. Its own cost was the
+      # smaller half: it stranded the result on BinaryBackend, which is what
+      # made select/4 fall back on the s32 zeros it produced.
+      assert Fallback.count_total(fn -> Nx.broadcast(t({3}, 1), {2, 3}, axes: [1]) end) == 0
+      assert Fallback.count_total(fn -> Nx.broadcast(t({3, 1}, 1), {3, 4}, axes: [0, 1]) end) == 0
+      assert Fallback.count_total(fn -> Nx.broadcast(t({4}, 1), {2, 3, 4}, axes: [2]) end) == 0
+
+      scalar = Nx.tensor(1.5, type: {:f, 64}, backend: VulkanoBackend)
+      assert Fallback.count_total(fn -> Nx.broadcast(scalar, {8, 8}, axes: []) end) == 0
+    end
+
+    test "broadcast matches BinaryBackend exactly" do
+      for {ishape, oshape, axes} <- [
+            {{3}, {2, 3}, [1]},
+            {{2, 1, 4}, {2, 3, 4}, [0, 1, 2]},
+            {{2, 1, 1, 5}, {2, 3, 4, 5}, [0, 1, 2, 3]}
+          ] do
+        v = t(ishape, 3)
+        h = Nx.backend_copy(v, Nx.BinaryBackend)
+
+        d =
+          Nx.subtract(
+            Nx.broadcast(v, oshape, axes: axes) |> Nx.backend_copy(Nx.BinaryBackend),
+            Nx.broadcast(h, oshape, axes: axes)
+          )
+          |> Nx.abs()
+          |> Nx.reduce_max()
+          |> Nx.to_number()
+
+        assert d == 0.0, "broadcast #{inspect(ishape)}->#{inspect(oshape)} diverged by #{d}"
+      end
+    end
+
     test "conv forward" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)

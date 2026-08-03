@@ -1330,11 +1330,58 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # broadcasts during binary ops route through binary_op_host_fallback,
   # but explicit Nx.broadcast/3 needs its own callback. Used at every
   # NUTS init / mass-matrix scaffolding site.
+  @broadcast_nd_f64_spv Path.expand("../../priv/shaders/broadcast_nd_f64.spv", __DIR__)
+  @broadcast_nd_f32_spv Path.expand("../../priv/shaders/broadcast_nd_f32.spv", __DIR__)
+
+  defp broadcast_nd_spv({:f, 64}), do: @broadcast_nd_f64_spv
+  defp broadcast_nd_spv({:f, 32}), do: @broadcast_nd_f32_spv
+  defp broadcast_nd_spv(_), do: nil
+
   @impl true
-  def broadcast(out, tensor, shape, axes) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.broadcast(t_bin, shape, axes: axes)
-    host_result(out, result)
+  def broadcast(%T{type: type} = out, tensor, shape, axes) do
+    t = ensure_on_backend(tensor)
+    spv = broadcast_nd_spv(type)
+    out_rank = tuple_size(shape)
+    in_rank = tuple_size(t.shape)
+
+    if spv != nil and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
+         match?(%__MODULE__{}, t.data) and t.type == type do
+      gpu_broadcast(out, t, shape, axes, spv)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      host_result(out, Nx.broadcast(t_bin, shape, axes: axes))
+    end
+  end
+
+  # params: [out_rank, in_rank, out[4], in[4], axes[4]] — input axis i lands on
+  # output axis axes[i]; an input axis of size 1 repeats.
+  defp gpu_broadcast(
+         %T{type: type} = out,
+         %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+         shape,
+         axes,
+         spv
+       ) do
+    out_rank = tuple_size(shape)
+    in_rank = tuple_size(in_shape)
+    n = Nx.size(shape)
+
+    params =
+      for v <-
+            [out_rank, in_rank] ++
+              pad4(Tuple.to_list(shape)) ++
+              pad4(Tuple.to_list(in_shape)) ++
+              pad4(axes),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+
+    :ok = Nx.Vulkan.NativeV.broadcast_nd(out_ref, a_ref, params_ref, n, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
   end
 
   # concatenate: join tensors along an axis. Used by Sampler.sample_stream

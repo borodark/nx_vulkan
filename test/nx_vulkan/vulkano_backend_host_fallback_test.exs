@@ -57,10 +57,13 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [0.0, 1.0, 2.0, 3.0, 0.0]
     end
 
-    test "broadcast result is on BinaryBackend" do
+    # broadcast got an index-remap shader (broadcast_nd) and now stays on the
+    # GPU, like pad above. It used to strand its result on BinaryBackend, which
+    # is what made select/4 fall back on a relu gradient's zeros.
+    test "broadcast (f32) stays on VulkanoBackend and is correct" do
       a = v(Nx.tensor(7.0, type: :f32, backend: Nx.BinaryBackend))
       r = Nx.broadcast(a, {4})
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [7.0, 7.0, 7.0, 7.0]
     end
 

@@ -272,8 +272,12 @@ defmodule Nx.Vulkan.VulkanoBackendTest do
     test "vulkano + binary = follow-up op succeeds" do
       # After Tier 1, host-fallback ops return BinaryBackend tensors.
       # A follow-up op with a VulkanoBackend operand must work.
-      vk = v(f32([1.0, 2.0, 3.0]))
-      bin_result = Nx.broadcast(vk, {6, 3}) # broadcast = host-fallback -> BinaryBackend
+      # sort is the vehicle here only because it still host-falls-back. This
+      # test used broadcast until broadcast got a shader — the subject is
+      # mixed-backend composition, so it should not ride on an op that is a
+      # candidate for optimisation.
+      vk = v(Nx.iota({6, 3}, type: :f32, backend: Nx.BinaryBackend))
+      bin_result = Nx.sort(vk, axis: 1)
       # Confirm Tier 1 contract on the intermediate
       assert bin_result.data.__struct__ == Nx.BinaryBackend
       # Now add a VulkanoBackend tensor to it
