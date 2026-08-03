@@ -1501,11 +1501,50 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # reverse: reverse along given axes. Composes from slice in some
   # cases but a direct callback handles general patterns.
+  @reverse_nd_f64_spv Path.expand("../../priv/shaders/reverse_nd_f64.spv", __DIR__)
+  @reverse_nd_f32_spv Path.expand("../../priv/shaders/reverse_nd_f32.spv", __DIR__)
+
+  defp reverse_nd_spv({:f, 64}), do: @reverse_nd_f64_spv
+  defp reverse_nd_spv({:f, 32}), do: @reverse_nd_f32_spv
+  defp reverse_nd_spv(_), do: nil
+
   @impl true
-  def reverse(out, tensor, axes) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.reverse(t_bin, axes: axes)
-    host_result(out, result)
+  def reverse(%T{shape: shape, type: type} = out, tensor, axes) do
+    t = ensure_on_backend(tensor)
+    spv = reverse_nd_spv(type)
+    rank = tuple_size(shape)
+
+    if spv != nil and rank >= 1 and rank <= 4 and match?(%__MODULE__{}, t.data) and
+         t.type == type do
+      gpu_reverse(out, t, axes, spv)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      host_result(out, Nx.reverse(t_bin, axes: axes))
+    end
+  end
+
+  # params: [rank, shape[4], rev[4]] — rev[d] is 1 when axis d is reversed.
+  defp gpu_reverse(
+         %T{shape: shape, type: type} = out,
+         %T{data: %__MODULE__{ref: a_ref}},
+         axes,
+         spv
+       ) do
+    rank = tuple_size(shape)
+    n = Nx.size(shape)
+    rev = for d <- 0..(rank - 1)//1, do: if(d in axes, do: 1, else: 0)
+
+    params =
+      for v <- [rank] ++ pad4(Tuple.to_list(shape)) ++ pad4(rev), into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+
+    :ok = Nx.Vulkan.NativeV.reverse_nd(out_ref, a_ref, params_ref, n, rank, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
   end
 
   # sort / argsort — sort family (both still Nx.Backend callbacks)

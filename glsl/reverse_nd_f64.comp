@@ -1,0 +1,59 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// Reverse along a set of axes, rank <= 4, f64.
+//
+// `Nx.Defn.Grad` reaches for this constantly — the conv input-gradient reverses
+// the kernel — so leaving it on the host put a CPU round trip in the middle of
+// every backward pass, and (worse) parked the tensor on Nx.BinaryBackend so
+// everything downstream ran there too.
+//
+// Semantics match `Nx.reverse(t, axes: axes)`: for each axis d marked in `rev`,
+// output coordinate i reads input coordinate shape[d] - 1 - i; unmarked axes
+// read straight through. Input and output shapes are identical, so one shape
+// serves both.
+//
+// Params buffer: [rank, shape[4], rev[4]] — shape left-aligned and padded to 4
+// with 1s, rev a 0/1 flag per axis. One thread per output element.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer A { double a[]; };
+layout(std430, binding = 1) writeonly buffer O { double o[]; };
+layout(std430, binding = 2) readonly  buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint shape[4];
+    uint rev[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        shape[i] = uint(prm[1 + i]);
+        rev[i]   = uint(prm[5 + i]);
+    }
+
+    // Row-major strides; input and output share the shape.
+    uint stride[4];
+    uint s = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        stride[d] = s;
+        s *= shape[d];
+    }
+
+    uint idx = gid;
+    uint in_off = 0u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint coord = idx % shape[d];
+        idx = idx / shape[d];
+        uint src = (rev[d] == 1u) ? (shape[d] - 1u - coord) : coord;
+        in_off += src * stride[d];
+    }
+
+    o[gid] = a[in_off];
+}

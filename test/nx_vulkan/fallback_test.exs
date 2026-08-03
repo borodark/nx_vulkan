@@ -45,10 +45,13 @@ defmodule Nx.Vulkan.FallbackTest do
     end
 
     test "counts a known fallback and attributes it to the callback" do
+      # sort has no shader and is not planned to get one — a stable specimen.
+      # This test previously used reverse/3, which then got a shader; that is
+      # the intended lifecycle, but a meta-test should not ride on it.
       a = t({4, 4}, 1)
-      {_result, counts} = Fallback.count(fn -> Nx.reverse(a, axes: [0]) end)
+      {_result, counts} = Fallback.count(fn -> Nx.sort(a, axis: 1) end)
 
-      assert counts == %{{:reverse, 3} => 1}
+      assert counts == %{{:sort, 3} => 1}
     end
 
     test "is off by default — note/1 outside count/1 is a no-op" do
@@ -62,13 +65,13 @@ defmodule Nx.Vulkan.FallbackTest do
 
       {_r, outer} =
         Fallback.count(fn ->
-          _ = Nx.reverse(a, axes: [0])
-          {_r2, inner} = Fallback.count(fn -> Nx.reverse(a, axes: [0]) end)
-          assert inner == %{{:reverse, 3} => 1}
-          Nx.reverse(a, axes: [0])
+          _ = Nx.sort(a, axis: 1)
+          {_r2, inner} = Fallback.count(fn -> Nx.sort(a, axis: 1) end)
+          assert inner == %{{:sort, 3} => 1}
+          Nx.sort(a, axis: 1)
         end)
 
-      assert outer == %{{:reverse, 3} => 2}
+      assert outer == %{{:sort, 3} => 2}
     end
   end
 
@@ -140,6 +143,33 @@ defmodule Nx.Vulkan.FallbackTest do
           |> Nx.to_number()
 
         assert d < 1.0e-12
+      end
+    end
+
+    test "reverse — the conv input-gradient's kernel reversal" do
+      # Was a pure host fallback with no shader at all. Worse than its single
+      # count suggested: it stranded its output on BinaryBackend, so Nx ran
+      # everything downstream there too, invisible to this counter.
+      assert Fallback.count_total(fn -> Nx.reverse(t({4, 5}, 1), axes: [0]) end) == 0
+      assert Fallback.count_total(fn -> Nx.reverse(t({2, 3, 4}, 1), axes: [0, 2]) end) == 0
+      assert Fallback.count_total(fn -> Nx.reverse(t({4, 3, 3, 3}, 1), axes: [2, 3]) end) == 0
+    end
+
+    test "reverse matches BinaryBackend exactly" do
+      for {shape, axes} <- [{{4, 5}, [1]}, {{2, 3, 4}, [0, 1, 2]}, {{2, 3, 4, 5}, [1, 2]}] do
+        v = t(shape, 2)
+        h = Nx.backend_copy(v, Nx.BinaryBackend)
+
+        d =
+          Nx.subtract(
+            Nx.reverse(v, axes: axes) |> Nx.backend_copy(Nx.BinaryBackend),
+            Nx.reverse(h, axes: axes)
+          )
+          |> Nx.abs()
+          |> Nx.reduce_max()
+          |> Nx.to_number()
+
+        assert d == 0.0, "reverse #{inspect(shape)} axes #{inspect(axes)} diverged by #{d}"
       end
     end
 
@@ -217,11 +247,6 @@ defmodule Nx.Vulkan.FallbackTest do
   end
 
   describe "known fallbacks — pinned so promoting one is noticed" do
-    test "reverse/3 — used by Nx's conv input-gradient" do
-      assert Fallback.count(fn -> Nx.reverse(t({4, 4}, 1), axes: [0]) end)
-             |> elem(1) == %{{:reverse, 3} => 1}
-    end
-
     test "window_max/4 and window_scatter_max — max-pooling, forward and backward" do
       x = t({1, 2, 4, 4}, 1)
 

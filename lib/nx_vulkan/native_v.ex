@@ -204,6 +204,17 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Reverse along a set of axes, rank <= 4. Semantics match
+  `Nx.reverse(t, axes: axes)`.
+
+  Buffers: a, out (`n * element_bytes` each), params — an int32 buffer laid out
+  as `[rank, shape[4], rev[4]]`, where `rev[d]` is 1 when axis `d` is reversed.
+  Input and output share a shape.
+  """
+  def reverse_nd(_out, _a, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   2D matmul. C = A · B where A is M×K row-major, B is K×N row-major,
   C is M×N row-major. All f32. Buffers: a (m*k*4), b (k*n*4), out
   (m*n*4).
