@@ -388,8 +388,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   @impl true
   def conv(out, inp, kernel, opts) do
-    i = ensure_on_backend(inp)
-    k = ensure_on_backend(kernel)
+    i = ensure_on_backend(inp) |> conv_coerce(out.type)
+    k = ensure_on_backend(kernel) |> conv_coerce(out.type)
 
     cond do
       conv_gpu_ok?(i, k, out, opts) ->
@@ -428,6 +428,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   defp conv_gpu_core_ok?(_i, _k, _out, _opts), do: false
+
+  # Cast an operand to the conv's output dtype on-device.
+  #
+  # `Nx.Defn.Grad` seeds a gradient at Nx's *default* dtype, so the backward
+  # convolutions of a uniformly-f64 model routinely arrive as f64 x f32. The
+  # native shaders need a single dtype, and rejecting the mismatch dropped the
+  # whole conv — the expensive half of a training step — onto the host. The
+  # f32<->f64 cast is one shader (coerce_to/2), so paying it beats leaving.
+  #
+  # Semantics are unchanged: `Nx.BinaryBackend.conv/4` also converts its inputs
+  # to the output type, and `out.type` is the type Nx computed for this op.
+  # Anything coerce_to/2 can't cast (integers, tensors not on this backend) is
+  # returned untouched and handled by the gate as before.
+  defp conv_coerce(%T{type: ot} = tensor, ot), do: tensor
+
+  defp conv_coerce(%T{data: %__MODULE__{}} = tensor, ot) do
+    case coerce_to(tensor, ot) do
+      nil -> tensor
+      coerced -> coerced
+    end
+  end
+
+  defp conv_coerce(tensor, _ot), do: tensor
 
 
   # Already in the native layout — dispatch straight to the shaders.

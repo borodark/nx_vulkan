@@ -128,7 +128,7 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.conv(x, k, opts) end) == 0
     end
 
-    test "conv gradient — one fallback left, and it is a dtype mismatch" do
+    test "conv gradient performs no host fallback at all" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)
 
@@ -141,15 +141,14 @@ defmodule Nx.Vulkan.FallbackTest do
           Nx.Defn.jit_apply(grad, [k, x], compiler: Nx.Defn.Evaluator)
         end)
 
-      # Exactly one conv still falls back here, and the counter is how we know.
-      # It is NOT a permutation problem: the gradient seed for Nx.sum is built
-      # at Nx's default f32 while the input is f64, so the kernel-gradient conv
-      # is f64 x f32 and conv_gpu_core_ok?/4's `i.type == ot and k.type == ot`
-      # rejects it. Mixed f32/f64 could be coerced on-device (the backend
-      # already has coerce_to/2 for exactly this) — when that lands, this
-      # assertion fails and should become `== %{}`.
-      assert counts == %{{:conv, 4} => 1},
-             "conv fallbacks in the kernel gradient changed: #{inspect(counts)}"
+      # Zero. The counter is what proved this was not already true: one conv
+      # used to fall back here, and not for the reason anyone guessed. The
+      # gradient seed for Nx.sum is built at Nx's default f32 while the input
+      # is f64, so the kernel-gradient conv arrived as f64 x f32 and failed
+      # `i.type == ot and k.type == ot`. conv_coerce/2 now casts the odd
+      # operand on-device instead of dropping the conv to the host.
+      assert counts == %{},
+             "the conv gradient went back to the host: #{inspect(counts)}"
     end
   end
 
