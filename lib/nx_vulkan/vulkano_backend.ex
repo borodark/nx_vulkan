@@ -39,6 +39,23 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   alias Nx.Tensor, as: T
 
+  # Wrap a host-computed result back into `out`, and record the host fallback
+  # against the backend callback that performed it.
+  #
+  # A macro so the callback's {name, arity} is captured at compile time. It
+  # cannot be recovered at runtime: every fallback path calls this in tail
+  # position, so TCO has already dropped the caller's frame by the time the
+  # counter runs. See Nx.Vulkan.Fallback for why counting these matters at all.
+  #
+  # Must stay above its first use — macros are not available before definition.
+  defmacrop host_result(out, result) do
+    op = __CALLER__.function
+
+    quote do
+      host_result_recorded(unquote(out), unquote(result), unquote(Macro.escape(op)))
+    end
+  end
+
   # ---------------------------------------------------------------- init
 
   @impl true
@@ -411,6 +428,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   defp conv_gpu_core_ok?(_i, _k, _out, _opts), do: false
+
 
   # Already in the native layout — dispatch straight to the shaders.
   defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, out, opts) do
@@ -1636,7 +1654,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Leave the result on BinaryBackend; Nx handles mixed-backend tensors
   # downstream, and any op that genuinely needs GPU will transfer
   # lazily on first touch.
-  defp host_result(%T{} = out, %T{} = result), do: %{out | data: result.data}
+  # Every host fallback lands here (via the host_result/2 macro above, which
+  # supplies `op`). Counting centrally is what makes a silent fallback
+  # detectable — see Nx.Vulkan.Fallback for why value-based tests structurally
+  # cannot catch one.
+  defp host_result_recorded(%T{} = out, %T{} = result, op) do
+    Nx.Vulkan.Fallback.note(op)
+    %{out | data: result.data}
+  end
 
   # Run a composed Nx fallback with BinaryBackend as the *process default* so any
   # intermediate tensors Nx materialises inside the composition (constants, iota,
