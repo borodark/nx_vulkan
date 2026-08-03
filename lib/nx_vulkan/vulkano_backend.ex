@@ -949,8 +949,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @cast_f32_to_f64_spv Path.expand("../../priv/shaders/cast_f32_to_f64.spv", __DIR__)
   @cast_f64_to_f32_spv Path.expand("../../priv/shaders/cast_f64_to_f32.spv", __DIR__)
 
+  # Integer -> float. Nx materialises literals as {:s, 32} and then broadcasts
+  # them, so a relu gradient's select(x > 0, g, 0) hands us a full s32 TENSOR,
+  # not a scalar the rank-0 clause in coerce_to/2 could rebuild. Without this
+  # path that select host-fell-back with its whole tensor.
+  @cast_s32_to_f32_spv Path.expand("../../priv/shaders/cast_s32_to_f32.spv", __DIR__)
+  @cast_s32_to_f64_spv Path.expand("../../priv/shaders/cast_s32_to_f64.spv", __DIR__)
+
   defp cast_spv({:f, 32}, {:f, 64}), do: @cast_f32_to_f64_spv
   defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
+  defp cast_spv({:s, 32}, {:f, 32}), do: @cast_s32_to_f32_spv
+  defp cast_spv({:s, 32}, {:f, 64}), do: @cast_s32_to_f64_spv
   defp cast_spv(_from, _to), do: nil
 
   # Coerce an on-GPU tensor to `to` type via the f32<->f64 cast shader so

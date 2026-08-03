@@ -31,7 +31,26 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # scalar and so matched BinaryBackend exactly. It now runs natively and lands
   # 1 ULP away (6.3639607 vs 6.363961 — same f32 value, different inspect
   # string). Moving an op onto the GPU is expected to cost the last digit.
-  @rounding [exp: 1, tanh: 1, sigmoid: 1, sqrt: 1, log: 1, add: 2, standard_deviation: 2]
+  # standard_deviation and covariance joined this bucket as ops moved on-device:
+  # the first when coerce_to/2 learned rank-0 integer constants, the second when
+  # it gained an s32 -> float cast shader (covariance's doctest takes integer
+  # input, so it used to fall back at the cast and run entirely on the host).
+  # Both now land 1 ULP away — same f32 value, different inspect string.
+  #
+  # Note the standing cost of this bucket: excepting a function drops ALL of its
+  # doctests, not just the one that drifted. Expect more entries as more ops move
+  # to the GPU; that is the trade, and it is worth watching rather than
+  # accumulating silently.
+  @rounding [
+    exp: 1,
+    tanh: 1,
+    sigmoid: 1,
+    sqrt: 1,
+    log: 1,
+    add: 2,
+    standard_deviation: 2,
+    covariance: 3
+  ]
 
   # Dtypes the f64-real, byte-addressed backend does not represent: complex
   # (skip set), f8 special values (e.g. :infinity in :f8_e4m3fn), and sub-byte
