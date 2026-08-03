@@ -194,6 +194,16 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Generic permuted transpose for rank <= 4. Semantics match
+  `Nx.transpose(t, axes: perm)`: output axis `d` is input axis `perm[d]`.
+
+  Buffers: a, out (`n * element_bytes` each), params — an int32 buffer laid out
+  as `[rank, in[4], out[4], perm[4]]` with shapes left-aligned and padded to 4.
+  """
+  def transpose_nd(_out, _a, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   2D matmul. C = A · B where A is M×K row-major, B is K×N row-major,
   C is M×N row-major. All f32. Buffers: a (m*k*4), b (k*n*4), out
   (m*n*4).
@@ -256,8 +266,8 @@ defmodule Nx.Vulkan.NativeV do
   def leapfrog_chain_synth(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
-    do: :erlang.nif_error(:nif_not_loaded)
+  # leapfrog_chain_synth_f64/6 is the documented f64 variant declared above
+  # (see the @doc near the top of this module) — not redeclared here.
 
   def leapfrog_chain_synth_batch(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)

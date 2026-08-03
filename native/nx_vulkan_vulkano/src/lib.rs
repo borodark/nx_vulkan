@@ -1938,6 +1938,66 @@ fn transpose_2d<'a>(
 
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
+struct PushTransposeNd {
+    n: u32,
+    rank: u32,
+}
+
+/// Generic permuted transpose for rank <= 4. Bindings: a, out, params at 0..2.
+/// Push: {n, rank}. Params buffer: [rank, in[4], out[4], perm[4]] as i32.
+/// One thread per output element; no spec constant.
+///
+/// This is what lets conv's BACKWARD pass stay on the GPU: Nx's conv gradient
+/// emits convolutions with the first two axes swapped, which the conv fast path
+/// cannot run directly, so the backend transposes into the native layout around
+/// it rather than falling back to the host.
+#[rustler::nif(schedule = "DirtyIo")]
+fn transpose_nd<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushTransposeNd { n, rank },
+            [n.div_ceil(256), 1, 1],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
 struct PushMatmul {
     m: u32,
     n: u32,
@@ -2423,43 +2483,17 @@ fn device_supports_f64(env: Env) -> NifResult<Term> {
     }
 }
 
+// Both lints fire inside the `rustler::resource!` expansion, not in code we
+// write: it declares a non-local `impl Resource` and drops the registration
+// result. Remove these when rustler emits a corrected macro (same upstream
+// tracking as the rustc 1.85 pin in rust-toolchain.toml).
+#[allow(unused_must_use)]
+#[allow(non_local_definitions)]
 fn load(env: rustler::Env, _info: rustler::Term) -> bool {
     rustler::resource!(VulkanoTensor, env);
     true
 }
 
-rustler::init!(
-    "Elixir.Nx.Vulkan.NativeV",
-    [
-        leapfrog_chain_synth,
-        leapfrog_chain_synth_f64,
-        leapfrog_chain_synth_batch,
-        buf_upload,
-        buf_alloc,
-        buf_download,
-        buf_byte_size,
-        buf_upload_into,
-        concat_buffers,
-        apply_binary,
-        cast,
-        apply_slice,
-        apply_pad,
-        apply_gather,
-        dispatch_generated,
-        dispatch_generated_reduce,
-        apply_select,
-        apply_compare,
-        apply_binary_broadcast,
-        apply_unary,
-        reduce_axis,
-        transpose_2d,
-        matmul,
-        matmul32,
-        fft,
-        conv_im2col,
-        conv_gemm,
-        device_name,
-        device_supports_f64,
-    ],
-    load = load
-);
+// rustler 0.36 ignores an explicit NIF list (it discovers #[nif] functions
+// itself) and warns that passing one is deprecated.
+rustler::init!("Elixir.Nx.Vulkan.NativeV", load = load);

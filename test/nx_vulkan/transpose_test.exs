@@ -1,10 +1,13 @@
 defmodule Nx.Vulkan.TransposeTest do
   @moduledoc """
-  Regression guard for 2-D transpose. The legacy transpose.spv is an f32
-  shader; applying it to f64 tensors strided the buffer as 4-byte floats and
-  corrupted the data (undetected because no test transposed an f64 tensor and
-  checked values). The f64 path now uses transpose_f64.spv; other shapes/types
-  host-fall-back. Verified against BinaryBackend.
+  Regression guard for transpose. The legacy transpose.spv is an f32 shader;
+  applying it to f64 tensors strided the buffer as 4-byte floats and corrupted
+  the data (undetected because no test transposed an f64 tensor and checked
+  values). The f64 path uses transpose_f64.spv.
+
+  Rank-2 `[1, 0]` takes the tiled shader; every other permutation up to rank 4
+  goes through the generic `transpose_nd` shader. Rank 5+ and non-f32/f64 types
+  still host-fall-back. All verified against BinaryBackend.
   """
 
   use ExUnit.Case, async: false
@@ -48,11 +51,53 @@ defmodule Nx.Vulkan.TransposeTest do
     end
   end
 
-  describe "unsupported transpose host-falls-back but stays correct" do
-    test "rank-3 permutation falls back" do
-      d = Enum.map(1..24, &(&1 * 1.0))
-      v = Nx.tensor(d, type: {:f, 64}, backend: VulkanoBackend) |> Nx.reshape({2, 3, 4}) |> Nx.transpose(axes: [2, 0, 1])
-      b = Nx.tensor(d, type: {:f, 64}, backend: Nx.BinaryBackend) |> Nx.reshape({2, 3, 4}) |> Nx.transpose(axes: [2, 0, 1])
+  describe "general permutations run on the GPU (transpose_nd)" do
+    # The tiled rank-2/[1,0] shader is the fast path for matrices; every other
+    # permutation up to rank 4 goes through the generic transpose_nd shader
+    # rather than host-falling-back. A permutation moves bits without doing
+    # arithmetic, so parity here is exact, not approximate.
+    for {shape, axes} <- [
+          {{2, 3, 4}, [2, 0, 1]},
+          {{2, 3, 4}, [1, 0, 2]},
+          {{2, 3, 4}, [0, 2, 1]},
+          {{2, 3, 4, 5}, [1, 0, 2, 3]},
+          {{2, 3, 4, 5}, [3, 2, 1, 0]},
+          {{2, 3, 4, 5}, [0, 2, 3, 1]}
+        ] do
+      test "#{inspect(shape)} axes #{inspect(axes)} stays on the GPU and is exact" do
+        shape = unquote(Macro.escape(shape))
+        axes = unquote(axes)
+        d = Enum.map(1..Tuple.product(shape), &(&1 * 1.0))
+
+        v =
+          Nx.tensor(d, type: {:f, 64}, backend: VulkanoBackend)
+          |> Nx.reshape(shape)
+          |> Nx.transpose(axes: axes)
+
+        b =
+          Nx.tensor(d, type: {:f, 64}, backend: Nx.BinaryBackend)
+          |> Nx.reshape(shape)
+          |> Nx.transpose(axes: axes)
+
+        assert match?(%VulkanoBackend{}, v.data)
+        assert maxdiff(v, b) == 0.0
+      end
+    end
+
+    test "rank 5 still host-falls-back but stays correct" do
+      d = Enum.map(1..32, &(&1 * 1.0))
+      axes = [4, 3, 2, 1, 0]
+
+      v =
+        Nx.tensor(d, type: {:f, 64}, backend: VulkanoBackend)
+        |> Nx.reshape({2, 2, 2, 2, 2})
+        |> Nx.transpose(axes: axes)
+
+      b =
+        Nx.tensor(d, type: {:f, 64}, backend: Nx.BinaryBackend)
+        |> Nx.reshape({2, 2, 2, 2, 2})
+        |> Nx.transpose(axes: axes)
+
       refute match?(%VulkanoBackend{}, v.data)
       assert maxdiff(v, b) == 0.0
     end

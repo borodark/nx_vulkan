@@ -374,25 +374,32 @@ defmodule Nx.Vulkan.VulkanoBackend do
     i = ensure_on_backend(inp)
     k = ensure_on_backend(kernel)
 
-    if conv_gpu_ok?(i, k, out, opts) do
-      gpu_conv(out, i, k, opts)
-    else
-      inp_bin = Nx.backend_transfer(i, Nx.BinaryBackend)
-      kernel_bin = Nx.backend_transfer(k, Nx.BinaryBackend)
-      # BinaryBackend.conv calls the high-level Nx.pad internally; with the
-      # process default backend still VulkanoBackend that would dispatch to our
-      # GPU pad and hand conv a Vulkan tensor it then can't to_binary. Pin the
-      # default to BinaryBackend for the whole composed op.
-      host_result(out, with_binary_backend(fn -> Nx.conv(inp_bin, kernel_bin, opts) end))
+    cond do
+      conv_gpu_ok?(i, k, out, opts) ->
+        gpu_conv(out, i, k, opts)
+
+      conv_gpu_permuted_ok?(i, k, out, opts) ->
+        permuted_gpu_conv(out, i, k, opts)
+
+      true ->
+        inp_bin = Nx.backend_transfer(i, Nx.BinaryBackend)
+        kernel_bin = Nx.backend_transfer(k, Nx.BinaryBackend)
+        # BinaryBackend.conv calls the high-level Nx.pad internally; with the
+        # process default backend still VulkanoBackend that would dispatch to our
+        # GPU pad and hand conv a Vulkan tensor it then can't to_binary. Pin the
+        # default to BinaryBackend for the whole composed op.
+        host_result(out, with_binary_backend(fn -> Nx.conv(inp_bin, kernel_bin, opts) end))
     end
   end
 
-  # GPU path covers: spatial rank 1..3, feature/batch groups == 1, identity
-  # permutations, f64 or f32 input/kernel/output (all three must match). Any
-  # strides, padding and input/kernel dilation are honoured (folded into the
-  # im2col index math). Groups > 1, non-identity permutations, mixed/other
-  # dtypes and higher rank fall back.
-  defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, %T{type: ot}, opts) do
+  # GPU path covers: spatial rank 1..3, feature/batch groups == 1, f64 or f32
+  # input/kernel/output (all three must match). Any strides, padding and
+  # input/kernel dilation are honoured (folded into the im2col index math).
+  # Non-identity permutations are rotated into the native layout on-device at
+  # rank <= 4 (see permuted_gpu_conv/4). Groups > 1, mixed/other dtypes, and
+  # rank-5 permuted convs fall back to the host.
+  # Everything the native im2col+GEMM path needs EXCEPT a canonical layout.
+  defp conv_gpu_core_ok?(%T{shape: ishape} = i, %T{} = k, %T{type: ot}, opts) do
     rank = tuple_size(ishape)
     sr = rank - 2
 
@@ -400,7 +407,16 @@ defmodule Nx.Vulkan.VulkanoBackend do
       i.type == ot and k.type == ot and ot in [{:f, 64}, {:f, 32}] and
       sr >= 1 and sr <= 3 and
       Keyword.get(opts, :feature_group_size, 1) == 1 and
-      Keyword.get(opts, :batch_group_size, 1) == 1 and
+      Keyword.get(opts, :batch_group_size, 1) == 1
+  end
+
+  defp conv_gpu_core_ok?(_i, _k, _out, _opts), do: false
+
+  # Already in the native layout — dispatch straight to the shaders.
+  defp conv_gpu_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, out, opts) do
+    rank = tuple_size(ishape)
+
+    conv_gpu_core_ok?(i, k, out, opts) and
       identity_perm?(opts[:input_permutation], rank) and
       identity_perm?(opts[:kernel_permutation], tuple_size(kshape)) and
       identity_perm?(opts[:output_permutation], rank)
@@ -408,8 +424,69 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp conv_gpu_ok?(_i, _k, _out, _opts), do: false
 
+  # Non-canonical layout, but one we can rotate into place on-device. This is
+  # the conv BACKWARD case: `Nx.Defn.Grad` builds its backward convolutions with
+  # `conv_spec_transpose/1`, which swaps the first two axes, so every gradient
+  # conv arrives with non-identity permutations. Transposing around the native
+  # path costs three permuted copies and keeps the whole thing on the GPU;
+  # refusing it used to drop the entire backward pass onto
+  # `Nx.BinaryBackend.conv`, which dominated CNN training time.
+  #
+  # Bounded to rank <= 4 because that is what the transpose shader handles
+  # (rank 5 = 3 spatial dims still host-falls-back).
+  defp conv_gpu_permuted_ok?(%T{shape: ishape} = i, %T{shape: kshape} = k, out, opts) do
+    conv_gpu_core_ok?(i, k, out, opts) and
+      tuple_size(ishape) <= 4 and tuple_size(kshape) <= 4
+  end
+
+  defp conv_gpu_permuted_ok?(_i, _k, _out, _opts), do: false
+
   defp identity_perm?(nil, _rank), do: true
   defp identity_perm?(perm, rank), do: perm == Enum.to_list(0..(rank - 1)//1)
+
+  defp identity_axes(rank), do: Enum.to_list(0..(rank - 1)//1)
+
+  defp invert_perm(perm),
+    do: perm |> Enum.with_index() |> Enum.sort() |> Enum.map(&elem(&1, 1))
+
+  defp permute_shape(shape, perm),
+    do: perm |> Enum.map(&elem(shape, &1)) |> List.to_tuple()
+
+  # Transpose inputs into the native layout, run the native conv, rotate the
+  # result back. Mirrors Nx.BinaryBackend.conv/4's own handling: it transposes
+  # t/k by the raw input/kernel permutations, computes into a shape given by
+  # `out.shape` permuted by the raw output permutation, then transposes that
+  # result by the INVERSE of the raw output permutation.
+  defp permuted_gpu_conv(%T{shape: out_shape} = out, i, k, opts) do
+    rank = tuple_size(i.shape)
+    krank = tuple_size(k.shape)
+
+    inp_perm = opts[:input_permutation] || identity_axes(rank)
+    ker_perm = opts[:kernel_permutation] || identity_axes(krank)
+    out_perm = opts[:output_permutation] || identity_axes(rank)
+
+    i2 = Nx.transpose(i, axes: inp_perm)
+    k2 = Nx.transpose(k, axes: ker_perm)
+
+    canon_out = %{
+      out
+      | shape: permute_shape(out_shape, out_perm),
+        names: List.duplicate(nil, rank)
+    }
+
+    canon_opts =
+      opts
+      |> Keyword.put(:input_permutation, identity_axes(rank))
+      |> Keyword.put(:kernel_permutation, identity_axes(krank))
+      |> Keyword.put(:output_permutation, identity_axes(rank))
+
+    result =
+      canon_out
+      |> gpu_conv(i2, k2, canon_opts)
+      |> Nx.transpose(axes: invert_perm(out_perm))
+
+    %{out | data: result.data}
+  end
 
   defp gpu_conv(
          %T{type: type, shape: oshape} = out,
@@ -711,6 +788,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp transpose_spv({:f, 32}), do: @transpose_f32_spv
   defp transpose_spv(_), do: nil
 
+  # Generic rank<=4 permuted transpose. The rank-2/[1,0] shader above is a
+  # tiled special case and stays the fast path for matrices; this one handles
+  # every other permutation that used to host-fall-back — notably the
+  # first-two-axes swap Nx's conv gradient emits.
+  @transpose_nd_f64_spv Path.expand("../../priv/shaders/transpose_nd_f64.spv", __DIR__)
+  @transpose_nd_f32_spv Path.expand("../../priv/shaders/transpose_nd_f32.spv", __DIR__)
+
+  defp transpose_nd_spv({:f, 64}), do: @transpose_nd_f64_spv
+  defp transpose_nd_spv({:f, 32}), do: @transpose_nd_f32_spv
+  defp transpose_nd_spv(_), do: nil
+
   # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
   # The buffer might be physically larger than the new shape implies
   # if it came from an operation that allocated extra slack — that's
@@ -736,19 +824,53 @@ defmodule Nx.Vulkan.VulkanoBackend do
         axes
       ) do
     spv = transpose_spv(type)
+    nd_spv = transpose_nd_spv(type)
+    rank = tuple_size(in_shape)
 
-    if spv != nil and tuple_size(in_shape) == 2 and axes == [1, 0] do
-      m = elem(in_shape, 0)
-      n = elem(in_shape, 1)
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
+    cond do
+      spv != nil and rank == 2 and axes == [1, 0] ->
+        m = elem(in_shape, 0)
+        n = elem(in_shape, 1)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
 
-      :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, spv)
+        :ok = Nx.Vulkan.NativeV.transpose_2d(out_ref, a_ref, m, n, spv)
 
-      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
-    else
-      t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
-      host_result(out, Nx.transpose(t_bin, axes: axes))
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      nd_spv != nil and rank <= 4 ->
+        gpu_transpose_nd(out, tensor, axes, nd_spv)
+
+      true ->
+        t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
+        host_result(out, Nx.transpose(t_bin, axes: axes))
     end
+  end
+
+  # params: [rank, in[4], out[4], perm[4]] — shapes left-aligned, padded to 4.
+  defp gpu_transpose_nd(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+         axes,
+         spv
+       ) do
+    rank = tuple_size(in_shape)
+    n = Nx.size(in_shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(in_shape)) ++
+              pad4(Tuple.to_list(out_shape)) ++
+              pad4(axes),
+          into: <<>>,
+          do: <<v::signed-32-little>>
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+
+    :ok = Nx.Vulkan.NativeV.transpose_nd(out_ref, a_ref, params_ref, n, rank, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   # ---------------------------------------------------------------- host-fallback ops

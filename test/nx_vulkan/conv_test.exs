@@ -3,8 +3,10 @@ defmodule Nx.Vulkan.ConvTest do
   Native f64 convolution on the GPU (im2col + GEMM), verified against a
   BinaryBackend reference. Covers correctness across strides, padding,
   input/kernel dilation, multi-channel, batch and spatial ranks 1/2/3, asserts
-  the covered cases dispatch on the GPU, and checks that the unsupported cases
-  (feature groups, non-identity permutation) fall back but stay correct.
+  the covered cases dispatch on the GPU — including non-identity permutations,
+  which are transposed into the native layout on-device — and checks that the
+  still-unsupported cases (feature groups, spatial rank > 3) fall back but stay
+  correct.
   """
 
   use ExUnit.Case, async: false
@@ -71,10 +73,26 @@ defmodule Nx.Vulkan.ConvTest do
       assert max_abs_diff(got, ref) < 1.0e-10
     end
 
-    test "non-identity input permutation falls back but stays correct" do
-      # channels-last input {N, H, W, C}
+    test "non-identity input permutation stays on the GPU and is correct" do
+      # channels-last input {N, H, W, C}. The native shaders only run the
+      # canonical layout, so the backend transposes into it on-device rather
+      # than host-falling-back — see permuted_gpu_conv/4. This is what keeps
+      # conv's backward pass (whose permutations always swap the first two
+      # axes) on the GPU.
       {got, ref} = run({1, 5, 5, 3}, {4, 3, 3, 3}, input_permutation: [0, 3, 1, 2])
-      refute match?(%VulkanoBackend{}, got.data)
+      assert match?(%VulkanoBackend{}, got.data)
+      assert max_abs_diff(got, ref) < 1.0e-10
+    end
+
+    test "grad-shaped permutation (first two axes swapped) stays on the GPU" do
+      {got, ref} =
+        run({3, 2, 5, 5}, {3, 4, 3, 3},
+          input_permutation: [1, 0, 2, 3],
+          kernel_permutation: [1, 0, 2, 3],
+          output_permutation: [1, 0, 2, 3]
+        )
+
+      assert match?(%VulkanoBackend{}, got.data)
       assert max_abs_diff(got, ref) < 1.0e-10
     end
 

@@ -1,0 +1,61 @@
+#version 450
+
+// Generic permuted transpose for rank <= 4, f32.
+//
+// Replaces the rank-2/[1,0]-only `transpose_2d` for the general case: any
+// permutation of up to 4 axes stays on the GPU instead of host-falling-back.
+// This is what keeps conv's BACKWARD pass on-device — Nx's conv gradient emits
+// convolutions whose input/kernel/output permutations swap the first two axes
+// (`conv_spec_transpose`), and the conv GPU path can only run identity layouts,
+// so without this every backward conv round-tripped to Nx.BinaryBackend.
+//
+// Semantics match `Nx.transpose(t, axes: perm)`: output axis d is input axis
+// perm[d], i.e. out_shape[d] == in_shape[perm[d]].
+//
+// Params buffer: [rank, in[4], out[4], perm[4]] (shapes left-aligned, padded
+// to 4 with 1s / identity). One thread per OUTPUT element.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) readonly  buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ins[4];
+    uint outs[4];
+    uint perm[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        ins[i]  = uint(prm[1 + i]);
+        outs[i] = uint(prm[5 + i]);
+        perm[i] = uint(prm[9 + i]);
+    }
+
+    // Row-major strides of the INPUT tensor.
+    uint istride[4];
+    uint s = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        istride[d] = s;
+        s *= ins[d];
+    }
+
+    // Decompose the output index, then scatter each coordinate onto the input
+    // axis it came from.
+    uint idx = gid;
+    uint in_off = 0u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint coord = idx % outs[d];
+        idx = idx / outs[d];
+        in_off += coord * istride[perm[d]];
+    }
+
+    o[gid] = a[in_off];
+}
