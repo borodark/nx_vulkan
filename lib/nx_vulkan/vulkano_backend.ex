@@ -773,20 +773,62 @@ defmodule Nx.Vulkan.VulkanoBackend do
         match?(%__MODULE__{}, tensor.data) and
         match?({:ok, _}, classify_reduce_axes(in_shape, axes))
 
-    if fast_path do
-      %T{data: %__MODULE__{ref: a_ref}} = tensor
-      {:ok, {outer, reduce_size, inner}} = classify_reduce_axes(in_shape, axes)
-      n_out = max(byte_size_of(out_shape), 1)
-      out_bytes = n_out * element_bytes(type)
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+    cond do
+      fast_path ->
+        %T{data: %__MODULE__{ref: a_ref}} = tensor
+        {:ok, {outer, reduce_size, inner}} = classify_reduce_axes(in_shape, axes)
+        n_out = max(byte_size_of(out_shape), 1)
+        out_bytes = n_out * element_bytes(type)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
 
-      :ok =
-        Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)
+        :ok =
+          Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)
 
-      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
-    else
-      reduce_op_host_fallback(op_code, out, tensor, opts)
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      # A kept axis in the MIDDLE — the conv bias gradient is
+      # sum(axes: [0, 2, 3]) over {N, C, H, W}, keeping C. Those axes are
+      # neither a leading prefix nor a trailing suffix, so they do not map to
+      # the shader's contiguous (outer, reduce_size, inner) slabs and the whole
+      # reduction went to the host. Rotating the kept axes to the front makes
+      # it a trailing-suffix reduce, which the existing kernel already does —
+      # the same normalise-then-dispatch move conv and dot use, and cheap now
+      # that transpose is on the GPU for rank <= 4.
+      spv != nil and tensor.type == type and match?(%__MODULE__{}, tensor.data) and
+        tuple_size(in_shape) <= 4 ->
+        reduce_via_transpose(out, tensor, axes, op_code, spv)
+
+      true ->
+        reduce_op_host_fallback(op_code, out, tensor, opts)
     end
+  end
+
+  # Transpose kept-axes-first, then reduce the trailing block. `kept` stays in
+  # ascending order, which is the axis order Nx gives the output, so the result
+  # needs no further rearrangement.
+  defp reduce_via_transpose(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: in_shape} = tensor,
+         axes,
+         op_code,
+         spv
+       ) do
+    rank = tuple_size(in_shape)
+    dims = Tuple.to_list(in_shape)
+    reduced = Enum.sort(axes)
+    kept = Enum.to_list(0..(rank - 1)//1) -- reduced
+
+    outer = kept |> Enum.map(&Enum.at(dims, &1)) |> Enum.product()
+    reduce_size = reduced |> Enum.map(&Enum.at(dims, &1)) |> Enum.product()
+
+    %T{data: %__MODULE__{ref: a_ref}} = Nx.transpose(tensor, axes: kept ++ reduced)
+
+    n_out = max(byte_size_of(out_shape), 1)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_out * element_bytes(type))
+
+    :ok = Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, 1, op_code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   defp reduce_op_host_fallback(op_code, out, tensor, opts) do

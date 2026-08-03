@@ -207,6 +207,39 @@ defmodule Nx.Vulkan.FallbackTest do
       end
     end
 
+    test "reduce with a kept axis in the middle — the conv bias gradient" do
+      # sum(axes: [0, 2, 3]) over {N, C, H, W} keeps C, which is neither a
+      # leading prefix nor a trailing suffix, so it did not map to the reduce
+      # shader's contiguous (outer, reduce_size, inner) slabs. Rotating the
+      # kept axes to the front makes it a trailing-suffix reduce.
+      x = t({8, 4, 6, 6}, 1)
+
+      assert Fallback.count_total(fn -> Nx.sum(x, axes: [0, 2, 3]) end) == 0
+      assert Fallback.count_total(fn -> Nx.reduce_max(x, axes: [0, 2, 3]) end) == 0
+      assert Fallback.count_total(fn -> Nx.sum(t({4, 5, 6}, 1), axes: [0, 2]) end) == 0
+      assert Fallback.count_total(fn -> Nx.sum(t({4, 5, 6, 7}, 1), axes: [1, 3]) end) == 0
+    end
+
+    test "middle-axis reduce matches BinaryBackend" do
+      for {shape, axes} <- [{{8, 4, 6, 6}, [0, 2, 3]}, {{4, 5, 6}, [0, 2]}, {{4, 5, 6, 7}, [1, 3]}] do
+        v = t(shape, 2)
+        h = Nx.backend_copy(v, Nx.BinaryBackend)
+
+        for {name, f} <- [sum: &Nx.sum/2, reduce_max: &Nx.reduce_max/2, reduce_min: &Nx.reduce_min/2] do
+          d =
+            Nx.subtract(
+              f.(v, axes: axes) |> Nx.backend_copy(Nx.BinaryBackend),
+              f.(h, axes: axes)
+            )
+            |> Nx.abs()
+            |> Nx.reduce_max()
+            |> Nx.to_number()
+
+          assert d < 1.0e-9, "#{name} #{inspect(shape)} axes #{inspect(axes)} diverged by #{d}"
+        end
+      end
+    end
+
     test "conv forward" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)
