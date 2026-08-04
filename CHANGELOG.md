@@ -1,5 +1,90 @@
 # Changelog
 
+## Unreleased
+
+The backward-pass release. 0.2.0 shipped conv, the fusion compiler and native
+f32 — but a CNN *training* step still ran mostly on the CPU, and nothing in the
+suite could see it.
+
+### Fixed — the backward pass
+
+A host fallback returns a bit-identical result, because the fallback *is* the
+`Nx.BinaryBackend` reference every test compares against. So no assertion on
+values can detect that an op silently left the GPU, and one had: conv's entire
+backward pass ran in pure Elixir. Nx.Defn.Grad (hidden, so not linked) emits
+ops nobody writes by
+hand, and every GPU fast path had been gated on the shapes a *forward* pass
+produces.
+
+Eight ops moved back on-device. Seven were narrow gates refusing work the
+existing shaders could already do; only `reverse` and `broadcast` needed new
+kernels.
+
+- **conv** — accepts non-identity input/kernel/output permutations (the
+  gradient swaps the first two axes) by rotating into the native layout
+  on-device, and coerces a mismatched operand dtype instead of refusing it.
+- **dot** — accepts any rank-2 contraction orientation. `y = x·W` contracts
+  `[1]/[0]` and always hit the shader; its gradients arrive as `[1]/[1]` and
+  `[0]/[0]`, so **every dense layer** was paying two host matmuls per step.
+- **reduce** — accepts a kept axis in the middle (`sum(axes: [0,2,3])`, the
+  conv bias gradient) by rotating the kept axes to the front.
+- **max/min pooling**, both directions. Forward is one thread per output;
+  backward is one thread per *input*, which is what avoids float atomics and
+  is why it requires non-overlapping windows. Ties go to the **last** maximum
+  in row-major order, verified against `BinaryBackend` — `>` instead of `>=`
+  is correct on random data and wrong on every relu-zero tie.
+- **reverse** and **broadcast** — new index-remap shaders (rank ≤ 4). Both had
+  no shader at all; `broadcast` produced the `{:s, 32}` zeros that in turn made
+  `select` fall back.
+- **integer literals** — `coerce_to/2` now converts rank-0 integer constants
+  and, via new `cast_s32_to_f32/f64` shaders, integer tensors of any shape. Nx
+  materialises literals as `{:s, 32}`: relu's `max(x, 0)`, a mean's divisor,
+  `select`'s zeros and pooling's `init_value` were each dragging a whole tensor
+  to the CPU behind a four-byte constant.
+
+A CNN training step now performs exactly **one** host fallback: `pow` in f64,
+which GLSL.std.450 does not provide and which should stay a fallback rather
+than silently boundary-cast through f32.
+
+### Added — verification that can see this class of bug
+
+- **`Nx.Vulkan.Fallback`** — counts host fallbacks per process, attributing
+  each to the callback at compile time. `assert Fallback.count_total(fun) == 0`
+  turns an invisible performance cliff into a test failure. Off by default.
+- **`test/nx_vulkan/grad_test.exs`** — gradient parity against
+  `BinaryBackend`. The suite previously had **no** gradient tests at all, which
+  is how the conv regression survived; "autograd for free" was the headline
+  claim of the README and nothing exercised it.
+- **`docs/BACKEND_VERIFICATION_GAP.md`** — what the Nx ecosystem does and does
+  not verify about a third-party backend. `doctest Nx` contains zero gradient
+  examples, `deps/nx` ships no `test/`, and upstream's own
+  `Nx.Helpers.check_grads!` is behind the packaging wall.
+
+### Performance
+
+One `value_and_grad` step, batch 32, vs `Nx.BinaryBackend`, losses
+bit-identical:
+
+| model | RTX 3060 Ti | GT 650M (2012) | GT 750M (2013) |
+|---|---|---|---|
+| conv→conv→dense | 31.0 ms (436×) | 35.1 ms (477×) | 25.4 ms (440×) |
+| LeNet-style | 84.1 ms (363×) | 77.6 ms (434×) | 64.3 ms (334×) |
+
+The LeNet step was **20.9 s** before this work. Absolute GPU times cluster in
+25–85 ms across cards spanning 2012–2021 — at this size the work is
+dispatch-bound, not compute-bound.
+
+### Notes
+
+- `standard_deviation/2` and `covariance/3` joined the doctest `@rounding`
+  bucket: both used to host-fall-back and match exactly, and now run natively
+  1 ULP away. Excepting a function drops all of its doctests (863 → 851), so
+  the bucket is worth watching rather than growing silently.
+- Nx.BinaryBackend's `window_scatter_max` round-trips f64 through f32. For f64
+  pooling gradients this backend is now *more* accurate than the reference it
+  is tested against, so the pooling test asserts values are exact elements of
+  the source rather than agreement with the host.
+
 ## 0.2.0 (2026-08-02)
 
 The fusion compiler release. First release since 0.1.0.

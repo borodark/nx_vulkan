@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-08-04T12:49:41.740849Z",
+  "otp": "27",
+  "device": "NVIDIA GeForce RTX 3060 Ti",
+  "hostname": "super-io",
+  "results": [
+    {
+      "op": "matmul 128x128x128",
+      "on_gpu": true,
+      "f64_ms": 0.835,
+      "f32_ms": 1.386,
+      "speedup": 0.6
+    },
+    {
+      "op": "matmul 256x256x256",
+      "on_gpu": true,
+      "f64_ms": 1.338,
+      "f32_ms": 1.634,
+      "speedup": 0.82
+    },
+    {
+      "op": "matmul 512x512x512",
+      "on_gpu": true,
+      "f64_ms": 2.896,
+      "f32_ms": 4.753,
+      "speedup": 0.61
+    },
+    {
+      "op": "conv 8->16ch 24sq",
+      "on_gpu": true,
+      "f64_ms": 0.492,
+      "f32_ms": 0.603,
+      "speedup": 0.82
+    },
+    {
+      "op": "conv 16->32ch 32sq",
+      "on_gpu": true,
+      "f64_ms": 1.105,
+      "f32_ms": 0.651,
+      "speedup": 1.7
+    },
+    {
+      "op": "elementwise add 1M",
+      "on_gpu": true,
+      "f64_ms": 3.969,
+      "f32_ms": 1.665,
+      "speedup": 2.38
+    },
+    {
+      "op": "elementwise tanh 1M",
+      "on_gpu": true,
+      "f64_ms": 3.119,
+      "f32_ms": 1.516,
+      "speedup": 2.06
+    },
+    {
+      "op": "sum 1M (full)",
+      "on_gpu": true,
+      "f64_ms": 133.137,
+      "f32_ms": 67.463,
+      "speedup": 1.97
+    },
+    {
+      "op": "sum 1024x1024 axis0",
+      "on_gpu": true,
+      "f64_ms": 0.404,
+      "f32_ms": 0.338,
+      "speedup": 1.2
+    }
+  ],
+  "commit": "c622757",
+  "device_type": "DiscreteGpu",
+  "f32_gemm_accumulator": "f64"
+}

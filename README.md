@@ -29,17 +29,24 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
 ## What works today
 
 - **A native compute op set** — elementwise binary/unary, reductions
-  (sum / max / min along any axis, leading, or trailing),
-  reshape / squeeze / transpose-2D, matmul, conv (im2col + GEMM), FFT,
-  select / compare / cast / broadcast.
+  (sum / max / min over ANY axis set, including a kept axis in the middle),
+  reshape / squeeze, transpose (any permutation, rank <= 4), matmul (any
+  rank-2 contraction orientation), conv (im2col + GEMM, any layout
+  permutation), FFT, select / compare / cast / broadcast / reverse, and
+  max/min pooling in both directions.
   **Native f32 and f64** — the hot ops (elementwise, matmul, conv,
   reduce, transpose) dtype-dispatch native f32 shaders as well as f64;
   f64 is the default accumulator policy, f32 wins on bandwidth-bound ops.
 - **Whole-graph fusion** via `Nx.Vulkan.Compiler`, an `Nx.Defn.Compiler`
   — see [The `Nx.Defn` fusion compiler](#the-nxdefn-fusion-compiler-thrust-3).
-- **Host fallback for the long tail** — slice, `as_type`, general
-  `Nx.dot` axes, SVD/QR/solve/cholesky from `Nx.LinAlg` (via
-  `Nx.Block.LinAlg`). Slow but correct.
+- **Host fallback for the long tail** — sort/argsort, SVD/QR/solve/cholesky
+  from `Nx.LinAlg` (via `Nx.Block.LinAlg`), rank-5+ shapes, and `pow` in f64
+  (GLSL.std.450 has no f64 `pow`). Slow but correct.
+- **A fallback counter** (`Nx.Vulkan.Fallback`) — a host fallback returns a
+  bit-identical result, so no assertion on values can detect one. `count/1`
+  makes it countable, and the suite asserts *zero* fallbacks for ops that must
+  stay on-device. A full CNN training step now performs exactly **one**: `pow`
+  in f64.
 - **`Nx.Defn.grad` autograd**, for free — see [The autograd insight](#the-autograd-insight).
 - **Axon training step** end-to-end, gradient sum agrees to 1e-8
   vs `BinaryBackend` reference.
@@ -102,9 +109,12 @@ compilation now present in the one place a Vulkan backend can offer it —
 on any GPU with a driver, CUDA or not.
 
 - **Correctness first.** Every fused result is checked exact against
-  `Nx.BinaryBackend`. The suite — **863 doctests, 361 tests, 0 failures**
+  `Nx.BinaryBackend`. The suite — **851 doctests, 415 tests, 0 failures**
   — is green on both a 2012 Kepler (GT 650M, FreeBSD) and a 2021 Ampere
-  (RTX 3060 Ti, Linux), with the f64 fused path active on both.
+  (RTX 3060 Ti, Linux), with the f64 fused path active on both. Gradient
+  parity and host-fallback counts are asserted, not assumed: `Nx.Defn.grad`
+  is compared against `BinaryBackend` op by op, and a CNN training step is
+  asserted to leave the GPU exactly once.
 - **Fusion's win is structural.** It removes dispatches and intermediate
   buffers and keeps the interpreter out of the loop — not faster kernels.
   On matmul/conv-dominated graphs the wall-clock gain over the
@@ -136,7 +146,7 @@ shader → NIF → Nx playbook and the hard-won parity/dispatch gotchas.
 | **macOS + Apple Silicon** | ✗ | ✓ canonical | ✓ via MoltenVK |
 | **FreeBSD + NVIDIA** | ✗ | ✗ | **✓ only path** |
 | **Windows / WSL2** | partial via TF | ✗ | ✓ (Vulkan ships on Windows) |
-| **Op coverage** | full Nx surface (~200) | full Nx surface | 24 native, rest via host fallback |
+| **Op coverage** | full Nx surface (~200) | full Nx surface | native core (elementwise, matmul, conv, reduce, pooling, layout ops), rest via host fallback |
 | **`Nx.Defn` fusion compiler** | ✓ XLA whole-graph | ✓ MLX | **✓ multi-stage split** (elementwise/reduce/dot/conv/transpose, f32+f64) |
 | **`Nx.Defn.grad` (autograd)** | full | full | **✓ free** (graph transformation) |
 | **fp64 compute** | full | none (Metal limit) | ✓ native f32 **and** f64 (binary/unary/reduce/matmul/conv/transpose) |
@@ -157,9 +167,48 @@ Axon training step (Dense → sigmoid → Dense → MSE →
 `Nx.Defn.value_and_grad`) on `Nx.Vulkan.VulkanoBackend`, with
 gradient sum agreeing to 1e-8 against the `BinaryBackend` reference.
 
-## Benchmarks (May 2026)
+## Benchmarks
 
-Square matmul, milliseconds per dispatch, median of 50–200 iterations:
+### CNN training (August 2026)
+
+One `value_and_grad` step, batch 32, versus `Nx.BinaryBackend`. Losses are
+bit-identical to the host on every row.
+
+| model | super-io (RTX 3060 Ti) | mac-247 (GT 650M, 2012) | mac-248 (GT 750M, 2013) |
+|---|---|---|---|
+| conv→conv→dense, strided | **31.0 ms** (436×) | 35.1 ms (477×) | **25.4 ms** (440×) |
+| LeNet-style, max-pooled | **84.1 ms** (363×) | 77.6 ms (434×) | **64.3 ms** (334×) |
+| inference, batch 256 | 17.5 ms (1107×) | 71.1 ms (274×) | 31.8 ms (407×) |
+
+The LeNet step was **20.9 s** before the backward pass stopped falling back to
+the host — the same measurement, same box. Read the absolute times rather than
+the multipliers: a speedup here mostly measures how slow pure-Elixir
+`BinaryBackend` is, which varies by host CPU. The absolute GPU times cluster in
+25–85 ms across three cards spanning 2012–2021, because at this model size the
+work is dispatch-bound rather than compute-bound — which is why a 2012 laptop
+GPU is competitive with a 2021 desktop one.
+
+### f32 vs f64 per op
+
+`sh scripts/race.sh` — f32 speedup over f64, same shapes, all on-GPU:
+
+| op | super-io | mac-247 | mac-248 |
+|---|---|---|---|
+| matmul 512³ | 0.61× | 0.47× | 0.45× |
+| conv 16→32ch | 1.7× | 1.21× | 3.48× |
+| elementwise add 1M | 2.38× | 4.3× | **7.01×** |
+| sum 1M | 1.97× | 1.9× | 1.9× |
+
+**f32 matmul is slower than f64, and that is the accumulator policy working as
+designed**: f32 matmul defaults to `matmul_f32_f64acc.spv`, paying an f32→f64
+conversion on top of the same f64 MAC rate. f32 wins where it is meant to —
+bandwidth-bound elementwise and reductions. Switch with
+`Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)` if you want speed
+over the f64-accumulated reference.
+
+### Square matmul (May 2026)
+
+Milliseconds per dispatch, median of 50–200 iterations:
 
 | size | bin (super-io) | bin (mac-247) | vulkano (super-io) | vulkano (mac-247) |
 |---|---|---|---|---|
@@ -168,9 +217,7 @@ Square matmul, milliseconds per dispatch, median of 50–200 iterations:
 | 256×256 | 20,097 | 13,891 | 149.19 | **136.10** |
 | 1024×1024 | n/a (hours) | n/a (hours) | 2,323 | 2,843 |
 
-The Vulkan path beats `BinaryBackend` by 92–135× at 256×256 on the
-GT 650M. The GPU is from 2013; the win is moving the loop off the
-BEAM scheduler. Full bench: [`examples/full_bench.exs`](examples/full_bench.exs).
+Full bench: [`examples/full_bench.exs`](examples/full_bench.exs).
 
 ## Quickstart
 
