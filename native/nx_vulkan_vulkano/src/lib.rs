@@ -1936,6 +1936,109 @@ fn transpose_2d<'a>(
     }
 }
 
+/// Scatter source values to each window's argmax (pooling backward), rank <= 4,
+/// NON-OVERLAPPING windows only. Bindings: a, src, init, out, params at 0..4.
+/// Push: {n, rank}. Params: [rank, in[4], win_grid[4], win[4], strides[4]].
+/// One thread per INPUT element — that inversion is what avoids float atomics,
+/// since each element belongs to at most one window.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn window_scatter_max<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    src_ref: ResourceArc<VulkanoTensor>,
+    init_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, src_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, init_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(4, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushTransposeNd { n, rank },
+            [n.div_ceil(256), 1, 1],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// Windowed max/min, rank <= 4. Bindings: a, out, params at 0..2.
+/// Push: {n, rank}. Params: [rank, in[4], out[4], win[4], strides[4]] as i32.
+/// `op_code` spec constant: 0=max, 1=min. One thread per output element, so
+/// overlapping windows need no coordination.
+#[rustler::nif(schedule = "DirtyIo")]
+fn window_reduce<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        run_single_dispatch(
+            context,
+            &cached,
+            set,
+            PushTransposeNd { n, rank },
+            [n.div_ceil(256), 1, 1],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
 struct PushBroadcastNd {

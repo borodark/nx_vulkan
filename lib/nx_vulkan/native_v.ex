@@ -226,6 +226,28 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Windowed max/min, rank <= 4. `op_code`: 0=max, 1=min.
+
+  Buffers: a, out, params — an int32 buffer laid out as
+  `[rank, in[4], out[4], win[4], strides[4]]`. One thread per output element;
+  padding and window dilation are not handled and must be filtered by the
+  caller.
+  """
+  def window_reduce(_out, _a, _params, _n, _rank, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Scatter source values to each window's argmax (pooling backward), rank <= 4,
+  NON-OVERLAPPING windows only.
+
+  Buffers: a (original input), src (one value per window), init (1 element),
+  out, params — `[rank, in[4], win_grid[4], win[4], strides[4]]`. Ties go to the
+  LAST maximum in row-major order, matching `Nx.BinaryBackend`.
+  """
+  def window_scatter_max(_out, _a, _src, _init, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   2D matmul. C = A · B where A is M×K row-major, B is K×N row-major,
   C is M×N row-major. All f32. Buffers: a (m*k*4), b (k*n*4), out
   (m*n*4).

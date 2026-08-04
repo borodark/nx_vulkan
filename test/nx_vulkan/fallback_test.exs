@@ -240,6 +240,78 @@ defmodule Nx.Vulkan.FallbackTest do
       end
     end
 
+    test "pooling — forward and backward stay on the GPU" do
+      x = t({2, 3, 6, 6}, 1)
+      w = {1, 1, 2, 2}
+      st = [1, 1, 2, 2]
+
+      assert Fallback.count_total(fn -> Nx.window_max(x, w, strides: st) end) == 0
+
+      src = t({2, 3, 3, 3}, 2)
+
+      # INTEGER init_value, exactly as Nx's gradient passes it. My first
+      # parity test used Nx.tensor(0.0) — a float — and passed while the real
+      # path still fell back on {:s, 32}. Six ops in this backend have now
+      # been blocked by an integer literal, so the test must use the untidy
+      # value the real caller does.
+      iv = Nx.tensor(0, backend: VulkanoBackend)
+      assert Fallback.count_total(fn -> Nx.window_scatter_max(x, src, iv, w, strides: st) end) == 0
+
+      # Correctness is checked against the SOURCE, not against BinaryBackend.
+      #
+      # Nx.BinaryBackend.window_scatter_max/5 round-trips f64 values through an
+      # f32 intermediate — for src[0] = 2.4715269558223154 it returns
+      # 2.471526861190796. The shader copies the f64 value exactly, so a
+      # bit-equality assertion against the host reference fails on the
+      # reference's own precision loss. (window_scatter_max is already listed
+      # as a real open bug in nx_doctest_test.exs's @backlog.)
+      #
+      # Every scattered value must therefore be either init (0.0) or an EXACT
+      # element of src — which is a stronger check than agreeing with a
+      # degraded reference.
+      got = Nx.window_scatter_max(x, src, iv, w, strides: st) |> Nx.backend_copy(Nx.BinaryBackend)
+      src_vals = src |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_flat_list() |> MapSet.new()
+
+      for v <- Nx.to_flat_list(got) do
+        assert v == 0.0 or MapSet.member?(src_vals, v),
+               "scattered value #{v} is neither init nor an exact src element"
+      end
+
+      # ...and exactly one element per window receives a source value.
+      nonzero = Nx.to_flat_list(got) |> Enum.count(&(&1 != 0.0))
+      assert nonzero == Nx.size({2, 3, 3, 3}), "expected one scatter per window, got #{nonzero}"
+    end
+
+    test "pooling backward is exact on TIES — the case random data misses" do
+      # remainder(3.0) makes nearly every window contain duplicates, and some
+      # entirely uniform. Nx gives the gradient to the LAST maximum in
+      # row-major order (verified against BinaryBackend directly), so the
+      # shader scans with `>=`. With `>` this passes on random data and is
+      # wrong wherever values repeat — and a relu's output is full of exact
+      # ties at zero.
+      for {shape, win, st} <- [{{2, 3, 6, 6}, {1, 1, 2, 2}, [1, 1, 2, 2]}, {{4, 6}, {2, 3}, [2, 3]}] do
+        h = Nx.iota(shape, type: {:f, 64}) |> Nx.remainder(3.0)
+        wshape = Nx.shape(Nx.window_max(h, win, strides: st))
+        src_t = Nx.iota(wshape, type: {:f, 64}) |> Nx.add(1.0)
+        iv = Nx.tensor(0.0, type: {:f, 64})
+
+        want = Nx.window_scatter_max(h, src_t, iv, win, strides: st)
+
+        got =
+          Nx.window_scatter_max(
+            Nx.backend_transfer(h, VulkanoBackend),
+            Nx.backend_transfer(src_t, VulkanoBackend),
+            Nx.backend_transfer(iv, VulkanoBackend),
+            win,
+            strides: st
+          )
+          |> Nx.backend_transfer(Nx.BinaryBackend)
+
+        d = Nx.subtract(want, got) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+        assert d == 0.0, "tie-break diverged on #{inspect(shape)} by #{d}"
+      end
+    end
+
     test "conv forward" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)
@@ -314,14 +386,20 @@ defmodule Nx.Vulkan.FallbackTest do
   end
 
   describe "known fallbacks — pinned so promoting one is noticed" do
-    test "window_max/4 and window_scatter_max — max-pooling, forward and backward" do
-      x = t({1, 2, 4, 4}, 1)
+    test "OVERLAPPING pooling backward still falls back" do
+      # One thread per input element is what avoids float atomics, and that
+      # only holds when windows do not overlap. stride < window would need
+      # GL_EXT_shader_atomic_float, which the Kepler fleet does not guarantee.
+      h = t({1, 1, 5, 5}, 1)
+      src_t = t({1, 1, 4, 4}, 2)
+      iv = Nx.tensor(0.0, type: {:f, 64}, backend: VulkanoBackend)
 
       {_r, counts} =
-        Fallback.count(fn -> Nx.window_max(x, {1, 1, 2, 2}, strides: [1, 1, 2, 2]) end)
+        Fallback.count(fn ->
+          Nx.window_scatter_max(h, src_t, iv, {1, 1, 2, 2}, strides: [1, 1, 1, 1])
+        end)
 
-      assert counts == %{{:window_max, 4} => 1},
-             "window_max moved on-device — promote it out of this test"
+      assert counts == %{{:window_scatter_max, 6} => 1}
     end
 
     test "sort/argsort" do

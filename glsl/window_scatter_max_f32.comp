@@ -1,0 +1,116 @@
+#version 450
+
+// Scatter source values to each window's argmax — pooling's BACKWARD pass —
+// for rank <= 4, f32, NON-OVERLAPPING windows only.
+//
+// One thread per INPUT element, not per window. That inversion is what avoids
+// atomics: with stride >= window in every dimension each input element belongs
+// to at most one window, so exactly one thread writes each output slot. The
+// backend refuses overlapping windows (which would need float atomics, not
+// guaranteed on these devices) and host-falls-back instead.
+//
+// TIE-BREAKING IS LOAD-BEARING. When several elements in a window share the
+// max, Nx.BinaryBackend gives the gradient to the LAST one in row-major order
+// — verified directly against it, including 2x2 windows that are entirely
+// uniform. So the scan below uses `>=`, not `>`. With `>` this shader is
+// correct on random data and wrong wherever values repeat, which in a real CNN
+// is not exotic: relu outputs are full of exact ties at zero.
+//
+// Params buffer: [rank, in[4], win_grid[4], win[4], strides[4]] where win_grid
+// is the source's shape (one element per window). Bindings: a (the original
+// input, to locate the max), src (values to scatter), init (1 element), out.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) readonly  buffer S { float src[]; };
+layout(std430, binding = 2) readonly  buffer I { float init[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly  buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ins[4];
+    uint grid[4];
+    uint win[4];
+    uint str[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        ins[i]  = uint(prm[1 + i]);
+        grid[i] = uint(prm[5 + i]);
+        win[i]  = uint(prm[9 + i]);
+        str[i]  = uint(prm[13 + i]);
+    }
+
+    // This element's coordinates.
+    uint ic[4];
+    uint idx = gid;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        ic[d] = idx % ins[d];
+        idx = idx / ins[d];
+    }
+
+    uint istride[4];
+    uint s = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        istride[d] = s;
+        s *= ins[d];
+    }
+
+    // Which window covers it, if any. Non-overlapping means the window index is
+    // coord / stride and the offset within the window is coord % stride; an
+    // offset at or past the window size falls in the gap between windows.
+    uint wc[4];
+    bool covered = true;
+    for (uint d = 0u; d < p.rank; ++d) {
+        wc[d] = ic[d] / str[d];
+        uint off = ic[d] % str[d];
+        if (off >= win[d] || wc[d] >= grid[d]) covered = false;
+    }
+
+    if (!covered) {
+        o[gid] = init[0];
+        return;
+    }
+
+    // Scan this element's window in row-major order, keeping the LAST maximum.
+    uint total = 1u;
+    for (uint d = 0u; d < p.rank; ++d) total *= win[d];
+
+    float best = 0.0;
+    uint best_off = 0u;
+    for (uint w = 0u; w < total; ++w) {
+        uint rem = w;
+        uint off = 0u;
+        for (int d = int(p.rank) - 1; d >= 0; --d) {
+            uint k = rem % win[d];
+            rem = rem / win[d];
+            off += (wc[d] * str[d] + k) * istride[d];
+        }
+
+        float v = a[off];
+        if (w == 0u || v >= best) {   // >= : last max wins, matching Nx
+            best = v;
+            best_off = off;
+        }
+    }
+
+    if (best_off == gid) {
+        // Flat index of this window in the source grid.
+        uint sidx = 0u;
+        for (uint d = 0u; d < p.rank; ++d) {
+            uint stride_d = 1u;
+            for (uint e = d + 1u; e < p.rank; ++e) stride_d *= grid[e];
+            sidx += wc[d] * stride_d;
+        }
+        o[gid] = src[sidx];
+    } else {
+        o[gid] = init[0];
+    }
+}

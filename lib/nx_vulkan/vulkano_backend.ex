@@ -1709,18 +1709,78 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
+  @window_reduce_f64_spv Path.expand("../../priv/shaders/window_reduce_f64.spv", __DIR__)
+  @window_reduce_f32_spv Path.expand("../../priv/shaders/window_reduce_f32.spv", __DIR__)
+
+  defp window_reduce_spv({:f, 64}), do: @window_reduce_f64_spv
+  defp window_reduce_spv({:f, 32}), do: @window_reduce_f32_spv
+  defp window_reduce_spv(_), do: nil
+
   @impl true
   def window_max(out, tensor, dimensions, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.window_max(t_bin, dimensions, opts)
-    host_result(out, result)
+    window_reduce_op(out, tensor, dimensions, opts, 0, &Nx.window_max/3)
   end
 
   @impl true
   def window_min(out, tensor, dimensions, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.window_min(t_bin, dimensions, opts)
-    host_result(out, result)
+    window_reduce_op(out, tensor, dimensions, opts, 1, &Nx.window_min/3)
+  end
+
+  # Pooling's forward pass. The GPU path covers the standard case — rank <= 4,
+  # no padding, no window dilation — which is what Axon's max_pool/avg_pool
+  # emit. Padded or dilated windows still host-fall-back; the shader indexes
+  # straight into the source and has no notion of an out-of-bounds element.
+  defp window_reduce_op(%T{type: type} = out, tensor, dimensions, opts, op_code, host_fun) do
+    t = ensure_on_backend(tensor)
+    spv = window_reduce_spv(type)
+    rank = tuple_size(t.shape)
+    strides = Keyword.get(opts, :strides) || List.duplicate(1, rank)
+    padding = Keyword.get(opts, :padding) || :valid
+    dilations = Keyword.get(opts, :window_dilations) || List.duplicate(1, rank)
+
+    if spv != nil and rank >= 1 and rank <= 4 and match?(%__MODULE__{}, t.data) and
+         t.type == type and no_padding?(padding) and Enum.all?(dilations, &(&1 == 1)) do
+      gpu_window_reduce(out, t, dimensions, strides, op_code, spv)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      host_result(out, host_fun.(t_bin, dimensions, opts))
+    end
+  end
+
+  defp no_padding?(:valid), do: true
+  defp no_padding?(list) when is_list(list), do: Enum.all?(list, &(&1 == {0, 0}))
+  defp no_padding?(_), do: false
+
+  # params: [rank, in[4], out[4], win[4], strides[4]]
+  defp gpu_window_reduce(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+         dimensions,
+         strides,
+         op_code,
+         spv
+       ) do
+    rank = tuple_size(in_shape)
+    n = Nx.size(out_shape)
+    win = if is_tuple(dimensions), do: Tuple.to_list(dimensions), else: dimensions
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(in_shape)) ++
+              pad4(Tuple.to_list(out_shape)) ++
+              pad4(win) ++
+              pad4(strides),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+
+    :ok = Nx.Vulkan.NativeV.window_reduce(out_ref, a_ref, params_ref, n, rank, op_code, spv)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   @impl true
@@ -1731,13 +1791,90 @@ defmodule Nx.Vulkan.VulkanoBackend do
     host_result(out, result)
   end
 
+  @scatter_max_f64_spv Path.expand("../../priv/shaders/window_scatter_max_f64.spv", __DIR__)
+  @scatter_max_f32_spv Path.expand("../../priv/shaders/window_scatter_max_f32.spv", __DIR__)
+
+  defp scatter_max_spv({:f, 64}), do: @scatter_max_f64_spv
+  defp scatter_max_spv({:f, 32}), do: @scatter_max_f32_spv
+  defp scatter_max_spv(_), do: nil
+
   @impl true
-  def window_scatter_max(out, tensor, source, init_value, dimensions, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    s_bin = Nx.backend_transfer(ensure_on_backend(source), Nx.BinaryBackend)
-    iv_bin = Nx.backend_transfer(ensure_on_backend(init_value), Nx.BinaryBackend)
-    result = with_binary_backend(fn -> Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts) end)
-    host_result(out, result)
+  def window_scatter_max(%T{type: type} = out, tensor, source, init_value, dimensions, opts) do
+    t = ensure_on_backend(tensor) |> coerce_operand(type)
+    # Nx hands init_value in as an {:s, 32} literal — the sixth op in this
+    # backend to be blocked by an integer constant, so coerce rather than
+    # demand an exact type match.
+    src = ensure_on_backend(source) |> coerce_operand(type)
+    iv = ensure_on_backend(init_value) |> coerce_operand(type)
+    spv = scatter_max_spv(type)
+    rank = tuple_size(t.shape)
+    win = if is_tuple(dimensions), do: Tuple.to_list(dimensions), else: dimensions
+    strides = Keyword.get(opts, :strides) || List.duplicate(1, rank)
+    padding = Keyword.get(opts, :padding) || :valid
+
+    # Non-overlapping only: the shader runs one thread per INPUT element, which
+    # is what lets it write each output slot exactly once without float atomics
+    # (GL_EXT_shader_atomic_float is not guaranteed on the Kepler fleet).
+    # Overlapping windows, padding, and non-f32/f64 stay on the host.
+    if spv != nil and rank >= 1 and rank <= 4 and
+         match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, src.data) and
+         match?(%__MODULE__{}, iv.data) and
+         t.type == type and src.type == type and iv.type == type and
+         no_padding?(padding) and
+         Enum.zip(strides, win) |> Enum.all?(fn {st, w} -> st >= w end) do
+      gpu_window_scatter_max(out, t, src, iv, win, strides, spv)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      s_bin = Nx.backend_transfer(src, Nx.BinaryBackend)
+      iv_bin = Nx.backend_transfer(iv, Nx.BinaryBackend)
+
+      host_result(
+        out,
+        with_binary_backend(fn -> Nx.window_scatter_max(t_bin, s_bin, iv_bin, dimensions, opts) end)
+      )
+    end
+  end
+
+  # params: [rank, in[4], win_grid[4], win[4], strides[4]]
+  defp gpu_window_scatter_max(
+         %T{shape: out_shape, type: type} = out,
+         %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
+         %T{shape: src_shape, data: %__MODULE__{ref: src_ref}},
+         %T{data: %__MODULE__{ref: iv_ref}},
+         win,
+         strides,
+         spv
+       ) do
+    rank = tuple_size(in_shape)
+    n = Nx.size(in_shape)
+
+    params =
+      for v <-
+            [rank] ++
+              pad4(Tuple.to_list(in_shape)) ++
+              pad4(Tuple.to_list(src_shape)) ++
+              pad4(win) ++
+              pad4(strides),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * element_bytes(type))
+
+    :ok =
+      Nx.Vulkan.NativeV.window_scatter_max(
+        out_ref,
+        a_ref,
+        src_ref,
+        iv_ref,
+        params_ref,
+        n,
+        rank,
+        spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   @impl true
