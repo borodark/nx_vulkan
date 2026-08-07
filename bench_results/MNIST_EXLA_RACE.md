@@ -65,21 +65,63 @@ Anyone reading the first two rows and concluding "we need more fusion" would
 build the wrong thing. The work that would close this gap is fewer, larger
 dispatches and a better GEMM — not a broader fusion pass.
 
-## Finding 3 — the comparison does not exist for conv
+## Finding 3 — CORRECTED: EXLA runs conv fine; one narrow graph fails
 
-The same race on a strided-conv CNN could not be run: **EXLA failed to compile
-it**, with
+**An earlier version of this file said the conv comparison "does not exist"
+because EXLA "failed to compile it". That was wrong, and wrong in the direction
+that flatters this project.** It was written from a single failing run without
+isolating the cause. Isolating it (17 variants) shows EXLA compiles and trains
+convolutional models normally.
 
-```
-Failed to analyze the computation (Failed to compute symbolic tile for
- (d0, d1, d2, d3) -> (d2, (d1 * 28 + d0) floordiv 49, ...)
-```
+The failure needs **three conditions at once**, and is in the GRADIENT only:
 
-identically for a hand-written `Nx.conv` graph and for Axon's `Axon.conv`, so
-it is not an artifact of how the model was written. The environment was fully
-working at that point — NIF loaded, CUDA and nvshmem resolved. Vulkan ran the
-same CNN in **29.6 ms** on this host, and on the two FreeBSD Keplers where EXLA
-cannot be installed at all.
+| variant | forward | gradient |
+|---|---|---|
+| 2 conv, stride 2, `channels: :first` | OK | **FAIL** |
+| 2 conv, stride 1, `channels: :first` | OK | OK |
+| 2 conv, stride 2, `channels: :last` | OK | OK |
+| 2 conv, stride 1, `channels: :last` | OK | OK |
+| 1 conv, any stride, either layout | OK | OK |
+
+So: **two stacked convs + stride 2 + `channels: :first`, backward pass.** Any
+one relaxation compiles. The loss function is irrelevant — it fails identically
+with softmax+cross-entropy, plain cross-entropy, and `Nx.sum`.
+
+`channels: :last` is **Axon's default**, so a user following Axon's own guides
+would not hit this. The original race used `:first` because MNIST is naturally
+NCHW and because this project's notebook documents `:first` as required here —
+a configuration choice from *this* side meeting an XLA edge, not an EXLA
+weakness at conv.
+
+Worth noting the symmetry, since it is this project's own recent history:
+**both backends' conv problems were in the gradient, not the forward pass.**
+nx_vulkan's GPU gate rejected the permuted convs `Nx.Defn.Grad` emits (fixed in
+`fb6221d`); XLA's symbolic tiler cannot tile one particular gradient conv shape.
+Autodiff generates graphs that neither forward path anticipated.
+
+## The conv comparison, which does exist
+
+Same harness, 2× strided conv → flatten → dense softmax, `channels: :last`,
+cross-entropy, batch 32:
+
+| backend / compiler | ms | loss |
+|---|---:|---|
+| BinaryBackend / `Nx.Defn.Evaluator` | 14658.032 | 2.470658779144287 |
+| Vulkan / `Nx.Defn.Evaluator` (eager) | 41.325 | 2.470658779144287 |
+| Vulkan / `Nx.Vulkan.Compiler` (fused) | 42.222 | 2.470658779144287 |
+| EXLA / `EXLA` (CUDA) | 1.448 | 2.4706473350524902 |
+
+| ratio | |
+|---|---:|
+| vulkan eager vs BinaryBackend | 354.7× |
+| fused vs eager | 0.98× |
+| exla vs vulkan eager | 28.54× |
+| exla vs vulkan fused | 29.16× |
+
+The conv graph does not rescue fusion either — 0.98×, neutral rather than the
+0.76× regression on the MLP, but still not a win. And EXLA's lead is slightly
+*wider* here (28.5×) than on the dense-only MLP (19.8×), which contradicts the
+intuition that conv-heavy graphs would favour a hand-written im2col+GEMM.
 
 ## Setup cost, recorded because it is part of the comparison
 

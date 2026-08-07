@@ -205,10 +205,12 @@ fused vs eager). On a graph that is almost all `dot`, there is no elementwise
 work for fusion to amortise against, so the deficit is dispatch overhead and
 GEMM quality rather than missing whole-graph compilation.
 
-On a strided-conv CNN the comparison does not exist: XLA failed to compile the
-step, while Vulkan ran it in 29.6 ms here and on both FreeBSD Keplers, where
-EXLA cannot be installed at all. Full numbers, the conv compile failure, and
-what it took to get EXLA running:
+On a 2×strided-conv CNN the gap is similar — 41.3 ms eager vs 1.45 ms, with
+fusion neutral at 0.98× — so EXLA leads on both graph shapes tested. The
+qualitative difference is availability: EXLA cannot be installed on the two
+FreeBSD Keplers at all, where Vulkan runs the same CNN in 64–78 ms. Full
+numbers, an XLA gradient-compile failure narrowed to one specific conv
+configuration, and what it took to get EXLA running:
 [`bench_results/MNIST_EXLA_RACE.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/MNIST_EXLA_RACE.md).
 
 ### f32 vs f64 per op
