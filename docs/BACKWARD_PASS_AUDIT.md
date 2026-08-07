@@ -201,7 +201,9 @@ prints its loss and is excluded from ratios if it is not a number.
 
 ## 8. Where to go next
 
-Ordered by expected value, with the evidence each rests on.
+Ordered by expected value, with the evidence each rests on. These are tracked as
+actionable items — with a "done when" and a risk for each — in
+[`PLAN_AFTER_BACKWARD_PASS.md`](../PLAN_AFTER_BACKWARD_PASS.md).
 
 ### 8.1 Cut dispatch overhead (§4 says this is the gap)
 
