@@ -9,19 +9,34 @@ defmodule Nx.Vulkan.NodeTest do
 
   use ExUnit.Case, async: false
 
-  setup do
+  # `whereis` then `stop` is check-then-act on a globally named process, and
+  # every node here is `start_link`ed from the test process — so the node is
+  # already being torn down by its link when `on_exit` runs in a *different*
+  # process and tries to stop it. The pid is live at `whereis` and dead by
+  # `stop`, which exits with :noproc. Nothing GPU-side is involved (the test
+  # that trips it, `status/1`, never dispatches); it is pure BEAM lifecycle,
+  # and it surfaces or hides depending on scheduler timing, which is why it
+  # went unnoticed. Tolerate the pid dying inside the window.
+  defp stop_node do
     case Process.whereis(Nx.Vulkan.Node) do
       nil -> :ok
-      pid -> GenServer.stop(pid, :normal)
+      pid -> try_stop(pid)
     end
+  end
+
+  defp try_stop(pid) do
+    GenServer.stop(pid, :normal)
+  catch
+    :exit, {:noproc, _} -> :ok
+    :exit, :noproc -> :ok
+  end
+
+  setup do
+    stop_node()
 
     on_exit(fn ->
       Application.delete_env(:nx_vulkan, :node_timeout_ms)
-
-      case Process.whereis(Nx.Vulkan.Node) do
-        nil -> :ok
-        pid -> GenServer.stop(pid, :normal)
-      end
+      stop_node()
     end)
 
     :ok
