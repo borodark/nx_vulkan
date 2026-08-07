@@ -1,5 +1,8 @@
 # nx_vulkan roadmap
 
+What the backward-pass audit established and what it says to build next:
+[`docs/BACKWARD_PASS_AUDIT.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/BACKWARD_PASS_AUDIT.md).
+
 Moved from README on 2026-07-13 so the main page stays focused on
 what already works. Milestones and forward-looking items live here.
 

@@ -537,6 +537,8 @@ testing. No search of the issue tracker was performed.
 
 ## See also
 
+- `docs/BACKWARD_PASS_AUDIT.md` — the synthesis of the audit this memo came out of, and where the evidence says to go next
+
 - `test/nx_vulkan/grad_test.exs` — the backward-pass parity suite
 - `lib/nx_vulkan/fallback.ex`, `test/nx_vulkan/fallback_test.exs` — the residency counter
 - `test/nx_vulkan/nx_doctest_test.exs` — the community-standard validation, and its except buckets
