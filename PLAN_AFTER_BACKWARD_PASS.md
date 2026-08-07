@@ -10,26 +10,29 @@ not doing.
 
 ---
 
-## T1 — Batched command submission `[~]`
+## T1 — Batched command submission `[x]`
 
-**Built and measured on super-io; not yet fleet-raced.** Dispatches are
-recorded into a pending queue and submitted as one command buffer with one
-fence wait, flushed at every host boundary and at a cap (`NXV_BATCH_MAX`,
-default 64; `0` restores submit-per-dispatch and is the A/B control).
-**≈2× on the MNIST MLP training step (≈20 ms → ≈10 ms), loss bit-identical**,
-and 1.37× on a fallback-free forward chain — the win scales with dispatch
-count, as the mechanism predicts. Suite green across cap extremes and 10
-consecutive runs at a cap small enough to force mid-graph flushes. Results and
-the two benchmarking traps this walked into:
-[`bench_results/BATCHED_DISPATCH.md`](bench_results/BATCHED_DISPATCH.md).
+**Done and fleet-raced.** Dispatches are recorded into a pending queue and
+submitted as one command buffer with one fence wait, flushed at every host
+boundary and at a cap (`NXV_BATCH_MAX`, default 64; `0` restores
+submit-per-dispatch and is the A/B control).
 
-**Still open:** the Kepler race (247/248). Batching holds more descriptor sets
-alive at once, and descriptor-pool pressure is the exact axis that produced the
-Ampere `DeviceLost` and the 6× small-matmul regression — the default cap must
-not be trusted on Kepler until raced. Also still open: `matmul` and
-`transpose_2d` build a pipeline per call; they join the batch but that cost is
-untouched, and moving them onto `get_or_create_pipeline` is a separate
-measurable change.
+On the MNIST MLP training step: **1.71× on Ampere, 1.65× on GT 650M, 1.45× on
+GT 750M**, with the loss `2.6447360515594482` in every arm on every host — two
+architectures, two operating systems, bit-identical. Also 1.37× on a
+fallback-free forward chain, i.e. the win scales with dispatch count, as the
+mechanism predicts. Suite green on all three hosts across cap extremes, plus 10
+consecutive full runs at a cap small enough to force mid-graph flushes.
+
+**No hardware crossover**, so no `Device.class/0` gate is needed and it ships on
+by default — that was not safe to assume, since the concern going in was that
+holding more descriptor sets alive would show up as Kepler pool pressure.
+Results: [`bench_results/BATCHED_DISPATCH.md`](bench_results/BATCHED_DISPATCH.md).
+
+Left deliberately for T4: `matmul` and `transpose_2d` build a `ShaderModule` +
+`ComputePipeline` per call instead of going through `get_or_create_pipeline`.
+They join the batch, but per-call pipeline construction is per-dispatch cost
+too — moved separately so it can be measured separately.
 
 **Why.** The EXLA gap is ~20× on a dense MLP and ~29× on a conv CNN, and
 [fusion does not close it](bench_results/MNIST_EXLA_RACE.md) — it regresses 24%

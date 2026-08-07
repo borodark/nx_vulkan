@@ -12,35 +12,61 @@ Why this and not more fusion: `MNIST_EXLA_RACE.md` measured the eager step at
 explain a gap that fusing the shaders widens, so the deficit is per-dispatch
 cost.
 
-Host: super-io, NVIDIA GeForce RTX 3060 Ti (Ampere), Linux. Commit: see git.
+Commit `1dbba7f`, raced across the whole fleet — SHA verified on each host
+after `git merge --ff-only`, because `git checkout` alone leaves a
+pre-existing local branch stale and silently benchmarks the wrong code.
 
-## Result — MNIST MLP training step
+| host | GPU | arch | OS |
+|---|---|---|---|
+| super-io | RTX 3060 Ti | Ampere | Linux |
+| mac.247 | GeForce GT 650M | Kepler | FreeBSD 15.0 |
+| free-macpro-nvidia (248) | GeForce GT 750M | Kepler | FreeBSD 15.0 |
+
+## Result — MNIST MLP training step, all three hosts
 
 `examples/mnist_mlp_step_bench.exs` — the Axon MNIST MLP written out in plain
 Nx (flatten → dense 128 + relu → dense 10 + softmax → categorical
 cross-entropy), one `Nx.Defn.value_and_grad` step at batch 32, under
 `Nx.Defn.Evaluator`. Each arm is a separate `mix run` (the env var is read once
-per OS process); each row is best-of-5 blocks of 20 steps.
+per OS process); each cell is best-of-5 blocks of 20 steps, two runs per arm.
 
-| `NXV_BATCH_MAX` | best per run (ms) | min | median | loss |
-|---|---|---:|---:|---|
-| 0 — **control, submit per dispatch** | 22.623, 20.129, 15.994 | 15.994 | 20.129 | 2.6447360515594482 |
-| 32 | 9.600, 9.918, 11.547 | 9.600 | 9.918 | 2.6447360515594482 |
-| 256 | 10.044, 10.256, 12.919 | 10.044 | 10.256 | 2.6447360515594482 |
+| `NXV_BATCH_MAX` | super-io (Ampere) | mac.247 (GT 650M) | 248 (GT 750M) |
+|---|---|---|---|
+| 0 — **control, submit per dispatch** | 16.446, 20.828 | 14.583, 16.547 | 13.473, 13.301 |
+| 32 | 9.503, 9.439 | 8.827, 8.930 | 9.116, 9.222 |
+| 64 (default) | 9.627, 12.921 | 8.829, 9.057 | 9.147, 9.275 |
+| 256 | 10.104, 9.972 | 12.107, 8.895 | 9.338, 9.330 |
 
-**≈2× on the training step**, and the loss is bit-identical across every arm —
-batching changes when work is submitted, never what is computed.
+Speedup at the default cap, control min ÷ batched min:
 
-The control and batched ranges do not overlap (16.0–26.4 vs 9.6–13.4), which
-matters because run-to-run noise on this box is several ms. A single-sample A/B
-would not have been trustworthy: an early sweep read `NXV_BATCH_MAX=1` (one
-dispatch per submit — the control's work through the batched code path) as
-3.7 ms faster than the control, which is noise, not a finding.
+| host | control (ms) | batched (ms) | |
+|---|---:|---:|---|
+| super-io (Ampere) | 16.446 | 9.627 | **1.71×** |
+| mac.247 (Kepler GT 650M) | 14.583 | 8.829 | **1.65×** |
+| 248 (Kepler GT 750M) | 13.301 | 9.147 | **1.45×** |
 
-The cap is flat between 32 and 256, so the default of 64 is not a tuned value
-and does not need to be. Larger caps hold more descriptor sets alive at once,
-which is pool churn rather than a hard limit (vulkano allocates additional
-pools and recycles them through a reserve).
+**The loss is `2.6447360515594482` in every cell of that table** — every arm,
+every cap, all three hosts, two architectures, two operating systems. Batching
+changes when work is submitted, never what is computed.
+
+**No hardware crossover.** This is the outcome that could not be assumed:
+register blocking wins on Ampere and regresses on both Keplers, and the
+many-slot fused reduce wins 4.4× on Kepler and regresses to 0.44× on Ampere,
+which is why `Nx.Vulkan.Device.class/0` exists. Batching wins on all three, so
+it needs no device-class gate and ships on by default.
+
+The cap is flat from 32 to 256 on every host, so the default of 64 is not a
+tuned value and does not need to be. Larger caps hold more descriptor sets
+alive at once, which is pool churn rather than a hard limit (vulkano allocates
+additional pools and recycles them through a reserve) — the concern going in
+was that Kepler would show this as a regression at 256, and it does not.
+
+Run-to-run noise is several ms, so single-sample A/B would not have been
+trustworthy: an early sweep read `NXV_BATCH_MAX=1` (one dispatch per submit —
+the control's work through the batched code path) as 3.7 ms faster than the
+control, which is noise, not a finding. The two outliers above (super-io 12.921
+at cap 64, mac.247 12.107 at cap 256) are that same noise; the control and
+batched ranges still do not overlap on any host.
 
 ## Result — dispatch-bound graph, no host fallbacks
 
@@ -77,11 +103,16 @@ flushing thread.
 A missed barrier shows up as nondeterministic wrong numbers rather than a
 crash, so the suite was run repeatedly rather than once:
 
-- full suite × 3 fixed seeds, default cap — green
-- full suite at `NXV_BATCH_MAX` ∈ {0, 1, 4, 256} — green
-- full suite × 10 consecutive runs at `NXV_BATCH_MAX=4` (a cap small enough to
-  force a flush mid-graph on nearly every op) — green
+- super-io: full suite × 3 fixed seeds, default cap — green
+- super-io: full suite at `NXV_BATCH_MAX` ∈ {0, 1, 4, 256} — green
+- super-io: full suite × 10 consecutive runs at `NXV_BATCH_MAX=4` (a cap small
+  enough to force a flush mid-graph on nearly every op) — green
+- **mac.247 and 248: full suite at `NXV_BATCH_MAX` ∈ {0, 4, 256} — green**
+  (851 doctests, 415 tests, 0 failures on each host at each cap)
 - fallback census unchanged (the suite pins known fallbacks at exact counts)
+
+That covers the plan's requirement that the gradient suite be green on all
+three hosts, not just super-io.
 
 One flake surfaced during this work and was **not** caused by batching:
 `node_test.exs` did `Process.whereis` then `GenServer.stop` on a globally named
@@ -92,13 +123,6 @@ dispatches anything. Fixed by tolerating the race.
 
 ## Not done
 
-- **Fleet validation.** Both Keplers (247 GT 650M, 248 GT 750M) are unraced.
-  The skill requires every perf heuristic be validated across the fleet, and
-  win/loss crossovers here are hardware-specific. Batching holds more
-  descriptor sets alive at once, and descriptor-pool pressure is exactly the
-  axis on which this repo has been bitten before (the Ampere `DeviceLost` at 16
-  dispatches, the 6× small-matmul regression from bumping `set_count`). The
-  default cap of 64 should not be trusted on Kepler until raced.
 - **The 14.140 ms figure is not directly comparable.** That row came from the
   real Axon model in a scratch project with EXLA available; this harness is the
   same architecture rewritten in plain Nx and takes 3 host fallbacks where the
