@@ -188,6 +188,29 @@ the multipliers: a speedup here mostly measures how slow pure-Elixir
 work is dispatch-bound rather than compute-bound — which is why a 2012 laptop
 GPU is competitive with a 2021 desktop one.
 
+### vs EXLA (August 2026)
+
+The [Axon MNIST guide](https://axon.hexdocs.pm/mnist.html) model, one training
+step at batch 32 on the RTX 3060 Ti — a dense-only MLP, which is the shape most
+favourable to EXLA and least favourable here:
+
+| backend | ms | vs BinaryBackend |
+|---|---:|---:|
+| Vulkan, eager | 14.1 | 485× |
+| Vulkan, `Nx.Vulkan.Compiler` | 18.5 | 370× |
+| EXLA (CUDA) | 0.715 | 9581× |
+
+**EXLA is ~20× ahead, and fusion does not close it — it costs 24%** (0.76×
+fused vs eager). On a graph that is almost all `dot`, there is no elementwise
+work for fusion to amortise against, so the deficit is dispatch overhead and
+GEMM quality rather than missing whole-graph compilation.
+
+On a strided-conv CNN the comparison does not exist: XLA failed to compile the
+step, while Vulkan ran it in 29.6 ms here and on both FreeBSD Keplers, where
+EXLA cannot be installed at all. Full numbers, the conv compile failure, and
+what it took to get EXLA running:
+[`bench_results/MNIST_EXLA_RACE.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/MNIST_EXLA_RACE.md).
+
 ### f32 vs f64 per op
 
 `sh scripts/race.sh` — f32 speedup over f64, same shapes, all on-GPU:
