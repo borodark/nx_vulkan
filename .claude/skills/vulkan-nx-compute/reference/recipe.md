@@ -135,4 +135,25 @@ host = Nx.multiply(Nx.backend_transfer(x, Nx.BinaryBackend), 3.0)
 - `matmul` — 2D tiled dispatch `[ceil(N/16), ceil(M/16), 1]` (NOTE: builds its
   pipeline per-call — legacy, do not copy that part; use the cache).
 - `reduce_axis` — `(outer, reduce_size, inner, op)` push, per-slot dispatch.
+- `transpose_nd` / `reverse_nd` / `broadcast_nd` — the **index-remap** pattern:
+  one thread per *output* element, decompose its linear index into coordinates,
+  map to an input index, copy. Shape metadata rides in a `params` SSBO (SKILL.md
+  §5). Copy this whenever the op is "same data, different layout" — it is what
+  keeps gradient-shaped tensors on the GPU.
+- `window_scatter_max` — one thread per **input** element (not per output), which
+  is how it avoids needing `GL_EXT_shader_atomic_float` for the scatter. Ties
+  break on `>=` to match BinaryBackend's last-max-wins fold.
+
+## Before you call it done
+
+A green parity test does not mean your kernel ran — the host fallback returns
+the same bytes. Assert residency too:
+
+```elixir
+{_out, counts} = Nx.Vulkan.Fallback.count(fn -> Nx.sum(Nx.multiply(a, b)) end)
+assert counts == %{}
 ```
+
+Put the assertion on the op you changed. A fallback anywhere upstream breaks the
+chain, so a residency assertion on the wrong op measures something else — that
+mistake is why the first conv-backward fix was believed complete when it was not.

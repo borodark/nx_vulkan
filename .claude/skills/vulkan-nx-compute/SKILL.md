@@ -1,6 +1,6 @@
 ---
 name: vulkan-nx-compute
-description: Author or extend a GLSL Vulkan compute kernel wired into Elixir Nx through the Rust/Vulkano NIF in this repo (nx_vulkan). Use when adding a new GPU op, a fused JIT shader, or a matmul/conv/reduction kernel, or when debugging numerical parity or dispatch geometry for one.
+description: Author or extend a GLSL Vulkan compute kernel wired into Elixir Nx through the Rust/Vulkano NIF in this repo (nx_vulkan). Use when adding a new GPU op, a fused JIT shader, or a matmul/conv/reduction kernel, when debugging numerical parity or dispatch geometry for one, or when an op silently falls back to the host instead of running on the GPU.
 ---
 
 # Vulkan compute kernels for Nx (this repo's playbook)
@@ -49,6 +49,36 @@ in `vulkano_backend.ex`. A kernel is worth writing when:
 Do NOT write a kernel for control-flow-heavy, host-cheap, or rarely-hit ops —
 the fallback is always correct and the round trip is negligible there
 (concat, sort, LU/QR/SVD, argmax…). Prefer growing the fallback list.
+
+### 1b. Gate on capability, not on the shape a forward pass happens to produce
+
+**The single most expensive class of bug found in this repo.** Eight GPU fast
+paths were written against the shapes a *forward* pass emits, so
+`Nx.Defn.Grad` — which emits transposed, permuted, dilated, and
+differently-typed versions of the same ops — was silently refused and ran on
+the CPU. Six of the eight had the capability already; only the gate was narrow.
+See [`docs/BACKWARD_PASS_AUDIT.md`](../../../docs/BACKWARD_PASS_AUDIT.md).
+
+When you write the `if` that decides GPU vs host, ask what the **gradient** of
+this op looks like, not just the op:
+
+- `conv` backward emits `conv` with **permuted** input/kernel/output specs
+  (`conv_spec_transpose([d0, d1 | rest]) -> [d1, d0 | rest]`) and with the
+  kernel spatially **reversed**. Handle by normalising (transpose/reverse into
+  the layout the kernel wants) rather than by refusing.
+- `dot` backward contracts along the *other* axis — rotate into `(M,K)·(K,N)`
+  (`dot_orient/6`) instead of matching one orientation.
+- Reductions come back as **broadcasts**; `sum` over a non-trailing axis comes
+  back as a reduce over an axis your contiguity classifier rejects — transpose
+  into the contiguous case (`reduce_via_transpose/5`).
+- **Nx materialises literals as `{:s, 32}`.** A four-byte integer constant
+  meeting an f32/f64 kernel guard blocked four separate ops here. Coerce
+  (`coerce_operand/2`, `coerce_to/2`, the `cast_s32_to_f*` shaders) rather than
+  bailing to the host.
+
+A refused gate is invisible: the host path returns a **bit-identical** result,
+so no value-based test can see it. Count fallbacks (§9) — that is the only
+signal.
 
 ## 2. Anatomy of a static kernel (`glsl/*.comp`)
 
@@ -134,6 +164,19 @@ Buffer lifecycle NIFs you'll reuse: `buf_upload/1` (host binary → device),
   `[rank, ews, S[4], O[4], start[4], stride[4]]` where `ews = element_bytes/4`.
   Ranks are padded to 4 (`pad4/1` in the backend). Encode little-endian:
   `for v <- [...], into: <<>>, do: <<v::signed-32-little>>`.
+- **The index-remap family.** `transpose_nd`, `reverse_nd`, and `broadcast_nd`
+  (f32+f64 each) are one skeleton — decompose the output index into coordinates,
+  map to an input index, copy — differing only in the mapping rule. Params:
+  `transpose_nd = [rank, in[4], out[4], perm[4]]`,
+  `reverse_nd = [rank, shape[4], rev[4]]`,
+  `broadcast_nd = [out_rank, in_rank, out[4], in[4], axes[4]]`. Prefer this
+  shape of kernel over a variant per layout: `transpose_nd` alone unblocked
+  three unrelated fallbacks, because **normalise-then-dispatch** lets every
+  other kernel keep its narrow contiguous assumption. At a fourth member,
+  consider unifying behind one shader with a mode selector — three does not
+  justify the indirection.
+- **Rank 4 is the current ceiling** for the remap family (`pad4`). Rank-5+ host
+  falls back; extending is mechanical if a workload needs it.
 - std430 array-of-scalar SSBOs (`float x[]`, `int x[]`) are tightly packed, so
   Elixir binaries map 1:1. Avoid `vec3`/nested structs in SSBOs (std430 pads
   them) unless you match the padding exactly.
@@ -198,6 +241,21 @@ From the `thrust3-fusion-compiler` and `gpu-fleet-and-f32` memories:
   from the **256-thread workgroup-per-slot tree reduce** out-parallelising eager's
   serial `reduce_axis` when slots are few (full sum 256² → 9.9x, 1024² → 27x on
   Kepler).
+- **Fusion is not a free win, and is not the bottleneck.** Raced against EXLA on
+  the Axon MNIST model, `Nx.Vulkan.Compiler` measured **0.76×** (a 24%
+  regression) on a dense-only MLP and **0.98×** on a conv CNN — while staying
+  bit-identical. It splits stages at `dot` boundaries, so a graph that is almost
+  all `dot`s has nothing to amortise tracing and boundary buffers against. The
+  remaining ~20-29× EXLA gap is therefore **per-dispatch cost and GEMM quality**,
+  not missing whole-graph compilation. Anyone reading the eager-vs-fused rows
+  and concluding "we need more fusion" builds the wrong thing.
+  ([`bench_results/MNIST_EXLA_RACE.md`](../../../bench_results/MNIST_EXLA_RACE.md))
+- **Fallback cost is dominated by the largest tensor, not the count.** Removing
+  fallbacks 11 → 3 in a training step barely moved the clock; 3 → 1 took a LeNet
+  step from **20 929 ms to 84 ms**. Do not rank fixes by how many fallbacks they
+  remove, and do not conclude from two flat results that the remaining ones are
+  cheap. (Verify with a forced full readback so async dispatch is not
+  under-measuring you.)
 - **Win/loss crossovers are HARDWARE-SPECIFIC.** The many-slot fused reduce wins
   ~4.4x on Kepler but **regresses ~0.44x on Ampere** (a strong GPU's eager reduce
   is already well-fed by many slots). This is why `Nx.Vulkan.Device.class/0`
@@ -218,6 +276,31 @@ From the `thrust3-fusion-compiler` and `gpu-fleet-and-f32` memories:
 2. **Correctness = compare to `Nx.BinaryBackend`.** Run the op both ways and
    assert equality within dtype eps (this is exactly what the test suite and the
    host-fallback do). f32 sum/matmul must match the f64-accumulated reference.
+2b. **Residency ≠ correctness — count the fallbacks.** A value assertion passes
+   whether or not your kernel ran, because the fallback *is* the reference.
+   `Nx.Vulkan.Fallback.count/1` returns `{result, %{{fun, arity} => n}}` and
+   `count_total/1` just the number:
+
+   ```elixir
+   {_out, counts} = Nx.Vulkan.Fallback.count(fn -> Nx.Defn.jit_apply(step, args) end)
+   assert counts == %{}          # native path
+   ```
+
+   `test/nx_vulkan/fallback_test.exs` splits this two ways: ops asserted at
+   **zero**, and known fallbacks **pinned at an exact count** so the test fails
+   when someone fixes one — a pin that only breaks on regression would let a fix
+   go unnoticed. **The count is a lower bound**: once a tensor lands on
+   `BinaryBackend`, everything downstream of it computes there without being
+   recorded. Attribution comes from a `__CALLER__.function` capture in the
+   `host_result` macro, because Erlang TCO discards the caller frame — a runtime
+   stacktrace walk reports the wrong op.
+2c. **Gradients need their own tests.** `test/nx_vulkan/grad_test.exs` compares
+   `Nx.Defn.grad` under both backends. Upstream Nx has a central-differences
+   `check_grads!` but ships it only under `nx/test/`, not in the Hex package —
+   so no third-party backend inherits gradient coverage
+   ([`docs/BACKEND_VERIFICATION_GAP.md`](../../../docs/BACKEND_VERIFICATION_GAP.md)).
+   Note the tolerance floor: f64 chains through transcendentals boundary-cast
+   via f32 (§7), so they land at ~1e-6, not 1e-10. `sqrt` stays tight.
 3. `mix test` for the suite (recompile any changed `.spv` with the §3 command
    first). Benchmarks live in `examples/*_race.exs`; `sh scripts/race.sh`.
 4. For a fused JIT kernel, `NXV_FUSE_DEBUG=1` logs FUSED/fallback per defn;
