@@ -28,7 +28,7 @@ use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
-        AutoCommandBufferBuilder, CommandBufferUsage,
+        AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
@@ -1012,6 +1012,12 @@ fn concat_buffers<'a>(
         Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
     };
 
+    // This NIF submits its own command buffer, so any dispatch that produced
+    // one of the inputs has to have landed first.
+    if let Err(e) = flush_pending() {
+        return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
+    }
+
     let total_bytes: u64 = inputs.iter().map(|t| t.n_bytes).sum();
 
     let dst = match alloc_buffer(
@@ -1101,6 +1107,11 @@ fn concat_buffers<'a>(
 /// Returns `{:ok, binary}`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn buf_download<'a>(env: Env<'a>, tensor: ResourceArc<VulkanoTensor>) -> NifResult<Term<'a>> {
+    // The tensor's contents may still be sitting in the pending batch. This is
+    // the boundary where deferred dispatch has to become real work.
+    if let Err(e) = flush_pending() {
+        return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
+    }
     let bytes = match tensor.buf.read() {
         Ok(guard) => guard.to_vec(),
         Err(_) => return Ok((atoms::error(), atoms::download_failed()).encode(env)),
@@ -1125,6 +1136,11 @@ fn buf_upload_into<'a>(
 ) -> NifResult<Term<'a>> {
     if data.len() as u64 != tensor.n_bytes {
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    // A queued dispatch may read this buffer. Nothing has been submitted yet,
+    // so vulkano's own in-use tracking would not catch the overwrite.
+    if let Err(e) = flush_pending() {
+        return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
     }
     let mut guard = match tensor.buf.write() {
         Ok(g) => g,
@@ -1167,12 +1183,10 @@ fn apply_binary<'a>(
 
     let result = (|| -> Result<(), String> {
         let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
-        let layout = cached.layout.clone();
-        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
-            layout.set_layouts()[0].clone(),
+            cached.layout.set_layouts()[0].clone(),
             [
                 WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
                 WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
@@ -1182,42 +1196,7 @@ fn apply_binary<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        let groups = (n + 255) / 256;
-
-        let mut cmd = AutoCommandBufferBuilder::primary(
-            &context.cmd_allocator,
-            context.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
-        )
-        .map_err(|e| format!("cmd builder: {e}"))?;
-
-        cmd.bind_pipeline_compute(pipeline.clone())
-            .map_err(|e| format!("bind pipeline: {e}"))?
-            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
-            .map_err(|e| format!("bind descriptor: {e}"))?
-            .push_constants(layout.clone(), 0, PushN { n })
-            .map_err(|e| format!("push_constants: {e}"))?
-            .dispatch([groups, 1, 1])
-            .map_err(|e| format!("dispatch: {e}"))?;
-
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-
-        let future = sync::now(context.device.clone())
-            .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?;
-
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        drop(future);
-
-        Ok(())
+        enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1270,7 +1249,7 @@ fn apply_binary_broadcast<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1316,7 +1295,7 @@ fn apply_compare<'a>(
         .map_err(|e| format!("descriptor set: {e}"))?;
 
         let nwords = n.div_ceil(4);
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [nwords.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [nwords.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1363,7 +1342,7 @@ fn apply_select<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1404,7 +1383,7 @@ fn apply_slice<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1449,7 +1428,7 @@ fn apply_pad<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1493,7 +1472,7 @@ fn apply_gather<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1540,7 +1519,7 @@ fn dispatch_generated<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1595,7 +1574,7 @@ fn dispatch_generated_reduce<'a>(
         // (maxComputeWorkGroupCount[0]) and let the loop cover any excess.
         let n_slots = outer * inner;
         let groups = n_slots.min(65535).max(1);
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -1644,7 +1623,7 @@ fn cast<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1677,12 +1656,10 @@ fn apply_unary<'a>(
 
     let result = (|| -> Result<(), String> {
         let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
-        let layout = cached.layout.clone();
-        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
-            layout.set_layouts()[0].clone(),
+            cached.layout.set_layouts()[0].clone(),
             [
                 WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
                 WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
@@ -1691,41 +1668,7 @@ fn apply_unary<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        let groups = (n + 255) / 256;
-
-        let mut cmd = AutoCommandBufferBuilder::primary(
-            &context.cmd_allocator,
-            context.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
-        )
-        .map_err(|e| format!("cmd builder: {e}"))?;
-
-        cmd.bind_pipeline_compute(pipeline.clone())
-            .map_err(|e| format!("bind pipeline: {e}"))?
-            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
-            .map_err(|e| format!("bind descriptor: {e}"))?
-            .push_constants(layout.clone(), 0, PushN { n })
-            .map_err(|e| format!("push_constants: {e}"))?
-            .dispatch([groups, 1, 1])
-            .map_err(|e| format!("dispatch: {e}"))?;
-
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
-            .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?;
-
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        drop(future);
-
-        Ok(())
+        enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -1764,12 +1707,10 @@ fn reduce_axis<'a>(
 
     let result = (|| -> Result<(), String> {
         let cached = get_or_create_pipeline(&spv_path, None)?;
-        let layout = cached.layout.clone();
-        let pipeline = cached.pipeline.clone();
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
-            layout.set_layouts()[0].clone(),
+            cached.layout.set_layouts()[0].clone(),
             [
                 WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
                 WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
@@ -1779,50 +1720,19 @@ fn reduce_axis<'a>(
         .map_err(|e| format!("descriptor set: {e}"))?;
 
         let n_slots = outer * inner;
-        let groups = (n_slots + 255) / 256;
 
-        let mut cmd = AutoCommandBufferBuilder::primary(
-            &context.cmd_allocator,
-            context.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
+        enqueue_dispatch(
+            context,
+            &cached,
+            set,
+            PushReduceAxis {
+                outer,
+                reduce_size,
+                inner,
+                op: op_code,
+            },
+            [n_slots.div_ceil(256), 1, 1],
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
-
-        cmd.bind_pipeline_compute(pipeline.clone())
-            .map_err(|e| format!("bind pipeline: {e}"))?
-            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
-            .map_err(|e| format!("bind descriptor: {e}"))?
-            .push_constants(
-                layout.clone(),
-                0,
-                PushReduceAxis {
-                    outer,
-                    reduce_size,
-                    inner,
-                    op: op_code,
-                },
-            )
-            .map_err(|e| format!("push_constants: {e}"))?
-            .dispatch([groups, 1, 1])
-            .map_err(|e| format!("dispatch: {e}"))?;
-
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
-            .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?;
-
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        drop(future);
-
-        Ok(())
     })();
 
     match result {
@@ -1892,42 +1802,18 @@ fn transpose_2d<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        let gx = (n + 15) / 16;
-        let gy = (m + 15) / 16;
+        let gx = n.div_ceil(16);
+        let gy = m.div_ceil(16);
 
-        let mut cmd = AutoCommandBufferBuilder::primary(
-            &context.cmd_allocator,
-            context.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
-        )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        // Wraps the per-call pipeline rather than going through
+        // `get_or_create_pipeline`, purely so this NIF keeps its existing
+        // pipeline strategy while joining the batch. Moving it (and `matmul`)
+        // onto the cache is a separate, separately-measured change — building
+        // a ShaderModule and ComputePipeline per dispatch is per-dispatch cost
+        // too, and conflating the two would make neither measurable.
+        let cached = CachedPipeline { layout, pipeline };
 
-        cmd.bind_pipeline_compute(pipeline.clone())
-            .map_err(|e| format!("bind pipeline: {e}"))?
-            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
-            .map_err(|e| format!("bind descriptor: {e}"))?
-            .push_constants(layout.clone(), 0, PushTranspose { m, n })
-            .map_err(|e| format!("push_constants: {e}"))?
-            .dispatch([gx, gy, 1])
-            .map_err(|e| format!("dispatch: {e}"))?;
-
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
-            .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?;
-
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        drop(future);
-
-        Ok(())
+        enqueue_dispatch(context, &cached, set, PushTranspose { m, n }, [gx, gy, 1])
     })();
 
     match result {
@@ -1975,7 +1861,7 @@ fn window_scatter_max<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -2024,7 +1910,7 @@ fn window_reduce<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -2076,7 +1962,7 @@ fn broadcast_nd<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(context, &cached, set, PushBroadcastNd { n }, [n.div_ceil(256), 1, 1])
+        enqueue_dispatch(context, &cached, set, PushBroadcastNd { n }, [n.div_ceil(256), 1, 1])
     })();
 
     match result {
@@ -2121,7 +2007,7 @@ fn reverse_nd<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -2180,7 +2066,7 @@ fn transpose_nd<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -2262,42 +2148,15 @@ fn matmul<'a>(
         )
         .map_err(|e| format!("descriptor set: {e}"))?;
 
-        let gx = (n + 15) / 16;
-        let gy = (m + 15) / 16;
+        let gx = n.div_ceil(16);
+        let gy = m.div_ceil(16);
 
-        let mut cmd = AutoCommandBufferBuilder::primary(
-            &context.cmd_allocator,
-            context.queue.queue_family_index(),
-            CommandBufferUsage::SimultaneousUse,
-        )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        // Per-call pipeline wrapped so this NIF joins the batch without
+        // changing its (legacy, uncached) pipeline strategy — see the same
+        // note in `transpose_2d`.
+        let cached = CachedPipeline { layout, pipeline };
 
-        cmd.bind_pipeline_compute(pipeline.clone())
-            .map_err(|e| format!("bind pipeline: {e}"))?
-            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
-            .map_err(|e| format!("bind descriptor: {e}"))?
-            .push_constants(layout.clone(), 0, PushMatmul { m, n, k })
-            .map_err(|e| format!("push_constants: {e}"))?
-            .dispatch([gx, gy, 1])
-            .map_err(|e| format!("dispatch: {e}"))?;
-
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
-        let future = sync::now(context.device.clone())
-            .then_execute(context.queue.clone(), cmd_buf)
-            .map_err(|e| format!("then_execute: {e}"))?;
-
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        drop(future);
-
-        Ok(())
+        enqueue_dispatch(context, &cached, set, PushMatmul { m, n, k }, [gx, gy, 1])
     })();
 
     match result {
@@ -2345,7 +2204,7 @@ fn matmul32<'a>(
 
         let gx = (n + 31) / 32;
         let gy = (m + 31) / 32;
-        run_single_dispatch(context, &cached, set, PushMatmul { m, n, k }, [gx, gy, 1])
+        enqueue_dispatch(context, &cached, set, PushMatmul { m, n, k }, [gx, gy, 1])
     })();
 
     match result {
@@ -2406,6 +2265,12 @@ fn fft<'a>(
         if n < 2 || (n & (n - 1)) != 0 {
             return Err(format!("fft length must be a power of two >= 2, got {n}"));
         }
+
+        // This NIF records and submits its own multi-stage command buffer
+        // rather than joining the global batch (its stages are in-place on
+        // `out_ref` and it owns a scratch twiddle buffer), so anything that
+        // produced `in_ref` has to have landed first.
+        flush_pending()?;
 
         // Twiddle table: n/2 complex entries, tw[t] = exp(sgn*2*pi*i*t/n).
         // Forward DFT uses sgn = -1; inverse uses +1 (the 1/n scale is folded
@@ -2564,7 +2429,7 @@ fn conv_im2col<'a>(
         .map_err(|e| format!("descriptor set: {e}"))?;
 
         let groups = (n * o_total).saturating_mul(k).div_ceil(64);
-        run_single_dispatch(
+        enqueue_dispatch(
             context,
             &cached,
             set,
@@ -2616,7 +2481,7 @@ fn conv_gemm<'a>(
         let m = n.saturating_mul(o_total);
         let gx = cout.div_ceil(16);
         let gy = m.div_ceil(16);
-        run_single_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, [gx, gy, 1])
+        enqueue_dispatch(context, &cached, set, PushConvGemm { n, cout, o_total, k }, [gx, gy, 1])
     })();
 
     match result {
@@ -2625,40 +2490,184 @@ fn conv_gemm<'a>(
     }
 }
 
-// Shared single-dispatch helper: bind pipeline + descriptor set + push, run
-// one dispatch, wait for the queue to drain. Used by conv_im2col/conv_gemm.
-fn run_single_dispatch<P: BufferContents>(
-    context: &VkContext,
-    cached: &CachedPipeline,
-    set: Arc<PersistentDescriptorSet>,
-    push: P,
-    groups: [u32; 3],
-) -> Result<(), String> {
-    let mut cmd = AutoCommandBufferBuilder::primary(
-        &context.cmd_allocator,
-        context.queue.queue_family_index(),
-        CommandBufferUsage::SimultaneousUse,
-    )
-    .map_err(|e| format!("cmd builder: {e}"))?;
+// -- Deferred dispatch batching -------------------------------------------
+//
+// Every op used to be its own command buffer, its own vkQueueSubmit, and its
+// own `queue.wait_idle()`. On a graph like the Axon MNIST MLP that is one
+// full round trip per node, and the round trip — not the arithmetic —
+// dominates: `bench_results/MNIST_EXLA_RACE.md` measures 14.1 ms per training
+// step eager against EXLA's 0.715 ms on the same model, *and* measures that
+// whole-graph fusion makes it worse (0.76×). An optimisation that removes
+// work from the shaders cannot explain a gap that fusing the shaders widens,
+// so the deficit is per-dispatch cost. This is T1 of PLAN_AFTER_BACKWARD_PASS.md.
+//
+// So a dispatch is now *recorded* into a pending queue and the queue is
+// submitted as one command buffer with one fence wait. Two properties make
+// this safe rather than a synchronisation minefield:
+//
+//  - vulkano's `AutoCommandBufferBuilder` tracks every resource a command
+//    touches while recording and inserts the pipeline barriers between them
+//    in `build()` (vulkano-0.34.2 `command_buffer/auto/builder.rs:272`). A
+//    read-after-write between two batched dispatches is therefore
+//    synchronised for us. Do not hand-roll barriers here; do not assume none
+//    are needed either.
+//  - The only way a value reaches the host is `buf_download`, and the only
+//    ways a buffer is mutated behind the GPU's back are `buf_upload_into` and
+//    the command buffers built by `concat_buffers` / the leapfrog synth NIFs.
+//    Every one of those flushes first, so deferral is invisible to callers.
+//
+// The builder itself cannot be parked in the static between NIF calls:
+// `StandardCommandBufferAllocator` deliberately does not implement `Send` for
+// its builder (`command_buffer/allocator.rs:568`) because a command buffer
+// may not migrate threads mid-recording, and consecutive NIFs land on
+// whichever dirty scheduler is free. So we queue *closures* — `Send`, since
+// `BufferContents: Send + Sync + 'static` — and replay them into a builder
+// created on whichever thread ends up flushing.
+//
+// Cost of the deferral: a dispatch's *recording* errors (bind/push
+// validation) now surface from the call that flushes rather than the call
+// that queued it. Descriptor-set construction, which is where the failures
+// actually happen in practice, still runs eagerly in each op's NIF.
 
-    cmd.bind_pipeline_compute(cached.pipeline.clone())
-        .map_err(|e| format!("bind pipeline: {e}"))?
-        .bind_descriptor_sets(PipelineBindPoint::Compute, cached.layout.clone(), 0, set)
-        .map_err(|e| format!("bind descriptor: {e}"))?
-        .push_constants(cached.layout.clone(), 0, push)
-        .map_err(|e| format!("push_constants: {e}"))?
-        .dispatch(groups)
-        .map_err(|e| format!("dispatch: {e}"))?;
+type CmdBuilder = AutoCommandBufferBuilder<
+    PrimaryAutoCommandBuffer<Arc<StandardCommandBufferAllocator>>,
+    Arc<StandardCommandBufferAllocator>,
+>;
 
+type RecordFn = Box<dyn FnOnce(&mut CmdBuilder) -> Result<(), String> + Send>;
+
+static PENDING: OnceLock<Mutex<Vec<RecordFn>>> = OnceLock::new();
+
+fn pending() -> &'static Mutex<Vec<RecordFn>> {
+    PENDING.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+static BATCH_MAX: OnceLock<usize> = OnceLock::new();
+
+/// Dispatches to record before forcing a submit. `NXV_BATCH_MAX=0` disables
+/// batching entirely, restoring submit-per-dispatch — that is the A/B control
+/// for every measurement of this change, and the escape hatch if a driver
+/// turns out to dislike long command buffers.
+///
+/// The cap matters for more than latency: a batch holds all of its descriptor
+/// sets alive at once, where the unbatched path dropped each one immediately.
+/// vulkano's `StandardDescriptorSetAllocator` grows by allocating additional
+/// pools when its 32-slot pool fills (`descriptor_set/allocator.rs:337`) and
+/// recycles them through a reserve, so this is pool churn rather than a hard
+/// limit — but it is hardware-sensitive, which is why the value is tunable
+/// and gets raced across the fleet rather than picked.
+fn batch_max() -> usize {
+    *BATCH_MAX.get_or_init(|| {
+        std::env::var("NXV_BATCH_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(64)
+    })
+}
+
+/// Build, submit, and wait for one command buffer. The `flush` /
+/// `wait_idle` / `signal_finished` / `drop` sequence is load-bearing: without
+/// the final two the buffers stay marked in use and the next `buf.read()`
+/// fails with "resource in use".
+fn submit_and_wait(context: &VkContext, cmd: CmdBuilder) -> Result<(), String> {
     let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
     let future = sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
         .map_err(|e| format!("then_execute: {e}"))?;
     future.flush().map_err(|e| format!("flush: {e}"))?;
     context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
+    // SAFETY: queue.wait_idle above guarantees the submission has completed.
     unsafe { future.signal_finished(); }
     drop(future);
     Ok(())
+}
+
+fn new_cmd_builder(context: &VkContext) -> Result<CmdBuilder, String> {
+    AutoCommandBufferBuilder::primary(
+        &context.cmd_allocator,
+        context.queue.queue_family_index(),
+        CommandBufferUsage::SimultaneousUse,
+    )
+    .map_err(|e| format!("cmd builder: {e}"))
+}
+
+/// Replay every queued dispatch into one command buffer and submit it. The
+/// caller holds the pending lock for the whole submission, so two threads
+/// cannot interleave halves of each other's batches onto the queue.
+///
+/// `drain` empties the queue even on the early return, which is deliberate: a
+/// batch that failed to record is not retryable, and leaving its commands
+/// queued would re-fail every subsequent flush.
+fn flush_locked(context: &VkContext, queue: &mut Vec<RecordFn>) -> Result<(), String> {
+    if queue.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = new_cmd_builder(context)?;
+    for record in queue.drain(..) {
+        record(&mut cmd)?;
+    }
+    submit_and_wait(context, cmd)
+}
+
+/// Submit any recorded-but-unsubmitted dispatches and wait for them. Call
+/// before anything that reads or writes device memory outside the batch.
+fn flush_pending() -> Result<(), String> {
+    let context = ctx()?;
+    let mut queue = pending().lock().map_err(|_| "pending queue poisoned".to_string())?;
+    flush_locked(context, &mut queue)
+}
+
+// Shared dispatch helper: bind pipeline + descriptor set + push, then queue
+// one dispatch for the next submit (or run it immediately when batching is
+// off). Every compute NIF goes through here.
+fn enqueue_dispatch<P: BufferContents>(
+    context: &VkContext,
+    cached: &CachedPipeline,
+    set: Arc<PersistentDescriptorSet>,
+    push: P,
+    groups: [u32; 3],
+) -> Result<(), String> {
+    let pipeline = cached.pipeline.clone();
+    let layout = cached.layout.clone();
+
+    let record: RecordFn = Box::new(move |cmd: &mut CmdBuilder| {
+        cmd.bind_pipeline_compute(pipeline)
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set)
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(layout, 0, push)
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch(groups)
+            .map_err(|e| format!("dispatch: {e}"))?;
+        Ok(())
+    });
+
+    if batch_max() == 0 {
+        let mut cmd = new_cmd_builder(context)?;
+        record(&mut cmd)?;
+        return submit_and_wait(context, cmd);
+    }
+
+    let mut queue = pending().lock().map_err(|_| "pending queue poisoned".to_string())?;
+    queue.push(record);
+    if queue.len() >= batch_max() {
+        flush_locked(context, &mut queue)
+    } else {
+        Ok(())
+    }
+}
+
+/// Force any pending dispatches to the GPU and wait for them. Exposed so a
+/// benchmark can time the work rather than the recording of it — deferred
+/// dispatch will otherwise charge a loop's whole cost to whichever iteration
+/// happens to trip the batch cap.
+#[rustler::nif(schedule = "DirtyIo")]
+fn flush(env: Env) -> NifResult<Term> {
+    match flush_pending() {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
 }
 
 /// Physical device name + type, for labelling benchmark/parity reports across

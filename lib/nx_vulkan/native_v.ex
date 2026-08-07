@@ -52,6 +52,26 @@ defmodule Nx.Vulkan.NativeV do
   def buf_byte_size(_ref), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Submit any recorded-but-unsubmitted dispatches and wait for them.
+
+  Dispatches are batched into one command buffer and one fence wait rather
+  than submitted per op (T1 of `PLAN_AFTER_BACKWARD_PASS.md`); the batch is
+  flushed automatically at every host boundary — `buf_download/1`,
+  `buf_upload_into/2`, `concat_buffers/1`, `fft/*` — so correctness never
+  depends on calling this.
+
+  It matters for **measurement**. Timing a loop without a readback now times
+  the recording, not the work, and charges the whole cost to whichever
+  iteration happens to trip the batch cap. Call this before stopping the
+  clock, or read a result back. `NXV_BATCH_MAX=0` disables batching entirely
+  and is the A/B control.
+
+  Returns `:ok`, or `{:error, :dispatch_failed, msg}` if a queued dispatch
+  failed to record or the submission failed.
+  """
+  def flush, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Overwrite an existing device buffer with new host data.
   Returns `:ok` or `{:error, :size_mismatch}` when sizes disagree.
   """

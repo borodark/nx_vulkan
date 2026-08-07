@@ -10,7 +10,26 @@ not doing.
 
 ---
 
-## T1 — Batched command submission `[ ]`
+## T1 — Batched command submission `[~]`
+
+**Built and measured on super-io; not yet fleet-raced.** Dispatches are
+recorded into a pending queue and submitted as one command buffer with one
+fence wait, flushed at every host boundary and at a cap (`NXV_BATCH_MAX`,
+default 64; `0` restores submit-per-dispatch and is the A/B control).
+**≈2× on the MNIST MLP training step (≈20 ms → ≈10 ms), loss bit-identical**,
+and 1.37× on a fallback-free forward chain — the win scales with dispatch
+count, as the mechanism predicts. Suite green across cap extremes and 10
+consecutive runs at a cap small enough to force mid-graph flushes. Results and
+the two benchmarking traps this walked into:
+[`bench_results/BATCHED_DISPATCH.md`](bench_results/BATCHED_DISPATCH.md).
+
+**Still open:** the Kepler race (247/248). Batching holds more descriptor sets
+alive at once, and descriptor-pool pressure is the exact axis that produced the
+Ampere `DeviceLost` and the 6× small-matmul regression — the default cap must
+not be trusted on Kepler until raced. Also still open: `matmul` and
+`transpose_2d` build a pipeline per call; they join the batch but that cost is
+untouched, and moving them onto `get_or_create_pipeline` is a separate
+measurable change.
 
 **Why.** The EXLA gap is ~20× on a dense MLP and ~29× on a conv CNN, and
 [fusion does not close it](bench_results/MNIST_EXLA_RACE.md) — it regresses 24%
