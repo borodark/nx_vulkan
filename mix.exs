@@ -24,7 +24,7 @@ defmodule Nx.Vulkan.MixProject do
   end
 
   defp description do
-    "GPU tensor backend for Nx via Vulkan compute (vulkano/Rust, f64-only compute). Validated on Axon training, Scholar linear regression, and the eXMC NUTS sampler. Works on Linux + FreeBSD NVIDIA where CUDA does not exist."
+    "GPU tensor backend for Nx via Vulkan compute (vulkano/Rust, native f32 and f64), forward and backward pass on-device. Validated on Axon training, Scholar linear regression, and the eXMC NUTS sampler. Works on Linux + FreeBSD NVIDIA where CUDA does not exist."
   end
 
   defp docs do
