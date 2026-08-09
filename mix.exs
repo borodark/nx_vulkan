@@ -1,7 +1,7 @@
 defmodule Nx.Vulkan.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0"
   @source_url "https://github.com/borodark/nx_vulkan"
 
   def project do
@@ -36,7 +36,13 @@ defmodule Nx.Vulkan.MixProject do
         "livebooks/intro_10min.livemd",
         "CHANGELOG.md",
         "ROADMAP.md",
-        "docs/VULKANO_BACKEND_ROADMAP.md"
+        "docs/VULKANO_BACKEND_ROADMAP.md",
+        # The CHANGELOG links to these; without them here the links 404 on
+        # hexdocs, since `bench_results/` is not in `package/0`'s file list.
+        # They are the evidence behind this release's performance claims.
+        "bench_results/BATCHED_DISPATCH.md",
+        "bench_results/MNIST_EXLA_RACE.md",
+        "bench_results/CSE_SOFTMAX_RACE.md"
       ]
     ]
   end

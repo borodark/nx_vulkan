@@ -1,10 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-08-08)
 
 The backward-pass release. 0.2.0 shipped conv, the fusion compiler and native
 f32 — but a CNN *training* step still ran mostly on the CPU, and nothing in the
 suite could see it.
+
+Being precise about what that means, because "broken" would overstate it:
+**0.2.0 always computed correct results.** The host fallback *is* the
+`Nx.BinaryBackend` reference, bit for bit, and forward/inference genuinely ran
+on the GPU. What was wrong is that it was an *inference* backend published as a
+*training* backend. A LeNet training step took 20.9 s; it takes 84 ms here.
+Anyone following the README's "autograd for free" headline got ~250× less than
+advertised, and no assertion on values could have revealed it — which is why
+this release ships the tooling that can (`Nx.Vulkan.Fallback`) alongside the
+fix.
+
+This release also stops paying one command-buffer submit and one fence wait per
+op, worth a further 1.45–1.71× on a training step across the fleet.
+
+If you are on 0.2.0 and training on the GPU, upgrade.
 
 ### Fixed — the backward pass
 
@@ -74,6 +89,69 @@ The LeNet step was **20.9 s** before this work. Absolute GPU times cluster in
 25–85 ms across cards spanning 2012–2021 — at this size the work is
 dispatch-bound, not compute-bound.
 
+### Changed — one submit per batch of dispatches, not one per op
+
+Acting on "dispatch-bound" above. Every op used to build its own command
+buffer, submit it, and block on `queue.wait_idle()`. Dispatches are now
+recorded into a pending queue and submitted as **one command buffer with one
+fence wait**, flushed automatically at every host boundary (`buf_download`,
+`buf_upload_into`, `concat_buffers`, `fft`) and at a size cap. Correctness
+never depends on flushing by hand.
+
+This is safe rather than a synchronisation minefield for two reasons:
+vulkano's `AutoCommandBufferBuilder` tracks resource usage while recording and
+inserts the pipeline barriers between commands in `build()`, so a
+read-after-write between two batched dispatches is synchronised; and the only
+way a value reaches the host is a download, which flushes first.
+
+One `value_and_grad` step of an MNIST MLP at batch 32, submit-per-dispatch vs
+batched, losses bit-identical:
+
+| host | GPU | before | after | |
+|---|---|---:|---:|---|
+| super-io | RTX 3060 Ti (Ampere) | 16.446 ms | 9.627 ms | **1.71×** |
+| mac.247 | GT 650M (Kepler, 2012) | 14.583 ms | 8.829 ms | **1.65×** |
+| 248 | GT 750M (Kepler, 2013) | 13.301 ms | 9.147 ms | **1.45×** |
+
+The loss is identical in every arm on every host — two architectures, two
+operating systems. Batching changes *when* work is submitted, never what is
+computed. **No hardware crossover**, unlike register blocking (Ampere-only) and
+the many-slot fused reduce (Kepler-only), so this needs no
+`Nx.Vulkan.Device.class/0` gate and is on by default.
+[`bench_results/BATCHED_DISPATCH.md`](bench_results/BATCHED_DISPATCH.md).
+
+### Added — dispatch batching controls
+
+- **`Nx.Vulkan.NativeV.flush/0`** — submits any recorded-but-unsubmitted
+  dispatches and waits. Never required for correctness; it matters for
+  *measurement*, since timing a loop with no readback now times the recording
+  rather than the work.
+- **`NXV_BATCH_MAX`** — dispatches to record before forcing a submit (default
+  64). `0` restores submit-per-dispatch, and is the A/B control for any
+  measurement of this change as well as the escape hatch if a driver dislikes
+  long command buffers. The cap measured flat from 32 to 256 on all three
+  fleet hosts, so 64 is a safe default rather than a tuned constant.
+
+### Measured — where the remaining gap is, and where it is not
+
+Raced against EXLA (CUDA) on the Axon MNIST model, one training step, losses
+bit-identical to `BinaryBackend`
+([`bench_results/MNIST_EXLA_RACE.md`](bench_results/MNIST_EXLA_RACE.md)):
+
+- **The fusion compiler *regresses* on a matmul-dominated graph** — 0.76× on
+  the dense MLP, 0.98× on the CNN. `Nx.Vulkan.Compiler` splits stages at `dot`
+  boundaries, so a graph that is almost all `dot`s has nothing for tracing and
+  boundary buffers to amortise against. Reading the eager-vs-fused rows and
+  concluding "we need more fusion" would build the wrong thing; that is what
+  motivated batching instead.
+- **Correction to an earlier claim.** A previous version of that file said EXLA
+  "failed to compile" conv. That was wrong, and wrong in the direction that
+  flattered this project — it was written from one failing run without
+  isolating the cause. EXLA compiles and trains convolutional models normally.
+  A 17-variant matrix narrows the real failure to **two stacked convs + stride
+  2 + `channels: :first`, in the gradient only**; any single relaxation
+  compiles, and Axon's default layout (`:last`) avoids it entirely.
+
 ### Notes
 
 - `standard_deviation/2` and `covariance/3` joined the doctest `@rounding`
@@ -84,6 +162,13 @@ dispatch-bound, not compute-bound.
   pooling gradients this backend is now *more* accurate than the reference it
   is tested against, so the pooling test asserts values are exact elements of
   the source rather than agreement with the host.
+- `docs/BACKWARD_PASS_AUDIT.md` records what the audit established and how the
+  bug class stayed invisible; `PLAN_AFTER_BACKWARD_PASS.md` carries the
+  remaining work, each item with the measurement that motivates it.
+- `test/nx_vulkan/node_test.exs` did check-then-act (`whereis` then `stop`) on a
+  globally named GenServer that every test `start_link`s from the test process,
+  so the node was already dying from its link when `on_exit` ran. A latent
+  flake, unrelated to any GPU work; now tolerates the pid dying in that window.
 
 ## 0.2.0 (2026-08-02)
 

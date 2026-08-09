@@ -95,7 +95,8 @@ weakness at conv.
 
 Worth noting the symmetry, since it is this project's own recent history:
 **both backends' conv problems were in the gradient, not the forward pass.**
-nx_vulkan's GPU gate rejected the permuted convs `Nx.Defn.Grad` emits (fixed in
+nx_vulkan's GPU gate rejected the permuted convs Nx.Defn.Grad (hidden upstream,
+so not linked) emits (fixed in
 `fb6221d`); XLA's symbolic tiler cannot tile one particular gradient conv shape.
 Autodiff generates graphs that neither forward path anticipated.
 

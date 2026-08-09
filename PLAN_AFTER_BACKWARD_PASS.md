@@ -207,5 +207,10 @@ same host — contended measurements are worse than none.
 - Both Keplers are parked on `feat/conv-backward-on-gpu`; restore mac.247 to
   `feat/168-ssbo-captures` and mac.248 to `f32-matmul-prototype` when done.
 - The `f32_race_*_c622757.json` reports exist on each host and are not committed.
-- `CHANGELOG.md` has an `## Unreleased` section; renumber to `0.3.0` at tag time
-  (v0.2.0 is already tagged, so the released entry was deliberately not edited).
+- ~~`CHANGELOG.md` has an `## Unreleased` section; renumber to `0.3.0` at tag
+  time~~ — done: `## 0.3.0 (2026-08-08)`, `mix.exs` at `0.3.0`, merged to
+  `main`. The v0.2.0 entry was deliberately left unedited, since it is tagged.
+  Remaining before publish: re-check the README's performance claims (last
+  updated pre-batching), then `mix hex.publish`. Consider
+  `mix hex.retire nx_vulkan 0.2.0 defect` pointing at 0.3.0 — 0.2.0 is correct
+  but was an inference backend published as a training backend.
