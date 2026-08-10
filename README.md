@@ -39,6 +39,12 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
   f64 is the default accumulator policy, f32 wins on bandwidth-bound ops.
 - **Whole-graph fusion** via `Nx.Vulkan.Compiler`, an `Nx.Defn.Compiler`
   — see [The `Nx.Defn` fusion compiler](#the-nxdefn-fusion-compiler-thrust-3).
+- **Batched command submission** — dispatches are recorded and submitted as one
+  command buffer with one fence wait instead of a submit-and-block per op,
+  worth **1.45–1.71×** on a training step across the fleet. Flushed
+  automatically at every host boundary, so correctness never depends on
+  managing it. `NXV_BATCH_MAX=0` restores submit-per-dispatch; `flush/0` exists
+  for benchmarks that need to time the work rather than the recording of it.
 - **Host fallback for the long tail** — sort/argsort, SVD/QR/solve/cholesky
   from `Nx.LinAlg` (via `Nx.Block.LinAlg`), rank-5+ shapes, and `pow` in f64
   (GLSL.std.450 has no f64 `pow`). Slow but correct.
@@ -115,16 +121,24 @@ on any GPU with a driver, CUDA or not.
   parity and host-fallback counts are asserted, not assumed: `Nx.Defn.grad`
   is compared against `BinaryBackend` op by op, and a CNN training step is
   asserted to leave the GPU exactly once.
-- **Fusion's win is structural.** It removes dispatches and intermediate
-  buffers and keeps the interpreter out of the loop — not faster kernels.
-  On matmul/conv-dominated graphs the wall-clock gain over the
-  already-on-GPU eager path is modest; it grows with the elementwise
-  work around the boundary.
+- **Fusion's win is structural — and it has a floor.** It removes dispatches
+  and intermediate buffers and keeps the interpreter out of the loop; it does
+  not make kernels faster. So the gain grows with the elementwise work around
+  a boundary — and **below some amount of it, fusion is a net loss**. Measured
+  on a dense-only MLP, where the graph is almost all `dot` and there is
+  nothing to amortise tracing and boundary buffers against,
+  `Nx.Vulkan.Compiler` runs at **0.76× of eager — a 24% regression** — and at
+  0.98× on a conv CNN. Both are bit-identical to the host; they are correct
+  and slower. Fusion is opt-in (`compiler: Nx.Vulkan.Compiler`), so this is a
+  choice to make per graph shape rather than a default you inherit.
 - **Every heuristic is fleet-validated, never assumed.** Win/loss
   crossovers are hardware-specific, so they are measured across the
   fleet (Kepler + Ampere), not the local box. The many-slot reduce is
   device-class-gated because it wins on weak GPUs and regresses on
-  strong ones. Cross-stage CSE was built, raced, and found to **never
+  strong ones. Batched submission was raced the same way and wins on
+  **all three** hosts with no crossover, which is why it needs no gate and
+  ships on by default — the outcome, not the assumption. Cross-stage CSE was
+  built, raced, and found to **never
   win on either device class** (recompute is cheaper than the dispatch
   it takes to avoid) — so it ships **default-off**, opt-in via
   `NXV_CSE=1`. See
@@ -169,7 +183,31 @@ gradient sum agreeing to 1e-8 against the `BinaryBackend` reference.
 
 ## Benchmarks
 
-### CNN training (August 2026)
+### Batched dispatch (August 2026)
+
+One `value_and_grad` step of an MNIST MLP at batch 32, submit-per-dispatch
+(`NXV_BATCH_MAX=0`) vs batched. Same graph, same commit, arms differing only in
+the environment variable:
+
+| host | GPU | before | after | |
+|---|---|---:|---:|---|
+| super-io | RTX 3060 Ti (Ampere, 2021) | 16.4 ms | **9.6 ms** | 1.71× |
+| mac-247 | GT 650M (Kepler, 2012) | 14.6 ms | **8.8 ms** | 1.65× |
+| mac-248 | GT 750M (Kepler, 2013) | 13.3 ms | **9.1 ms** | 1.45× |
+
+The loss is identical in every arm on every host — two architectures, two
+operating systems. Batching changes *when* work is submitted, never what is
+computed. Reproduce with
+[`examples/mnist_mlp_step_bench.exs`](examples/mnist_mlp_step_bench.exs);
+method and the full cap sweep in
+[`bench_results/BATCHED_DISPATCH.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/BATCHED_DISPATCH.md).
+
+> **The three tables below predate batched dispatch** and are therefore
+> pessimistic by roughly the factors above. They have not been re-run because
+> their harnesses were scratch projects rather than committed examples — so
+> they are left at their measured values rather than adjusted by arithmetic.
+
+### CNN training (August 2026, pre-batching)
 
 One `value_and_grad` step, batch 32, versus `Nx.BinaryBackend`. Losses are
 bit-identical to the host on every row.
@@ -188,7 +226,7 @@ the multipliers: a speedup here mostly measures how slow pure-Elixir
 work is dispatch-bound rather than compute-bound — which is why a 2012 laptop
 GPU is competitive with a 2021 desktop one.
 
-### vs EXLA (August 2026)
+### vs EXLA (August 2026, pre-batching)
 
 The [Axon MNIST guide](https://axon.hexdocs.pm/mnist.html) model, one training
 step at batch 32 on the RTX 3060 Ti — a dense-only MLP, which is the shape most
@@ -204,6 +242,12 @@ favourable to EXLA and least favourable here:
 fused vs eager). On a graph that is almost all `dot`, there is no elementwise
 work for fusion to amortise against, so the deficit is dispatch overhead and
 GEMM quality rather than missing whole-graph compilation.
+
+That diagnosis is what batched submission acts on, and it is why this race is
+labelled pre-batching: the eager row above has since improved ~1.7× on this
+box. The race has **not** been re-run — it needs a working EXLA, which this
+repo deliberately does not depend on — so no combined figure is claimed here.
+The remaining lever the measurement points at is GEMM quality.
 
 On a 2×strided-conv CNN the gap is similar — 41.3 ms eager vs 1.45 ms, with
 fusion neutral at 0.98× — so EXLA leads on both graph shapes tested. The
@@ -253,10 +297,20 @@ Full bench: [`examples/full_bench.exs`](examples/full_bench.exs).
 def deps do
   [
     {:nx, "~> 0.13"},
-    {:nx_vulkan, git: "https://github.com/borodark/nx_vulkan"}
+    {:nx_vulkan, "~> 0.3"}
   ]
 end
 ```
+
+Or track `main` directly:
+
+```elixir
+{:nx_vulkan, git: "https://github.com/borodark/nx_vulkan"}
+```
+
+> On 0.2.0 and training on the GPU? Upgrade. 0.2.0 computed correct results,
+> but its backward pass ran largely on the host — a LeNet step took 20.9 s
+> there and 84 ms here. See the [CHANGELOG](CHANGELOG.md).
 
 ```elixir
 # Build a tensor, transfer to GPU, do work
