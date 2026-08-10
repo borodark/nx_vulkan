@@ -543,5 +543,7 @@ testing. No search of the issue tracker was performed.
 - `lib/nx_vulkan/fallback.ex`, `test/nx_vulkan/fallback_test.exs` — the residency counter
 - `test/nx_vulkan/nx_doctest_test.exs` — the community-standard validation, and its except buckets
 - `test/nx_vulkan/parity_fallback_test.exs` — coverage of the deliberately-host ops
-- `docs/NX_PARITY_RESEARCH.md` — the callback-level gap analysis this complements
+- `docs/PARITY_STATUS.md` — the callback-level gap analysis this complements.
+  (It supersedes the older `docs/NX_PARITY_RESEARCH.md`, which is stale and
+  ships with the repo only, not the Hex package.)
 - `docs/VULKANO_BACKEND_ROADMAP.md` — where the native/fallback line currently sits

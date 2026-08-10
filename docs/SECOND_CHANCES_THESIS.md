@@ -221,8 +221,8 @@ own data corroborates the fit better than most projects could:
 
 - **It is validated on the stranded hardware in question.** The test fleet is a
   **2012 GT 650M (Kepler)** and a **GT 750M** — cards CUDA dropped years ago —
-  with a 2021 RTX 3060 Ti (Ampere) as the modern control. Same suite, **863
-  doctests / 361 tests / 0 failures on all three.** The thesis, running in a lab.
+  with a 2021 RTX 3060 Ti (Ampere) as the modern control. Same suite, **851
+  doctests / 415 tests / 0 failures on all three.** The thesis, running in a lab.
 - **It rides exactly the rescue path Claim 3 identifies.** Vulkan/SPIR-V, not
   CUDA — and it is *the only GPU compute path for FreeBSD + NVIDIA*, a platform
   CUDA never served. The "vendor-neutral API rescues stranded silicon" argument

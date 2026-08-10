@@ -76,13 +76,24 @@ defmodule Nx.Vulkan.MixProject do
         "Blog: The Backend That Didn't Need to Know" =>
           "http://www.dataalienist.com/blog-backend-didnt-need-to-know.html"
       },
+      # `docs` was a blanket glob, which shipped four blog drafts (published
+      # on the website anyway) and several May-era internal planning
+      # documents to every Hex user — including docs/NX_PARITY_RESEARCH.md,
+      # which docs/PARITY_STATUS.md explicitly labels "stale, do not use".
+      # Shipping a document another shipped document tells you not to read is
+      # not a docs directory, it is a working tree. Explicit list instead:
+      # things a *consumer* of the package has reason to open.
       files:
         ~w(
           lib
           native/nx_vulkan_vulkano/Cargo.toml
           native/nx_vulkan_vulkano/src
           priv/shaders
-          docs
+          docs/BACKWARD_PASS_AUDIT.md
+          docs/BACKEND_VERIFICATION_GAP.md
+          docs/PARITY_STATUS.md
+          docs/VULKANO_BACKEND_ROADMAP.md
+          docs/SECOND_CHANCES_THESIS.md
           examples
           livebooks
           CHANGELOG.md

@@ -20,7 +20,7 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 (roadmap stages 1–8) the `Nx.Defn` fusion compiler landed — whole-graph
 fusion with a multi-stage split at dot/conv/reduce/transpose boundaries,
 f32 and f64. Main branch is stable across Linux + Ampere (RTX 3060 Ti)
-and FreeBSD + Kepler (GT 650M, GT 750M): **863 doctests, 361 tests, 0
+and FreeBSD + Kepler (GT 650M, GT 750M): **851 doctests, 415 tests, 0
 failures** on the fleet. The vulkano-only architecture (C++ spirit
 backend dropped) merged 2026-07-13.
 
@@ -37,14 +37,15 @@ backend dropped) merged 2026-07-13.
 | Scholar linear regression (coefs match to 2e-6) | ✓ |
 | Cross-Kepler bit-determinism (GT 650M ≡ GT 750M) | ✓ |
 | Ampere `primary_buffer_count=128` cmd-buffer fix | ✓ |
-| Persistent buffer pool | mid-2026 |
+| Batched command submission (one submit + fence per batch) | ✓ |
+| Persistent buffer pool | open — see T4 |
 | f64 matmul (`matmul_f64.spv`) | ✓ |
-| Scholar native linalg shaders (SVD/QR/cholesky/solve) | mid-2026 |
+| Scholar native linalg shaders (SVD/QR/cholesky/solve) | open — unscheduled |
 | Polynomial f64 log/exp (behind config) — exmc side | ✓ (default: f32-cast) |
 | Custom `Nx.Defn` compiler (whole-graph fusion) | ✓ |
 | Native f32 compute (elementwise/matmul/conv/reduce/transpose) | ✓ |
 | Conv (im2col + GEMM) / FFT | ✓ |
-| sort / scatter | 2026 Q4 |
+| sort / scatter | demand-driven, not scheduled |
 
 ## Open items
 
@@ -52,9 +53,28 @@ backend dropped) merged 2026-07-13.
 GPU shaders (conv = im2col + GEMM, in f32 and f64; conv is also a fusion
 boundary). Still on host-fallback: sort, scatter,
 `Nx.LinAlg.solve`/`qr`/`svd`, complex types, sparse ops — they work
-today but are slow. Native shaders for each are 50–100 LOC of vulkano
-apiece. Estimated effort to reach feature parity with EXLA: 6–12 months
-of focused work, parallelisable.
+today but are slow.
+
+On effort, distinguishing two things the old "6–12 months to feature
+parity with EXLA" estimate ran together:
+
+- **Coverage parity** — every op having *a* native shader. The
+  "50–100 LOC of vulkano apiece" figure holds for the mechanical ones
+  (elementwise-shaped, index-remap), and the backward-pass work is
+  evidence for it: six of the eight ops recovered there needed no new
+  kernel at all, only a wider gate. Plausible at months of work.
+- **Performance parity** — being *competitive* per op. Not the same
+  problem and not the same timescale: measured, EXLA is ~12× ahead on a
+  dense MLP after batching, and the remaining lever is GEMM quality.
+
+Coverage parity is a matter of grinding through a list. Performance
+parity is not, and no date is claimed for it here.
+
+Which ops actually get built is **demand-driven** — the standing
+position in `PLAN_AFTER_BACKWARD_PASS.md` T7 is that a remaining
+fallback is a recorded decision, not an oversight, and each is picked up
+"if a workload appears". Correctness never depends on it: the host path
+is right, just slow.
 
 **Custom `Nx.Defn` compiler.** Done — `Nx.Vulkan.Compiler` (thrust 3).
 Eager execution still runs through `Nx.Defn.Evaluator` (one op per
@@ -69,10 +89,37 @@ f64. Whole dense/CNN layers, classifier heads, softmax, layernorm and
 work (cross-stage CSE) was raced and left default-off. See the README's
 [fusion compiler section](README.md#the-nxdefn-fusion-compiler-thrust-3).
 
-**Persistent buffer pool.** Currently per-call buffer allocation
-through vulkano's `StandardMemoryAllocator`. Works but costs a
-millisecond per dispatch that an explicit pool could reclaim.
-Mid-2026 work.
+**Shipped ≠ a win on every graph.** Measured against eager on the Axon
+MNIST model, the compiler runs at **0.76× on a dense-only MLP** (a 24%
+regression) and 0.98× on a conv CNN — correct in both cases, just
+slower. It splits stages at `dot` boundaries, so a graph that is almost
+all `dot` has nothing to amortise tracing and boundary buffers against.
+Fusion is opt-in, so this costs nothing by default, but it means
+"whole-graph compilation" is not a blanket improvement here and the
+README should not be read as claiming so. Gating it on a traced-graph
+statistic is T2 in
+[`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md).
+
+**Batched command submission.** Done — dispatches are recorded and
+submitted as one command buffer with one fence wait instead of a
+submit-and-block per op. **1.45–1.71× on a training step, raced on all
+three fleet hosts with no hardware crossover**, losses bit-identical.
+`NXV_BATCH_MAX=0` restores the old behaviour.
+[`bench_results/BATCHED_DISPATCH.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/BATCHED_DISPATCH.md).
+
+Worth recording that the evidence for this predated the work by three
+months: `PLAN_GPU_NODE.md`'s H3 measured **1.13 ms fence wait against
+138 µs submit** per `submit_and_wait` back in May — the wait dominating
+by 8× is exactly what batching amortises. The finding sat in a plan
+document until the EXLA race independently pointed at per-dispatch cost.
+
+**Persistent buffer pool.** Still open — per-call allocation through
+vulkano's `StandardMemoryAllocator`. The old note here claimed it "costs
+a millisecond per dispatch"; that figure is **unverified** and predates
+batched submission, which changed the per-dispatch picture, so treat it
+as a hypothesis to measure rather than a number to quote. Tracked as T4
+in [`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md),
+whose "done when" is that allocation stops appearing in a per-step profile.
 
 **f64 matmul.** Done — `matmul_f64.spv` ships and rank-2 matmul runs
 natively in f64. The backend now dtype-dispatches **native f32** as
@@ -85,7 +132,14 @@ default accumulator policy; f32 is no longer merely cast. General
 callback that routes `Nx.Block.LinAlg.SVD`/`QR`/`solve`/`cholesky`
 through `BinaryBackend`. Coefficients match to 2e-6. Native SVD/QR
 shaders would speed things up but aren't blocking correctness.
-2–4 weeks to add the most-used ones natively.
+
+The old "2–4 weeks to add the most-used ones natively" estimate is
+**withdrawn as unsupported**. It is the one number here not backed by a
+measurement or a comparable piece of finished work, and dense GPU
+SVD/QR is a materially harder problem than the shaders this project has
+shipped so far — iterative, convergence-sensitive, and awkward to make
+bit-reproducible across the fleet, which is a documented property here.
+No estimate is offered until someone prototypes one.
 
 ## Two-backend history (why both live here)
 

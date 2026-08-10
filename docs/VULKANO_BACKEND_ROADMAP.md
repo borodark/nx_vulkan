@@ -42,7 +42,7 @@ The C++ Elixir backend has since been **removed** (commit `bb94217`);
 | Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
 | Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
 
-Test coverage (2026-08): **863 doctests, 361 tests, 0 failures** on the fleet — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
+Test coverage (2026-08): **851 doctests, 415 tests, 0 failures** on the fleet — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
 ## Stage breakdown
 
@@ -123,9 +123,38 @@ Compare to C++ spirit + EXLA on Axon training step / sec.
 
 ## Performance target
 
-For exmc on GT 650M: regime-model NUTS sample ≤500 ms (already met
-via the synthesised chain shader). For Axon on FreeBSD: at least
-half of EXLA's throughput on the same hardware where EXLA runs.
+For exmc on GT 650M: regime-model NUTS sample ≤500 ms — **met**, via the
+synthesised chain shader.
+
+For Axon: "at least half of EXLA's throughput on the same hardware where
+EXLA runs" was the original target. **It is not met, and the gap is
+large enough that it should be stated rather than left implied.**
+
+Measured on the Axon MNIST MLP, one training step, RTX 3060 Ti
+([`MNIST_EXLA_RACE.md`](../bench_results/MNIST_EXLA_RACE.md)): EXLA
+0.715 ms vs 14.1 ms eager — **EXLA ~20× ahead**. Batched submission has
+since taken roughly 1.7× off that (`BATCHED_DISPATCH.md`), putting the
+gap near **~12×**. The target implies a 2× gap. So the shortfall is
+about **6×**, on the graph shape least favourable to this backend
+(dense-only, almost all `dot`).
+
+Two things that target got wrong, worth keeping in view:
+
+- **It assumed the deficit was whole-graph compilation.** It is not:
+  fusion *regresses* on this graph (0.76×). The measured levers are
+  per-dispatch cost — now largely taken — and **GEMM quality**, which is
+  untouched. A tiled 16×16 GEMM is not competitive with cuBLAS, and no
+  amount of scheduling work substitutes for that.
+- **"On the same hardware where EXLA runs" quietly excludes the fleet
+  this project exists for.** EXLA does not run on the two FreeBSD
+  Keplers at all, so on those the ratio is not 12× or 2× — it is
+  undefined. A throughput target benchmarked only where the competitor
+  can run is the wrong shape of goal for a portability-first backend.
+
+Re-based: treat **closing the GEMM gap on Ampere** as the measurable
+performance objective, and **op coverage + correctness on hardware EXLA
+cannot reach** as the differentiating one. Do not re-assert a fraction-of-EXLA
+number until a GEMM improvement has actually been raced.
 
 ## Non-goals
 
@@ -155,9 +184,11 @@ half of EXLA's throughput on the same hardware where EXLA runs.
    `Nx.Vulkan.NativeV`, or rely on `Nx.Defn.Evaluator` driving the
    backend op-by-op. Stage 7 decides.
 
-4. **Hex publish strategy.** Once stages 1–6 land, publish a 0.1
-   nx_vulkan_vulkano package. Existing `nx_vulkan` keeps the C++
-   path until parity is comfortable.
+4. ~~**Hex publish strategy.**~~ **Answered.** Published as `nx_vulkan`
+   itself — 0.1.0 (2026-05), 0.2.0 (2026-08), 0.3.0 (2026-08). There is
+   no separate `nx_vulkan_vulkano` package and no C++ path to keep
+   alongside it: the spirit backend was dropped in `bb94217`, so vulkano
+   is not a parallel option but the only one.
 
 5. **Multi-device on a single machine.** mac-247 (FreeBSD 15 +
    2013-era MacBook Pro) has the GT 650M Mac Edition AND an Intel

@@ -17,7 +17,7 @@
 > - The `Nx.Vulkan.Backend` (spirit C++) Elixir backend was **dropped**;
 >   references to it below are historical.
 > - Test counts below (e.g. "112/0") are stale: current suite is
->   **863 doctests, 361 tests, 0 failures** on the fleet.
+>   **851 doctests, 415 tests, 0 failures** on the fleet.
 >
 > The genuinely-still-true limitations (host-fallback long tail: sort,
 > scatter, native linalg; batched/non-2D dot; etc.) remain accurate.
@@ -72,17 +72,27 @@ mixed-radix (non-power-of-two) FFT, grouped/depthwise conv, and channels-last
 
 ## 1. Compute precision
 
-> **Updated (post-f64 migration).** The f32-only limitation below is
-> historical. `VulkanoBackend` is now **f64-only compute**: the native
-> shaders (elementwise binary/unary, reductions, matmul, the leapfrog
-> chain synth) run in f64, and f32 inputs are accepted and cast to f64.
-> The Phase-3 "f32-only, f64 deferred" note is superseded.
+> **Updated twice — read this, not the paragraph below it.** This section
+> has been superseded in *both* directions and the intermediate wording
+> survived longer than it was true:
+>
+> 1. Phase 3 said "f32-only, f64 deferred". Superseded.
+> 2. The f64 migration then made it **f64-only**, casting f32 up. That is
+>    the claim the paragraph below was written for, and it is **also
+>    superseded**.
+>
+> **What is true now (0.2.0 onward):** the hot ops — elementwise
+> binary/unary, matmul, conv, reduce, transpose — **dtype-dispatch native
+> f32 shaders as well as f64**. f32 is no longer cast up. f64 remains the
+> default *accumulator* policy for matmul/conv (correctness first;
+> consumer GPUs are slow at f64), switchable with
+> `Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)`.
 
-**What's true**: compute shaders are **f64**. Storage round-trips any
-numeric type (f32, f64, s8..s64, u8..u64); f32 operands are accepted and
-cast to f64 at dispatch. `Exmc.JIT.precision()` returns `:f64` for the
-Vulkan path (EMLX, the f32-only backend, was dropped). The f64 shader
-inventory (`*_f64.spv`) is what ships in `priv/shaders/`.
+**What's true**: compute shaders exist in **both f32 and f64**, selected
+by tensor dtype. Storage round-trips any numeric type (f32, f64, s8..s64,
+u8..u64). `Exmc.JIT.precision()` returns `:f64` for the Vulkan path (EMLX,
+the f32-only backend, was dropped). Both `*_f32.spv` and `*_f64.spv`
+inventories ship in `priv/shaders/`.
 
 ---
 
