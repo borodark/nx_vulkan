@@ -14,6 +14,14 @@ defmodule Nx.Vulkan.NxDoctestTest do
   """
   use ExUnit.Case, async: false
 
+  # Excluded from the strict-fallback run (scripts/strict_test.sh). Nx's own
+  # doctests are an API-COMPLETENESS suite: they are written in {:s, 32} integer
+  # tensors and cover the whole Nx surface — bitwise, trig, sort, concatenate,
+  # indexed_put — including everything this backend documents as f32/f64-only.
+  # Asserting residency over them would assert a capability the backend has
+  # never claimed. Correctness over them is asserted here, in the normal run.
+  @moduletag :host_fallback_expected
+
   setup do
     Nx.default_backend(Nx.Vulkan.VulkanoBackend)
     :ok

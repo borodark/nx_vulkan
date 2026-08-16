@@ -36,10 +36,12 @@ defmodule Nx.Vulkan.GatherTest do
     end
   end
 
+  @tag :host_fallback_expected
   test "non-prefix axes ([1]) falls back but stays correct" do
     check(fn b -> Nx.gather(Nx.iota({3, 4}, type: {:f, 32}, backend: b), Nx.tensor([[1], [3]], type: {:s, 64}, backend: b), axes: [1]) end, false)
   end
 
+  @tag :host_fallback_expected
   test "u8 value dtype falls back but stays correct" do
     check(fn b -> Nx.gather(Nx.iota({6}, type: {:u, 8}, backend: b), Nx.tensor([[0], [2]], type: {:s, 64}, backend: b)) end, false)
   end

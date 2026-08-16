@@ -36,6 +36,7 @@ defmodule Nx.Vulkan.CastTest do
     assert maxdiff(v, b) == 0.0
   end
 
+  @tag :host_fallback_expected
   test "non-f32/f64 cast still falls back but stays correct" do
     v = Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: VulkanoBackend) |> Nx.as_type({:s, 32})
     b = Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: Nx.BinaryBackend) |> Nx.as_type({:s, 32})

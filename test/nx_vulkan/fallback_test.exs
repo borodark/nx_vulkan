@@ -56,7 +56,9 @@ defmodule Nx.Vulkan.FallbackTest do
 
     test "is off by default — note/1 outside count/1 is a no-op" do
       refute Fallback.recording?()
-      assert Fallback.note({:whatever, 1}) == :ok
+      # :allow explicitly: note/1 with a synthetic op is the point of the test,
+      # and under a strict default it would (correctly) be refused.
+      assert Fallback.strict(:allow, fn -> Fallback.note({:whatever, 1}) end) == :ok
       refute Fallback.recording?()
     end
 
