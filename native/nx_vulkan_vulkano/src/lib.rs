@@ -556,17 +556,7 @@ fn leapfrog_chain_synth<'a>(
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?;
 
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        // Without this, download_buffer's buf.read() sees "resource in use".
-        drop(future);
+        finish_and_disarm(context, future)?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -731,17 +721,7 @@ fn leapfrog_chain_synth_f64<'a>(
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?;
 
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        // Without this, download_buffer's buf.read() sees "resource in use".
-        drop(future);
+        finish_and_disarm(context, future)?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -900,17 +880,7 @@ fn leapfrog_chain_synth_batch<'a>(
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?;
 
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // SAFETY: single dedicated compute queue; wait_idle drains it fully.
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-
-        // SAFETY: device.wait_idle guarantees the submission is done.
-        // signal_finished sets finished=true so Drop skips its fallback path.
-        unsafe { future.signal_finished(); }
-        // Drop the future to release vulkano's internal buffer access tracking.
-        // Without this, download_buffer's buf.read() sees "resource in use".
-        drop(future);
+        finish_and_disarm(context, future)?;
 
         Ok((
             download_buffer(q_chain_buf)?,
@@ -1080,21 +1050,13 @@ fn concat_buffers<'a>(
         }
     };
 
-    if let Err(e) = future.flush() {
-        return Ok(
-            (atoms::error(), atoms::dispatch_failed(), format!("flush: {e}")).encode(env),
-        );
+    // Same trap as everywhere else, in a different shape: these used to be two
+    // early  arms placed BEFORE signal_finished, so a
+    // flush or wait_idle failure left the future armed and Drop panicked the
+    // NIF instead of returning the error tuple that is right there.
+    if let Err(e) = finish_and_disarm(context, future) {
+        return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
     }
-
-    if let Err(e) = context.queue.with(|mut q| q.wait_idle()) {
-        return Ok(
-            (atoms::error(), atoms::dispatch_failed(), format!("wait_idle: {e}")).encode(env),
-        );
-    }
-
-    // SAFETY: device.wait_idle guarantees the submission is done.
-    unsafe { future.signal_finished(); }
-    drop(future);
 
     let tensor = VulkanoTensor {
         buf: dst,
@@ -2400,10 +2362,7 @@ fn fft<'a>(
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?;
-        future.flush().map_err(|e| format!("flush: {e}"))?;
-        context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-        unsafe { future.signal_finished(); }
-        drop(future);
+        finish_and_disarm(context, future)?;
         drop(tw_buf);
         Ok(())
     })();
@@ -2612,6 +2571,61 @@ fn batch_max() -> usize {
     })
 }
 
+/// Flush, wait for the queue to drain, and DISARM the future — on every path,
+/// including the failing ones.
+///
+/// vulkano's `Drop for CommandBufferExecFuture` (`command_buffer/traits.rs:441`)
+/// runs a fallback whenever `finished` is false:
+///
+/// ```ignore
+/// self.flush().unwrap();
+/// self.queue.with(|mut q| q.wait_idle()).unwrap();
+/// ```
+///
+/// So the obvious sequence — `flush()?`, `wait_idle()?`, then
+/// `signal_finished()` — has a trap in it. If either `?` fires, the function
+/// returns with the future still armed, Drop re-runs the operation that just
+/// failed, and `.unwrap()` converts a returnable error into a **panicked
+/// NIF**. A panic in a dirty scheduler is not a failed call; it is a dead
+/// BEAM thread and an `:erlang.nif_panicked` at the call site with no
+/// indication of the real cause.
+///
+/// That is not hypothetical. The synthesised chain shader dispatches a single
+/// workgroup whose runtime grows with K x n_obs; at n_obs = 600 it ran long
+/// enough for the driver's watchdog to reset the device, `wait_idle` returned
+/// `DEVICE_LOST`, and the caller saw `:nif_panicked` instead of an error it
+/// could fall back from. See docs/TODO_CHAIN_SHADER_BUGS.md.
+///
+/// Disarming on the error path is safe in the only sense that matters here:
+/// the submission has either completed or the device is gone, and Drop's
+/// fallback can do nothing but re-run the same failing call. Leaving the
+/// future armed cannot recover the device; it can only hide the reason.
+fn finish_and_disarm<F: GpuFuture>(context: &VkContext, future: F) -> Result<(), String> {
+    let flushed = future.flush().map_err(|e| format!("flush: {e}"));
+
+    // Only wait if the submit itself went through. If flush failed there may
+    // be nothing queued, and on a lost device wait_idle just fails again.
+    let waited = if flushed.is_ok() {
+        context
+            .queue
+            .with(|mut q| q.wait_idle())
+            .map_err(|e| format!("wait_idle: {e}"))
+    } else {
+        Ok(())
+    };
+
+    // SAFETY: mirrors what every call site already asserted on the success
+    // path — wait_idle above guarantees completion. On the error path this is
+    // disarming a future whose device is lost, which is strictly better than
+    // letting Drop panic. Must happen before the future is dropped.
+    unsafe {
+        future.signal_finished();
+    }
+    drop(future);
+
+    flushed.and(waited)
+}
+
 /// Build, submit, and wait for one command buffer. The `flush` /
 /// `wait_idle` / `signal_finished` / `drop` sequence is load-bearing: without
 /// the final two the buffers stay marked in use and the next `buf.read()`
@@ -2621,11 +2635,7 @@ fn submit_and_wait(context: &VkContext, cmd: CmdBuilder) -> Result<(), String> {
     let future = sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
         .map_err(|e| format!("then_execute: {e}"))?;
-    future.flush().map_err(|e| format!("flush: {e}"))?;
-    context.queue.with(|mut q| q.wait_idle()).map_err(|e| format!("wait_idle: {e}"))?;
-    // SAFETY: queue.wait_idle above guarantees the submission has completed.
-    unsafe { future.signal_finished(); }
-    drop(future);
+    finish_and_disarm(context, future)?;
     Ok(())
 }
 
