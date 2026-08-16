@@ -1,5 +1,11 @@
 # Nx Backend Parity Research — VulkanoBackend vs EXLA / EMLX
 
+> ⚠️ **STALE — describes a world nx 0.13 dissolved.** Written against nx
+> 0.12's 71-callback surface with 33 implemented. nx 0.13 restructured the
+> backend behaviour and every callback is now implemented. `PARITY_STATUS.md`
+> already labels this "stale, do not use"; this banner makes that visible
+> without opening another file. For the real gap see `MISSION.md`.
+
 **Date:** 2026-05-25
 **Author:** parity research session
 **Scope:** `Nx.Vulkan.VulkanoBackend` — gap analysis vs reference backends

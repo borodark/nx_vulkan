@@ -129,11 +129,10 @@ defmodule Nx.Vulkan.GradTest do
       grad_parity(&Nx.mean(Nx.multiply(&1, &1)), [{3, 6}])
     end
 
-    # OPEN, not waived: reduce_max's gradient builds a {:u, 8} comparison mask
-    # on the GPU, then `as_type`s it to float and `sum`s it — and neither has a
-    # u8 path, so both host-fall-back. Found by strict mode; see T12 in
-    # PLAN_AFTER_BACKWARD_PASS.md. Values are correct, residency is not.
-    @tag :host_fallback_open
+    # Was tagged :host_fallback_open for the u8-mask gap strict mode found.
+    # T12 closed it (cast_u8_to_f32/f64, reduce_axis_u8_to_u32, cast_u32_to_f*)
+    # and this now runs fully on-device, so the waiver is gone. Verified under
+    # NXV_HOST_FALLBACK=raise before removing the tag.
     test "reduce_max — gradient routes to the argmax slot" do
       grad_parity(&Nx.sum(Nx.reduce_max(&1, axes: [1])), [{4, 5}])
     end
@@ -154,10 +153,8 @@ defmodule Nx.Vulkan.GradTest do
   end
 
   describe "softmax / layernorm composites" do
-    # OPEN, not waived: same u8-mask root cause as reduce_max above — softmax
-    # contains a reduce_max, whose gradient mask is multiplied and summed on the
-    # host. See T12 in PLAN_AFTER_BACKWARD_PASS.md.
-    @tag :host_fallback_open
+    # Same story as reduce_max above: the u8-mask waiver is gone because T12
+    # closed the gap. Softmax's backward pass went 2 host fallbacks -> 0.
     test "softmax" do
       softmax = fn x ->
         m = Nx.reduce_max(x, axes: [1], keep_axes: true)

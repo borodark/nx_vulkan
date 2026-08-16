@@ -42,7 +42,7 @@ The C++ Elixir backend has since been **removed** (commit `bb94217`);
 | Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
 | Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
 
-Test coverage (2026-08): **851 doctests, 415 tests, 0 failures** on the fleet — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
+Test coverage (2026-08): **843 doctests, 456 tests, 0 failures** on super-io — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
 ## Stage breakdown
 

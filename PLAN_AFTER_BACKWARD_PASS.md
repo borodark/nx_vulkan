@@ -477,7 +477,10 @@ probabilistic consumer. Not because a d=8 posterior will get faster.
 [`T3`](#t3--strict-mode-host_fallback-raise-) exists to stop shipping.
 ## T12 — `cast_u8_to_f32/f64`: unstick the comparison mask `[x]`
 
-**Done.** softmax backward 2 fallbacks → **0**, `reduce_max`'s gradient exact on
+**Done.** softmax backward 2 fallbacks → **0**, and the two
+`:host_fallback_open` tags this item created in `grad_test.exs` are
+**tags removed** — verified passing under `NXV_HOST_FALLBACK=raise`
+before deleting, as this item's own "done when" required, `reduce_max`'s gradient exact on
 ties (`[0.5, 0.5, 0.0]`, ⅓ each), bit-identical to `BinaryBackend` across a
 60-cell (shape, axes, op) sweep. Three pieces were needed, not one: the cast
 alone moved the census from `{multiply, sum}` to `{divide, sum}` — same total,
@@ -561,16 +564,21 @@ fallback can be refused without also refusing `all_close`.
 
 ## Housekeeping `[ ]`
 
-- Both Keplers are parked on `feat/conv-backward-on-gpu`; restore mac.247 to
-  `feat/168-ssbo-captures` and mac.248 to `f32-matmul-prototype` when done.
-- The `f32_race_*_c622757.json` reports exist on each host and are not committed.
+- ~~Both Keplers are parked on `feat/conv-backward-on-gpu`~~ — done: both are
+  on `main` (verified 2026-08-16 over ssh). They were fast-forwarded for the
+  concurrency race and left there, which is the right place for them.
+- The `f32_race_*.json` reports (7 of them) sit uncommitted in
+  `bench_results/`. Either commit them as the per-host record they were
+  written to be, or delete them — an uncommitted benchmark is one nobody else
+  can check.
 - ~~`ROADMAP.md` called "~12× ahead after batching" a measurement while
   `README.md` explicitly declined to claim a post-batching figure~~ — fixed:
   the 20× is the measurement, the 12× is arithmetic, and the ROADMAP now says
   so. Re-running the race needs a working EXLA, which this repo deliberately
   does not depend on.
-- **`mix hex.retire nx_vulkan 0.2.0` is still not done** — hex.pm reports
-  `retirement: None`. Needs the maintainer's interactive Hex local password:
+- **`mix hex.retire nx_vulkan 0.2.0` is still not done** — re-checked against
+  the hex.pm API on 2026-08-16, still `retirement: None`. Needs the
+  maintainer's interactive Hex password, so it cannot be scripted. Needs the maintainer's interactive Hex local password:
   ```
   mix hex.retire nx_vulkan 0.2.0 deprecated --message "Backward pass ran on the host: GPU training was ~250x slower than advertised. Results were correct; use 0.3.0 for training."
   ```

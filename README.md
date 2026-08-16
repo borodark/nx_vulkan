@@ -123,7 +123,7 @@ compilation now present in the one place a Vulkan backend can offer it —
 on any GPU with a driver, CUDA or not.
 
 - **Correctness first.** Every fused result is checked exact against
-  `Nx.BinaryBackend`. The suite — **851 doctests, 439 tests, 0 failures**
+  `Nx.BinaryBackend`. The suite — **843 doctests, 456 tests, 0 failures**
   — is green on both a 2012 Kepler (GT 650M, FreeBSD) and a 2021 Ampere
   (RTX 3060 Ti, Linux), with the f64 fused path active on both. Gradient
   parity and host-fallback counts are asserted, not assumed: `Nx.Defn.grad`

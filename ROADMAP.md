@@ -14,14 +14,23 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 (Phase 3+). Per-workstream notes in
 [`research/gpu_node/`](https://github.com/borodark/nx_vulkan/tree/main/research/gpu_node).
 
+> **The goal of this project is reach, not speed.** EXLA on a host CPU beats
+> this backend by 20-215x on the same gradient at every size measured
+> ([`bench_results/MODEL_SCALING.md`](bench_results/MODEL_SCALING.md)), so
+> performance parity is not the bar and is not pursued. The value is running
+> Nx correctly on hardware nothing else serves — NVIDIA on FreeBSD, decade-old
+> Keplers, AMD/Intel, anything with a Vulkan driver. Sections below that
+> discuss closing a performance gap predate this and are kept as history;
+> where they conflict with this paragraph, this paragraph is newer. See
+> [`MISSION.md`](MISSION.md).
+
 ## Status snapshot
 
 **Fusion compiler shipped** (August 2026): on top of the eager backend
 (roadmap stages 1–8) the `Nx.Defn` fusion compiler landed — whole-graph
 fusion with a multi-stage split at dot/conv/reduce/transpose boundaries,
 f32 and f64. Main branch is stable across Linux + Ampere (RTX 3060 Ti)
-and FreeBSD + Kepler (GT 650M, GT 750M): **851 doctests, 415 tests, 0
-failures** on the fleet. The vulkano-only architecture (C++ spirit
+and FreeBSD + Kepler (GT 650M, GT 750M): **843 doctests, 456 tests, 0 failures** on the fleet. The vulkano-only architecture (C++ spirit
 backend dropped) merged 2026-07-13.
 
 | Feature | Status |
