@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout (local_size_x = 256) in;
+
+// Specialization constant selects operation at pipeline creation.
+// Switch eliminated by SPIR-V compiler — zero runtime cost.
+layout (constant_id = 0) const int OP = 0;
+
+// Push constant: number of elements
+layout (push_constant) uniform Push {
+    uint n;
+} pc;
+
+layout (std430, binding = 0) readonly buffer InputA { float64_t a[]; };
+layout (std430, binding = 1) readonly buffer InputB { float64_t b[]; };
+layout (std430, binding = 2) writeonly buffer Output { float64_t c[]; };
+
+// GLSL builtins (exp, log, pow, tanh) lack f64 overloads.
+// Cast through float for transcendentals — precision limited to f32
+// for these ops, but arithmetic (+, -, *, /, sqrt, abs, min, max,
+// comparisons) stays in full f64.
+float64_t pow_f64(float64_t x, float64_t y) {
+    return float64_t(pow(float(x), float(y)));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    float64_t x = a[i];
+    float64_t y = b[i];
+    float64_t r;
+
+    switch (OP) {
+        case 0: r = x + y; break;                      // add
+        case 1: r = x * y; break;                      // multiply
+        case 2: r = x - y; break;                      // subtract
+        case 3: r = x / y; break;                      // divide
+        case 4: r = pow_f64(x, y); break;              // power
+        case 5: r = max(x, y); break;                  // max
+        case 6: r = min(x, y); break;                  // min
+        case 7: r = (x == y) ? 1.0LF : 0.0LF; break;  // equal
+        case 8: r = (x <  y) ? 1.0LF : 0.0LF; break;  // less
+        case 9: r = (x >  y) ? 1.0LF : 0.0LF; break;  // greater
+        default: r = 0.0LF; break;
+    }
+
+    c[i] = r;
+}

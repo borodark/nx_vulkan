@@ -1,0 +1,30 @@
+#version 450
+
+// 2D transpose: C[i, j] = A[j, i] where A is M×N (row-major) and
+// C is N×M. Rank-N transpose is a separate iteration; v0.1.2 covers
+// the matmul-backward case (one of the most common gradient ops).
+//
+// Workgroup is 16×16 — small enough to coalesce nicely on most GPUs;
+// 2D dispatch grid covers (M, N) padded up to multiples of 16.
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (push_constant) uniform Push {
+    uint M;     // rows of input (input is row-major M × N)
+    uint N;     // cols of input
+} pc;
+
+layout (std430, binding = 0) readonly  buffer In  { float a[]; };
+layout (std430, binding = 1) writeonly buffer Out { float c[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.y;   // row in input
+    uint j = gl_GlobalInvocationID.x;   // col in input
+    if (i >= pc.M || j >= pc.N) return;
+
+    // Read a[i, j] (input is M × N row-major)
+    float v = a[i * pc.N + j];
+
+    // Write c[j, i] (output is N × M row-major; c index = j*M + i)
+    c[j * pc.M + i] = v;
+}

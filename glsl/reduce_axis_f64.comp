@@ -1,0 +1,39 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout (local_size_x = 256) in;
+
+layout (push_constant) uniform Push {
+    uint outer;        // product of dims before reduced axis
+    uint reduce_size;  // size of the reduced axis itself
+    uint inner;        // product of dims after reduced axis
+    uint op;           // 0 = sum, 1 = max, 2 = min
+} pc;
+
+layout (std430, binding = 0) readonly  buffer In  { float64_t a[]; };
+layout (std430, binding = 1) writeonly buffer Out { float64_t c[]; };
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint n_slots = pc.outer * pc.inner;
+    if (slot >= n_slots) return;
+
+    uint o = slot / pc.inner;
+    uint i = slot % pc.inner;
+    uint stride_outer = pc.reduce_size * pc.inner;
+    uint base = o * stride_outer + i;
+
+    float64_t acc;
+    if (pc.op == 0u) acc = 0.0LF;
+    else if (pc.op == 1u) acc = -1.0LF / 0.0LF;   // -inf
+    else                  acc =  1.0LF / 0.0LF;   // +inf
+
+    for (uint k = 0u; k < pc.reduce_size; ++k) {
+        float64_t v = a[base + k * pc.inner];
+        if (pc.op == 0u)      acc += v;
+        else if (pc.op == 1u) acc = max(acc, v);
+        else                  acc = min(acc, v);
+    }
+
+    c[slot] = acc;
+}

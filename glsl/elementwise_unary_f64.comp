@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout (local_size_x = 256) in;
+
+// Specialization constant selects op at pipeline creation
+layout (constant_id = 0) const int OP = 0;
+
+layout (push_constant) uniform Push {
+    uint n;
+} pc;
+
+layout (std430, binding = 0) readonly buffer Input { float64_t in_data[]; };
+layout (std430, binding = 1) writeonly buffer Output { float64_t out_data[]; };
+
+// GLSL builtins (exp, log, tanh) lack f64 overloads.
+// Cast through float for transcendentals — precision limited to f32
+// for these ops, but arithmetic stays in full f64.
+float64_t exp_f64(float64_t x)  { return float64_t(exp(float(x))); }
+float64_t log_f64(float64_t x)  { return float64_t(log(float(x))); }
+float64_t tanh_f64(float64_t x) { return float64_t(tanh(float(x))); }
+
+// Abramowitz & Stegun 7.1.26 — max error 1.5e-7
+// (uses f32 transcendentals internally)
+float64_t erf_approx(float64_t x) {
+    float64_t a1 =  0.254829592LF;
+    float64_t a2 = -0.284496736LF;
+    float64_t a3 =  1.421413741LF;
+    float64_t a4 = -1.453152027LF;
+    float64_t a5 =  1.061405429LF;
+    float64_t p  =  0.3275911LF;
+    float64_t s  = sign(x);
+    float64_t ax = abs(x);
+    float64_t t  = 1.0LF / (1.0LF + p * ax);
+    float64_t y  = 1.0LF - (((((a5*t + a4)*t + a3)*t + a2)*t + a1)*t)
+                   * float64_t(exp(float(-ax * ax)));
+    return s * y;
+}
+
+// Taylor series for small |x|, exp(x)-1 otherwise
+float64_t expm1_approx(float64_t x) {
+    if (abs(x) < 0.5LF) {
+        float64_t x2 = x * x;
+        return x
+             + x2 * 0.5LF
+             + x2 * x  * (1.0LF / 6.0LF)
+             + x2 * x2 * (1.0LF / 24.0LF)
+             + x2 * x2 * x * (1.0LF / 120.0LF);
+    } else {
+        return exp_f64(x) - 1.0LF;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+
+    float64_t x = in_data[i];
+    float64_t y;
+
+    switch (OP) {
+        case 0: y = exp_f64(x); break;
+        case 1: y = log_f64(x); break;
+        case 2: y = sqrt(x); break;
+        case 3: y = abs(x); break;
+        case 4: y = -x; break;
+        case 5: y = 1.0LF / (1.0LF + exp_f64(-x)); break;  // sigmoid
+        case 6: y = tanh_f64(x); break;
+        case 7: y = max(x, 0.0LF); break;                   // relu
+        case 8: y = ceil(x); break;
+        case 9: y = floor(x); break;
+        case 10: y = sign(x); break;
+        case 11: y = 1.0LF / x; break;                      // reciprocal
+        case 12: y = x * x; break;                           // square
+        case 13: y = erf_approx(x); break;                   // erf
+        case 14: y = expm1_approx(x); break;                 // expm1
+        default: y = x; break;
+    }
+
+    out_data[i] = y;
+}
