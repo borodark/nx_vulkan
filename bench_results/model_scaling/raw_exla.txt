@@ -1,0 +1,29 @@
+# EXLA reference: prompt_nick, nx 0.10.0 + exla 0.10.0, likelihood-only value_and_grad
+#X nx=0.10.0 exla=0.10.0 reps=3
+#X d=256 n_obs=6000 arm=exla_host ms=2.185 iters=163 logp=17193.8593
+#X d=256 n_obs=6000 arm=exla_cuda ms=2.013 iters=195 logp=17193.8593
+#X d=1024 n_obs=6000 arm=exla_host ms=5.011 iters=80 logp=17193.8593
+#X d=1024 n_obs=6000 arm=exla_cuda ms=4.807 iters=80 logp=17193.8593
+#X d=256 n_obs=60000 arm=exla_host ms=11.919 iters=33 logp=171892.1590
+#X d=256 n_obs=60000 arm=exla_cuda ms=10.794 iters=37 logp=171892.1590
+#X d=1024 n_obs=60000 arm=exla_host ms=39.427 iters=10 logp=171892.1587
+#X d=1024 n_obs=60000 arm=exla_cuda ms=38.384 iters=11 logp=171892.1587
+#X nx=0.10.0 exla=0.10.0 reps=3
+#X d=8 n_obs=60 arm=binary ms=7.807 iters=48 logp=167.1891
+#X d=8 n_obs=60 arm=exla_host ms=0.582 iters=200 logp=167.1891
+#X d=8 n_obs=60 arm=exla_cuda ms=0.478 iters=200 logp=167.1891
+#X d=8 n_obs=600 arm=binary ms=76.607 iters=5 logp=1712.6564
+#X d=8 n_obs=600 arm=exla_host ms=0.577 iters=200 logp=1712.6564
+#X d=8 n_obs=600 arm=exla_cuda ms=0.489 iters=200 logp=1712.6564
+#X d=8 n_obs=6000 arm=binary ms=1461.776 iters=1 logp=17193.8594
+#X d=8 n_obs=6000 arm=exla_host ms=0.881 iters=200 logp=17193.8594
+#X d=8 n_obs=6000 arm=exla_cuda ms=0.835 iters=200 logp=17193.8594
+#X d=64 n_obs=60 arm=binary ms=54.779 iters=6 logp=167.1891
+#X d=64 n_obs=60 arm=exla_host ms=0.709 iters=200 logp=167.1891
+#X d=64 n_obs=60 arm=exla_cuda ms=0.527 iters=200 logp=167.1891
+#X d=64 n_obs=600 arm=binary ms=1032.088 iters=1 logp=1712.6564
+#X d=64 n_obs=600 arm=exla_host ms=0.640 iters=200 logp=1712.6564
+#X d=64 n_obs=600 arm=exla_cuda ms=0.800 iters=200 logp=1712.6564
+#X d=256 n_obs=60 arm=binary ms=293.233 iters=1 logp=167.1891
+#X d=256 n_obs=60 arm=exla_host ms=0.679 iters=200 logp=167.1891
+#X d=256 n_obs=60 arm=exla_cuda ms=0.731 iters=200 logp=167.1891

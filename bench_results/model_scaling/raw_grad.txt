@@ -1,0 +1,230 @@
+# run 1 (2026-08-16 09:33-09:50, foreign 'mix test' concurrent 09:32:30-09:49:34)
+#H mode=grad models=V dims=8,16,32,64,128,256,512,1024 nobs=60 arms=cpu/perop type=f64 reps=5 tag=V-dsweep
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:33:02 up 13 days, 22:46,  1 user,  load average: 4.24, 4.75, 4.45
+#G model=V d=8 n_obs=60 type=f64 arm=cpu ms=8.001 lo=7.847 hi=8.483 iters=57 reps=5 fallbacks=0 logp=158.000357 compile_ms=24.429 fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=perop ms=11.714 lo=9.705 hi=13.642 iters=44 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.056 fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=cpu ms=13.710 lo=12.289 hi=16.619 iters=24 reps=5 fallbacks=0 logp=148.811598 compile_ms=0.077 fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=perop ms=10.987 lo=10.631 hi=12.836 iters=37 reps=5 fallbacks=0 logp=148.811570 compile_ms=0.065 fbmap=-
+#G model=V d=32 n_obs=60 type=f64 arm=cpu ms=25.054 lo=24.317 hi=31.367 iters=13 reps=5 fallbacks=0 logp=130.434080 compile_ms=0.119 fbmap=-
+#G model=V d=32 n_obs=60 type=f64 arm=perop ms=12.927 lo=12.619 hi=13.476 iters=38 reps=5 fallbacks=0 logp=130.434050 compile_ms=0.046 fbmap=-
+#G model=V d=64 n_obs=60 type=f64 arm=cpu ms=64.378 lo=49.333 hi=75.618 iters=6 reps=5 fallbacks=0 logp=93.679044 compile_ms=0.064 fbmap=-
+#G model=V d=64 n_obs=60 type=f64 arm=perop ms=13.903 lo=13.028 hi=14.208 iters=32 reps=5 fallbacks=0 logp=93.679012 compile_ms=0.057 fbmap=-
+#G model=V d=128 n_obs=60 type=f64 arm=cpu ms=107.863 lo=104.102 hi=140.019 iters=3 reps=5 fallbacks=0 logp=20.168972 compile_ms=0.066 fbmap=-
+#G model=V d=128 n_obs=60 type=f64 arm=perop ms=15.007 lo=14.016 hi=16.167 iters=30 reps=5 fallbacks=0 logp=20.168935 compile_ms=0.048 fbmap=-
+#G model=V d=256 n_obs=60 type=f64 arm=cpu ms=434.452 lo=375.402 hi=453.647 iters=1 reps=5 fallbacks=0 logp=-126.851173 compile_ms=0.077 fbmap=-
+#G model=V d=256 n_obs=60 type=f64 arm=perop ms=14.609 lo=14.350 hi=15.025 iters=26 reps=5 fallbacks=0 logp=-126.851219 compile_ms=0.095 fbmap=-
+#G model=V d=512 n_obs=60 type=f64 arm=cpu ms=794.916 lo=659.141 hi=879.648 iters=1 reps=5 fallbacks=0 logp=-420.891462 compile_ms=0.112 fbmap=-
+#G model=V d=512 n_obs=60 type=f64 arm=perop ms=16.831 lo=15.914 hi=18.859 iters=26 reps=5 fallbacks=0 logp=-420.891527 compile_ms=0.122 fbmap=-
+#G model=V d=1024 n_obs=60 type=f64 arm=cpu ms=2130.396 lo=1718.503 hi=2237.526 iters=1 reps=5 fallbacks=0 logp=-1008.972041 compile_ms=0.068 fbmap=-
+#G model=V d=1024 n_obs=60 type=f64 arm=perop ms=17.609 lo=17.056 hi=21.182 iters=21 reps=5 fallbacks=0 logp=-1008.972143 compile_ms=0.098 fbmap=-
+#H done uptime=09:33:56 up 13 days, 22:47,  1 user,  load average: 4.30, 4.69, 4.44
+#H mode=grad models=V dims=4,6,8,10,12,14,16,24 nobs=60 arms=cpu/perop type=f64 reps=5 tag=V-fine
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:35:30 up 13 days, 22:49,  1 user,  load average: 11.63, 6.02, 4.89
+#G model=V d=4 n_obs=60 type=f64 arm=cpu ms=4.879 lo=4.826 hi=5.337 iters=136 reps=5 fallbacks=0 logp=162.594737 compile_ms=21.799 fbmap=-
+#G model=V d=4 n_obs=60 type=f64 arm=perop ms=12.360 lo=11.923 hi=12.952 iters=21 reps=5 fallbacks=0 logp=162.594709 compile_ms=0.062 fbmap=-
+#G model=V d=6 n_obs=60 type=f64 arm=cpu ms=6.575 lo=6.172 hi=7.045 iters=45 reps=5 fallbacks=0 logp=160.297547 compile_ms=0.071 fbmap=-
+#G model=V d=6 n_obs=60 type=f64 arm=perop ms=12.848 lo=12.603 hi=13.015 iters=54 reps=5 fallbacks=0 logp=160.297513 compile_ms=0.096 fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=cpu ms=8.645 lo=8.097 hi=9.220 iters=40 reps=5 fallbacks=0 logp=158.000357 compile_ms=0.136 fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=perop ms=12.875 lo=12.778 hi=13.855 iters=55 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.045 fbmap=-
+#G model=V d=10 n_obs=60 type=f64 arm=cpu ms=10.367 lo=9.795 hi=10.716 iters=34 reps=5 fallbacks=0 logp=155.703167 compile_ms=0.101 fbmap=-
+#G model=V d=10 n_obs=60 type=f64 arm=perop ms=13.093 lo=12.765 hi=13.605 iters=61 reps=5 fallbacks=0 logp=155.703141 compile_ms=0.046 fbmap=-
+#G model=V d=12 n_obs=60 type=f64 arm=cpu ms=11.924 lo=11.639 hi=13.169 iters=32 reps=5 fallbacks=0 logp=153.405978 compile_ms=0.104 fbmap=-
+#G model=V d=12 n_obs=60 type=f64 arm=perop ms=13.303 lo=13.079 hi=13.332 iters=60 reps=5 fallbacks=0 logp=153.405950 compile_ms=0.086 fbmap=-
+#G model=V d=14 n_obs=60 type=f64 arm=cpu ms=14.368 lo=13.580 hi=16.820 iters=29 reps=5 fallbacks=0 logp=151.108788 compile_ms=0.145 fbmap=-
+#G model=V d=14 n_obs=60 type=f64 arm=perop ms=13.131 lo=12.878 hi=13.315 iters=44 reps=5 fallbacks=0 logp=151.108763 compile_ms=0.051 fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=cpu ms=16.138 lo=14.797 hi=17.998 iters=29 reps=5 fallbacks=0 logp=148.811598 compile_ms=0.076 fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=perop ms=12.983 lo=12.904 hi=13.192 iters=52 reps=5 fallbacks=0 logp=148.811570 compile_ms=0.071 fbmap=-
+#G model=V d=24 n_obs=60 type=f64 arm=cpu ms=22.487 lo=21.282 hi=27.011 iters=24 reps=5 fallbacks=0 logp=139.622839 compile_ms=0.062 fbmap=-
+#G model=V d=24 n_obs=60 type=f64 arm=perop ms=14.022 lo=12.994 hi=14.503 iters=52 reps=5 fallbacks=0 logp=139.622811 compile_ms=0.056 fbmap=-
+#H done uptime=09:36:15 up 13 days, 22:49,  1 user,  load average: 7.98, 5.83, 4.88
+#H mode=grad models=V dims=8 nobs=60,600,6000,60000 arms=cpu/perop type=f64 reps=5 tag=V-nobs
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:36:18 up 13 days, 22:49,  1 user,  load average: 7.98, 5.83, 4.88
+#G model=V d=8 n_obs=60 type=f64 arm=cpu ms=6.838 lo=6.643 hi=7.943 iters=112 reps=5 fallbacks=0 logp=158.000357 compile_ms=18.821 fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=perop ms=12.709 lo=12.381 hi=12.758 iters=45 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.083 fbmap=-
+#G model=V d=8 n_obs=600 type=f64 arm=cpu ms=69.222 lo=66.004 hi=87.464 iters=7 reps=5 fallbacks=0 logp=1703.467647 compile_ms=0.145 fbmap=-
+#G model=V d=8 n_obs=600 type=f64 arm=perop ms=15.256 lo=14.816 hi=15.306 iters=48 reps=5 fallbacks=0 logp=1703.467370 compile_ms=0.038 fbmap=-
+#G model=V d=8 n_obs=6000 type=f64 arm=cpu ms=1638.394 lo=1492.383 hi=1689.626 iters=1 reps=5 fallbacks=0 logp=17184.670632 compile_ms=0.069 fbmap=-
+#G model=V d=8 n_obs=6000 type=f64 arm=perop ms=19.734 lo=18.576 hi=23.754 iters=22 reps=5 fallbacks=0 logp=17184.667869 compile_ms=0.111 fbmap=-
+#G model=V d=8 n_obs=60000 type=f64 arm=cpu ms=21750.016 lo=21393.180 hi=22124.041 iters=1 reps=5 fallbacks=0 logp=171882.971105 compile_ms=0.120 fbmap=-
+#G model=V d=8 n_obs=60000 type=f64 arm=perop ms=92.869 lo=88.542 hi=96.369 iters=6 reps=5 fallbacks=0 logp=171882.943486 compile_ms=0.098 fbmap=-
+#H done uptime=09:39:50 up 13 days, 22:53,  1 user,  load average: 3.68, 4.79, 4.66
+#H mode=grad models=V dims=64,256 nobs=600,6000 arms=cpu/perop type=f64 reps=5 tag=V-joint
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:39:53 up 13 days, 22:53,  1 user,  load average: 3.63, 4.76, 4.65
+#G model=V d=64 n_obs=600 type=f64 arm=cpu ms=1374.835 lo=1336.421 hi=1436.798 iters=1 reps=5 fallbacks=0 logp=1639.146334 compile_ms=21.653 strict=- fbmap=-
+#G model=V d=64 n_obs=600 type=f64 arm=perop ms=16.605 lo=16.300 hi=17.502 iters=34 reps=5 fallbacks=0 logp=1639.146056 compile_ms=0.072 strict=clean fbmap=-
+#G model=V d=256 n_obs=600 type=f64 arm=cpu ms=6695.727 lo=6482.419 hi=6758.998 iters=1 reps=5 fallbacks=0 logp=1418.616117 compile_ms=0.064 strict=- fbmap=-
+#G model=V d=256 n_obs=600 type=f64 arm=perop ms=325.250 lo=23.922 hi=685.846 iters=2 reps=5 fallbacks=0 logp=1418.615828 compile_ms=0.089 strict=clean fbmap=-
+#G model=V d=64 n_obs=6000 type=f64 arm=cpu ms=19810.631 lo=17557.113 hi=20102.227 iters=1 reps=5 fallbacks=0 logp=17120.349319 compile_ms=0.070 strict=- fbmap=-
+#G model=V d=64 n_obs=6000 type=f64 arm=perop ms=48.285 lo=47.067 hi=48.610 iters=13 reps=5 fallbacks=0 logp=17120.346586 compile_ms=0.093 strict=clean fbmap=-
+
+# run 2 / replicate (09:52-09:57, foreign 'mix test' concurrent from 09:51)
+#H mode=grad models=V dims=8,10,12,14,16,32,64,128,256 nobs=60 arms=cpu/perop/fused type=f64 reps=5 tag=R1-V-d-rep
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:51:26 up 13 days, 23:05,  1 user,  load average: 9.22, 5.61, 4.99
+#G model=V d=8 n_obs=60 type=f64 arm=cpu ms=6.828 lo=6.671 hi=7.564 iters=85 reps=5 fallbacks=0 logp=158.000357 compile_ms=20.142 strict=- fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=perop ms=11.134 lo=10.581 hi=11.967 iters=60 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.062 strict=clean fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=fused ms=13.675 lo=13.051 hi=14.773 iters=42 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.108 strict=clean fbmap=-
+#G model=V d=10 n_obs=60 type=f64 arm=cpu ms=8.018 lo=7.855 hi=11.231 iters=36 reps=5 fallbacks=0 logp=155.703167 compile_ms=0.127 strict=- fbmap=-
+#G model=V d=10 n_obs=60 type=f64 arm=perop ms=14.235 lo=12.428 hi=14.745 iters=57 reps=5 fallbacks=0 logp=155.703141 compile_ms=0.041 strict=clean fbmap=-
+#G model=V d=10 n_obs=60 type=f64 arm=fused ms=10.493 lo=9.514 hi=12.661 iters=51 reps=5 fallbacks=0 logp=155.703141 compile_ms=0.130 strict=clean fbmap=-
+#G model=V d=12 n_obs=60 type=f64 arm=cpu ms=11.887 lo=9.104 hi=12.731 iters=46 reps=5 fallbacks=0 logp=153.405978 compile_ms=0.069 strict=- fbmap=-
+#G model=V d=12 n_obs=60 type=f64 arm=perop ms=13.867 lo=13.104 hi=14.598 iters=54 reps=5 fallbacks=0 logp=153.405950 compile_ms=0.046 strict=clean fbmap=-
+#G model=V d=12 n_obs=60 type=f64 arm=fused ms=20.912 lo=14.008 hi=22.009 iters=38 reps=5 fallbacks=0 logp=153.405950 compile_ms=0.067 strict=clean fbmap=-
+#G model=V d=14 n_obs=60 type=f64 arm=cpu ms=10.817 lo=10.384 hi=14.519 iters=41 reps=5 fallbacks=0 logp=151.108788 compile_ms=0.061 strict=- fbmap=-
+#G model=V d=14 n_obs=60 type=f64 arm=perop ms=14.288 lo=13.295 hi=14.496 iters=42 reps=5 fallbacks=0 logp=151.108763 compile_ms=0.038 strict=clean fbmap=-
+#G model=V d=14 n_obs=60 type=f64 arm=fused ms=16.196 lo=14.483 hi=16.748 iters=41 reps=5 fallbacks=0 logp=151.108763 compile_ms=0.096 strict=clean fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=cpu ms=12.303 lo=11.866 hi=16.146 iters=35 reps=5 fallbacks=0 logp=148.811598 compile_ms=0.128 strict=- fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=perop ms=13.833 lo=13.074 hi=14.842 iters=41 reps=5 fallbacks=0 logp=148.811570 compile_ms=0.038 strict=clean fbmap=-
+#G model=V d=16 n_obs=60 type=f64 arm=fused ms=14.504 lo=14.178 hi=15.651 iters=43 reps=5 fallbacks=0 logp=148.811570 compile_ms=0.065 strict=clean fbmap=-
+#G model=V d=32 n_obs=60 type=f64 arm=cpu ms=23.825 lo=23.720 hi=27.937 iters=19 reps=5 fallbacks=0 logp=130.434080 compile_ms=0.076 strict=- fbmap=-
+#G model=V d=32 n_obs=60 type=f64 arm=perop ms=10.183 lo=8.222 hi=230.139 iters=42 reps=5 fallbacks=0 logp=130.434050 compile_ms=0.036 strict=clean fbmap=-
+#G model=V d=32 n_obs=60 type=f64 arm=fused ms=13.426 lo=10.818 hi=14.094 iters=70 reps=5 fallbacks=0 logp=130.434050 compile_ms=0.053 strict=clean fbmap=-
+#G model=V d=64 n_obs=60 type=f64 arm=cpu ms=50.152 lo=47.692 hi=64.507 iters=9 reps=5 fallbacks=0 logp=93.679044 compile_ms=0.086 strict=- fbmap=-
+#G model=V d=64 n_obs=60 type=f64 arm=perop ms=15.397 lo=14.272 hi=15.654 iters=44 reps=5 fallbacks=0 logp=93.679012 compile_ms=0.037 strict=clean fbmap=-
+#G model=V d=64 n_obs=60 type=f64 arm=fused ms=15.118 lo=14.635 hi=16.161 iters=36 reps=5 fallbacks=0 logp=93.679012 compile_ms=0.074 strict=clean fbmap=-
+#G model=V d=128 n_obs=60 type=f64 arm=cpu ms=118.929 lo=113.631 hi=142.648 iters=4 reps=5 fallbacks=0 logp=20.168972 compile_ms=0.082 strict=- fbmap=-
+#G model=V d=128 n_obs=60 type=f64 arm=perop ms=16.835 lo=16.666 hi=16.947 iters=35 reps=5 fallbacks=0 logp=20.168935 compile_ms=0.039 strict=clean fbmap=-
+#G model=V d=128 n_obs=60 type=f64 arm=fused ms=16.700 lo=15.760 hi=17.137 iters=34 reps=5 fallbacks=0 logp=20.168935 compile_ms=0.073 strict=clean fbmap=-
+#G model=V d=256 n_obs=60 type=f64 arm=cpu ms=314.168 lo=311.589 hi=318.649 iters=2 reps=5 fallbacks=0 logp=-126.851173 compile_ms=0.060 strict=- fbmap=-
+#G model=V d=256 n_obs=60 type=f64 arm=perop ms=15.229 lo=15.120 hi=17.707 iters=36 reps=5 fallbacks=0 logp=-126.851219 compile_ms=0.041 strict=clean fbmap=-
+#G model=V d=256 n_obs=60 type=f64 arm=fused ms=16.065 lo=15.720 hi=16.949 iters=35 reps=5 fallbacks=0 logp=-126.851219 compile_ms=0.062 strict=clean fbmap=-
+#H done uptime=09:53:00 up 13 days, 23:06,  1 user,  load average: 5.66, 5.44, 4.99
+#H mode=grad models=V dims=8 nobs=60,600,6000 arms=cpu/perop/fused type=f64 reps=5 tag=R2-V-n-rep
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:53:03 up 13 days, 23:06,  1 user,  load average: 5.69, 5.45, 5.00
+#G model=V d=8 n_obs=60 type=f64 arm=cpu ms=7.971 lo=7.747 hi=7.980 iters=86 reps=5 fallbacks=0 logp=158.000357 compile_ms=18.270 strict=- fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=perop ms=12.582 lo=12.294 hi=13.129 iters=60 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.067 strict=clean fbmap=-
+#G model=V d=8 n_obs=60 type=f64 arm=fused ms=14.268 lo=13.800 hi=14.509 iters=43 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.081 strict=clean fbmap=-
+#G model=V d=8 n_obs=600 type=f64 arm=cpu ms=81.560 lo=80.338 hi=88.023 iters=7 reps=5 fallbacks=0 logp=1703.467647 compile_ms=0.131 strict=- fbmap=-
+#G model=V d=8 n_obs=600 type=f64 arm=perop ms=14.281 lo=13.870 hi=15.511 iters=39 reps=5 fallbacks=0 logp=1703.467370 compile_ms=0.043 strict=clean fbmap=-
+#G model=V d=8 n_obs=600 type=f64 arm=fused ms=15.005 lo=14.629 hi=15.606 iters=41 reps=5 fallbacks=0 logp=1703.467370 compile_ms=0.065 strict=clean fbmap=-
+#G model=V d=8 n_obs=6000 type=f64 arm=cpu ms=1726.830 lo=1660.771 hi=1846.350 iters=1 reps=5 fallbacks=0 logp=17184.670632 compile_ms=0.079 strict=- fbmap=-
+#G model=V d=8 n_obs=6000 type=f64 arm=perop ms=17.463 lo=17.147 hi=27.600 iters=19 reps=5 fallbacks=0 logp=17184.667869 compile_ms=0.090 strict=clean fbmap=-
+#G model=V d=8 n_obs=6000 type=f64 arm=fused ms=18.571 lo=18.231 hi=18.808 iters=33 reps=5 fallbacks=0 logp=17184.667869 compile_ms=0.055 strict=clean fbmap=-
+#H done uptime=09:53:43 up 13 days, 23:07,  1 user,  load average: 5.67, 5.46, 5.02
+#H mode=grad models=W dims=8,64 nobs=60,600 arms=cpu/perop type=f64 reps=5 tag=R3-W-axis
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:53:46 up 13 days, 23:07,  1 user,  load average: 12.67, 6.92, 5.49
+#G model=W d=8 n_obs=60 type=f64 arm=cpu ms=7.069 lo=6.570 hi=9.010 iters=81 reps=5 fallbacks=0 logp=158.000357 compile_ms=19.796 strict=- fbmap=-
+#G model=W d=8 n_obs=60 type=f64 arm=perop ms=13.586 lo=13.339 hi=13.983 iters=46 reps=5 fallbacks=0 logp=158.000329 compile_ms=0.084 strict=clean fbmap=-
+#G model=W d=64 n_obs=60 type=f64 arm=cpu ms=54.933 lo=49.854 hi=71.383 iters=8 reps=5 fallbacks=0 logp=93.679044 compile_ms=0.106 strict=- fbmap=-
+#G model=W d=64 n_obs=60 type=f64 arm=perop ms=15.268 lo=15.065 hi=15.712 iters=43 reps=5 fallbacks=0 logp=93.679012 compile_ms=0.146 strict=clean fbmap=-
+#G model=W d=8 n_obs=600 type=f64 arm=cpu ms=66.529 lo=63.729 hi=85.196 iters=7 reps=5 fallbacks=0 logp=1703.467647 compile_ms=0.084 strict=- fbmap=-
+#G model=W d=8 n_obs=600 type=f64 arm=perop ms=15.236 lo=14.886 hi=16.942 iters=41 reps=5 fallbacks=0 logp=1703.467370 compile_ms=0.152 strict=clean fbmap=-
+#G model=W d=64 n_obs=600 type=f64 arm=cpu ms=1015.652 lo=993.732 hi=1069.179 iters=1 reps=5 fallbacks=0 logp=1639.146334 compile_ms=0.080 strict=- fbmap=-
+#G model=W d=64 n_obs=600 type=f64 arm=perop ms=17.537 lo=17.197 hi=19.852 iters=25 reps=5 fallbacks=0 logp=1639.146056 compile_ms=0.062 strict=clean fbmap=-
+#H done uptime=09:54:15 up 13 days, 23:07,  1 user,  load average: 9.83, 6.78, 5.49
+#H mode=grad models=V dims=8,64 nobs=60,6000 arms=cpu/perop type=f32 reps=5 tag=R4-f32
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:54:18 up 13 days, 23:07,  1 user,  load average: 9.83, 6.78, 5.49
+#G model=V d=8 n_obs=60 type=f32 arm=cpu ms=7.762 lo=7.682 hi=7.991 iters=89 reps=5 fallbacks=0 logp=158.000366 compile_ms=21.057 strict=- fbmap=-
+#G model=V d=8 n_obs=60 type=f32 arm=perop ms=13.433 lo=13.244 hi=14.108 iters=44 reps=5 fallbacks=0 logp=158.000336 compile_ms=0.068 strict=clean fbmap=-
+#G model=V d=64 n_obs=60 type=f32 arm=cpu ms=48.916 lo=46.950 hi=64.796 iters=9 reps=5 fallbacks=0 logp=93.679047 compile_ms=0.142 strict=- fbmap=-
+#G model=V d=64 n_obs=60 type=f32 arm=perop ms=14.354 lo=13.649 hi=16.750 iters=46 reps=5 fallbacks=0 logp=93.679016 compile_ms=0.093 strict=clean fbmap=-
+#G model=V d=8 n_obs=6000 type=f32 arm=cpu ms=1538.842 lo=1492.630 hi=1563.720 iters=1 reps=5 fallbacks=0 logp=17184.669922 compile_ms=0.084 strict=- fbmap=-
+#G model=V d=8 n_obs=6000 type=f32 arm=perop ms=18.714 lo=16.477 hi=24.230 iters=18 reps=5 fallbacks=0 logp=17184.666016 compile_ms=0.120 strict=clean fbmap=-
+#G model=V d=64 n_obs=6000 type=f32 arm=cpu ms=18652.659 lo=18623.817 hi=18669.593 iters=1 reps=3 fallbacks=0 logp=17120.349609 compile_ms=0.087 strict=- fbmap=-
+#G model=V d=64 n_obs=6000 type=f32 arm=perop ms=23.261 lo=21.647 hi=39.233 iters=11 reps=5 fallbacks=0 logp=17120.345703 compile_ms=0.073 strict=clean fbmap=-
+#H done uptime=09:56:36 up 13 days, 23:10,  1 user,  load average: 5.74, 6.31, 5.51
+#H mode=grad models=V dims=256,1024 nobs=6000 arms=perop/fused type=f64 reps=3 tag=R5-big
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:56:39 up 13 days, 23:10,  1 user,  load average: 5.68, 6.29, 5.51
+#G model=V d=256 n_obs=6000 type=f64 arm=perop ms=182.655 lo=181.671 hi=188.681 iters=3 reps=3 fallbacks=0 logp=16899.816378 compile_ms=34.714 strict=clean fbmap=-
+#G model=V d=256 n_obs=6000 type=f64 arm=fused ms=184.697 lo=182.906 hi=186.305 iters=3 reps=3 fallbacks=0 logp=16899.816378 compile_ms=0.154 strict=clean fbmap=-
+#G model=V d=1024 n_obs=6000 type=f64 arm=perop ms=1079.577 lo=1059.414 hi=1228.859 iters=1 reps=3 fallbacks=0 logp=16017.695477 compile_ms=0.079 strict=clean fbmap=-
+#G model=V d=1024 n_obs=6000 type=f64 arm=fused ms=1093.118 lo=943.779 hi=1208.168 iters=1 reps=3 fallbacks=0 logp=16017.695477 compile_ms=0.097 strict=clean fbmap=-
+#H done uptime=09:57:02 up 13 days, 23:10,  1 user,  load average: 5.13, 6.13, 5.47
+
+# phase 2 (09:57-10:20): Model S grad, synthesis envelope, end-to-end NUTS
+#H mode=grad models=S dims=2,4,8,16 nobs=60 arms=cpu/perop type=f64 reps=3 tag=S1
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:57:06 up 13 days, 23:10,  1 user,  load average: 5.36, 6.16, 5.48
+#G model=S d=2 n_obs=60 type=f64 arm=cpu ms=3.950 lo=3.938 hi=4.454 iters=92 reps=3 fallbacks=0 logp=164.891926 compile_ms=18.269 strict=- fbmap=-
+#G model=S d=2 n_obs=60 type=f64 arm=perop ms=21.177 lo=19.858 hi=23.189 iters=32 reps=3 fallbacks=0 logp=164.891899 compile_ms=0.049 strict=clean fbmap=-
+#G model=S d=4 n_obs=60 type=f64 arm=cpu ms=9.124 lo=8.850 hi=9.662 iters=50 reps=3 fallbacks=0 logp=162.594737 compile_ms=0.094 strict=- fbmap=-
+#G model=S d=4 n_obs=60 type=f64 arm=perop ms=60.149 lo=57.626 hi=63.445 iters=10 reps=3 fallbacks=0 logp=162.594709 compile_ms=0.059 strict=clean fbmap=-
+#G model=S d=8 n_obs=60 type=f64 arm=cpu ms=24.080 lo=23.107 hi=24.535 iters=26 reps=3 fallbacks=0 logp=158.000357 compile_ms=0.108 strict=- fbmap=-
+#G model=S d=8 n_obs=60 type=f64 arm=perop ms=119.538 lo=111.285 hi=125.505 iters=5 reps=3 fallbacks=0 logp=158.000329 compile_ms=0.168 strict=clean fbmap=-
+#G model=S d=16 n_obs=60 type=f64 arm=cpu ms=34.707 lo=34.529 hi=43.842 iters=14 reps=3 fallbacks=0 logp=148.811598 compile_ms=0.136 strict=- fbmap=-
+#G model=S d=16 n_obs=60 type=f64 arm=perop ms=248.770 lo=243.338 hi=257.013 iters=2 reps=3 fallbacks=0 logp=148.811570 compile_ms=0.086 strict=clean fbmap=-
+#H done uptime=09:57:22 up 13 days, 23:11,  1 user,  load average: 5.27, 6.10, 5.47
+#H mode=grad models=S dims=8 nobs=600,6000 arms=cpu/perop type=f64 reps=3 tag=S2
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:57:25 up 13 days, 23:11,  1 user,  load average: 5.25, 6.08, 5.47
+#G model=S d=8 n_obs=600 type=f64 arm=cpu ms=58.049 lo=57.842 hi=58.637 iters=11 reps=3 fallbacks=0 logp=1703.467647 compile_ms=15.889 strict=- fbmap=-
+#G model=S d=8 n_obs=600 type=f64 arm=perop ms=90.302 lo=82.247 hi=95.732 iters=7 reps=3 fallbacks=0 logp=1703.467370 compile_ms=0.126 strict=clean fbmap=-
+#G model=S d=8 n_obs=6000 type=f64 arm=cpu ms=1161.445 lo=1151.410 hi=1195.945 iters=1 reps=3 fallbacks=0 logp=17184.670632 compile_ms=0.134 strict=- fbmap=-
+#G model=S d=8 n_obs=6000 type=f64 arm=perop ms=90.210 lo=88.774 hi=95.226 iters=7 reps=3 fallbacks=0 logp=17184.667869 compile_ms=0.161 strict=clean fbmap=-
+#H done uptime=09:57:40 up 13 days, 23:11,  1 user,  load average: 5.40, 6.08, 5.48
+#H mode=synth models=S dims=2,4,6,8,10,11,12,13,14,16 nobs=60 arms=cpu/perop type=f64 reps=5 tag=S3
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=09:57:43 up 13 days, 23:11,  1 user,  load average: 5.40, 6.08, 5.48
+#S model=S d=2 n_obs=60 push=40B synth=ok synth_ms=83.341
+#S model=S d=4 n_obs=60 push=56B synth=ok synth_ms=467.832
+#S model=S d=6 n_obs=60 push=72B synth=ok synth_ms=2798.258
+#S model=S d=8 n_obs=60 push=88B synth=ok synth_ms=10538.794
+#S model=S d=10 n_obs=60 push=104B synth=ok synth_ms=45767.595
+#S model=S d=11 n_obs=60 push=112B synth=ok synth_ms=77477.779
+#S model=S d=12 n_obs=60 push=120B synth=ok synth_ms=117167.600
+#H mode=nuts models=V dims=8,64 nobs=60 arms=cpu/perop type=f64 reps=5 tag=N1
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=10:02:42 up 13 days, 23:16,  1 user,  load average: 4.08, 4.73, 5.03
+#N model=V d=8 n_obs=60 type=f64 arm=cpu wall_ms=14753.280 ms_per_iter=295.066 eps=0.30089 div=0 chain=no
+#N model=V d=8 n_obs=60 type=f64 arm=perop wall_ms=20006.760 ms_per_iter=400.135 eps=0.25962 div=0 chain=stripped
+#N model=V d=64 n_obs=60 type=f64 arm=cpu wall_ms=308505.853 ms_per_iter=6170.117 eps=0.27826 div=0 chain=no
+#N model=V d=64 n_obs=60 type=f64 arm=perop wall_ms=25285.076 ms_per_iter=505.702 eps=0.34787 div=0 chain=stripped
+#H done uptime=10:08:50 up 13 days, 23:22,  1 user,  load average: 4.19, 4.37, 4.78
+#H mode=nuts models=V dims=8 nobs=600 arms=cpu/perop type=f64 reps=5 tag=N2
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=10:08:53 up 13 days, 23:22,  1 user,  load average: 4.19, 4.37, 4.78
+#N model=V d=8 n_obs=600 type=f64 arm=cpu wall_ms=156644.245 ms_per_iter=3132.885 eps=0.07007 div=1 chain=no
+#N model=V d=8 n_obs=600 type=f64 arm=perop wall_ms=23242.181 ms_per_iter=464.844 eps=0.08908 div=1 chain=stripped
+#H done uptime=10:11:53 up 13 days, 23:25,  1 user,  load average: 4.22, 4.46, 4.75
+#H mode=nuts models=S dims=8 nobs=60,600 arms=cpu/chain type=f64 reps=5 tag=N3
+#H device=NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)
+#H uptime=10:11:56 up 13 days, 23:25,  1 user,  load average: 4.21, 4.45, 4.75
+#N model=S d=8 n_obs=60 type=f64 arm=cpu wall_ms=42849.288 ms_per_iter=856.986 eps=1.00000 div=0 chain=yes
+#N model=S d=8 n_obs=60 type=f64 arm=chain wall_ms=138769.729 ms_per_iter=2775.395 eps=1.00000 div=0 chain=yes
+#N model=S d=8 n_obs=600 type=f64 arm=cpu wall_ms=200441.756 ms_per_iter=4008.835 eps=1.00000 div=1 chain=yes
+#N model=S d=8 n_obs=600 type=f64 arm=chain ERROR=Erlang error: :nif_panicked
+#H done uptime=10:20:25 up 13 days, 23:34,  1 user,  load average: 4.00, 3.90, 4.34
+
+# push-constants ceiling by prior family (no GLSL emission)
+#P HalfCauchy (1 float/RV)
+#P d=1 32B ok
+#P d=2 40B ok
+#P d=3 48B ok
+#P d=4 56B ok
+#P d=5 64B ok
+#P d=6 72B ok
+#P d=7 80B ok
+#P d=8 88B ok
+#P d=9 96B ok
+#P d=10 104B ok
+#P d=11 112B ok
+#P d=12 120B ok
+#P d=13 128B ok
+#P d=14 push_too_large
+#P d=15 push_too_large
+#P d=16 push_too_large
+#P Normal (2 floats/RV)
+#P d=1 40B ok
+#P d=2 56B ok
+#P d=3 72B ok
+#P d=4 88B ok
+#P d=5 104B ok
+#P d=6 120B ok
+#P d=7 push_too_large
+#P d=8 push_too_large
+#P d=9 push_too_large
+#P d=10 push_too_large
+#P d=11 push_too_large
+#P d=12 push_too_large
+#P d=13 push_too_large
+#P d=14 push_too_large
+#P d=15 push_too_large
+#P d=16 push_too_large
