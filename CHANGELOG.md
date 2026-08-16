@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — scalars were refused by three capability gates
+
+`compare`, `select` and the broadcasting binary path all gated the GPU on
+`tuple_size(out.shape) >= 1`. Nothing in the shaders needed it: rank 0 now
+dispatches as rank 1 of shape `{1}`. The consequence was that
+`Nx.greater(scalar, scalar)`, `Nx.equal(scalar, scalar)`,
+`Nx.select(scalar, scalar, scalar)` and `Nx.multiply(f64_scalar, f32_scalar)`
+computed on the host, while the same ops on tensors did not — 108 of the 137
+host fallbacks in one `value_and_grad` of a small probabilistic model
+(`bench_results/EXMC_PEROP_RACE.md`), since a distribution's log-prob is mostly
+scalar support checks.
+
+Same bug class as the 0.3.0 backward-pass release: a gate written against the
+shapes one workload happens to produce.
+
+### Added — `put_slice` runs on the GPU
+
+`glsl/put_slice.comp`, an index-remap overlay: one thread per output element,
+reading the slice inside the window and the tensor outside it. Any 4/8-byte
+dtype, rank 1–4, integer or scalar-tensor start indices, starts clamped exactly
+as `Nx.BinaryBackend` clamps them. Rank > 4, sub-word dtypes and rank-0 tensors
+still host-fall-back.
+
+### Fixed — `pad` refused a mistyped pad value
+
+`pad` has had a shader since 0.2.0, but its gate required the pad value to
+already carry the tensor's dtype, and `Nx.pad(t, 0.0, cfg)` hands the callback
+an f32 (or s32) literal. The pad value is now cast to the output type instead.
+
+### Fixed — `pad`'s host tail returned wrong values for integer dtypes
+
+`Nx.pad(Nx.iota({4}, type: :u8), 0, [{1, 1, 0}])` returned garbage: the host
+tail re-entered `Nx.pad/3` with a *tensor* pad value, which merges types more
+strictly than the number Nx was originally given, and the differently-typed
+result was then filed under the callback's output type. Pre-existing; found by
+the parity sweep for the above.
+
 ## 0.3.0 (2026-08-08)
 
 The backward-pass release. 0.2.0 shipped conv, the fusion compiler and native

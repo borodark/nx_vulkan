@@ -76,11 +76,14 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [2.0, 3.0, 4.0]
     end
 
-    test "put_slice result is on BinaryBackend" do
+    # put_slice got an index-remap overlay shader (T11) and now stays on the
+    # GPU, like pad and slice above. This test used to pin it to BinaryBackend;
+    # the pin failing is the intended signal that the op was promoted.
+    test "put_slice (f32) stays on VulkanoBackend and is correct" do
       target = v(f32([0.0, 0.0, 0.0, 0.0]))
       slice = v(f32([7.0, 8.0]))
       r = Nx.put_slice(target, [1], slice)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0.0, 7.0, 8.0, 0.0]
     end
 

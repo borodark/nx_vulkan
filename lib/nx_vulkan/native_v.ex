@@ -127,6 +127,16 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  put_slice overlay (type-generic u32-word copy). Bindings tensor/slice/out/
+  params; params is [rank, ews, T[4], S[4], start[4]] int32 (ews =
+  element_bytes/4, T = tensor dims, S = slice dims, start already clamped to
+  [0, T - S]); `n` = output element count. Each output element reads the slice
+  inside the window and the tensor outside it.
+  """
+  def apply_put_slice(_out, _in, _slice, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Pad (type-generic copy). Bindings in/out/params/pad-value; params is
   [rank, ews, S[4], O[4], low[4], interior[4]] int32 (ews = element_bytes/4);
   `pad_value` buffer is one element (ews u32 words); `n` = output element count.

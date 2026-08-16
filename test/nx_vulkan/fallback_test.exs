@@ -361,6 +361,210 @@ defmodule Nx.Vulkan.FallbackTest do
       assert counts[{:dot, 7}] == nil, "the dense gradient went back to the host: #{inspect(counts)}"
     end
 
+    test "rank-0 compare and select — the scalar support check" do
+      # The gate read `tuple_size(out.shape) >= 1`, so every scalar predicate
+      # went to the host: 108 of the 137 fallbacks in one eXMC value_and_grad
+      # (bench_results/EXMC_PEROP_RACE.md). Nothing in compare_f*/select_f*
+      # needed rank >= 1 — elementwise arithmetic handled rank 0 the whole time.
+      # Rank 0 now dispatches as rank 1 {1}.
+      x = Nx.tensor(0.7, type: {:f, 64}, backend: VulkanoBackend)
+      y = Nx.tensor(0.2, type: {:f, 64}, backend: VulkanoBackend)
+
+      assert Fallback.count_total(fn -> Nx.equal(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.not_equal(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.greater(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.less(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.greater_equal(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.less_equal(x, y) end) == 0
+      assert Fallback.count_total(fn -> Nx.select(Nx.greater(x, y), x, y) end) == 0
+
+      # the shape a distribution's log_p is actually made of: `x > 0` guarding
+      # a computation, with an out-of-support constant on the other branch
+      assert Fallback.count_total(fn ->
+               Nx.select(Nx.greater(x, 0), Nx.multiply(x, 2.0), Nx.Constants.neg_infinity({:f, 64}))
+             end) == 0
+
+      # f32 too, and a scalar predicate over vector branches
+      x32 = Nx.tensor(0.7, type: {:f, 32}, backend: VulkanoBackend)
+      v = t({4}, 1)
+
+      assert Fallback.count_total(fn -> Nx.greater(x32, 0) end) == 0
+      assert Fallback.count_total(fn -> Nx.select(Nx.greater(x, 0), v, v) end) == 0
+    end
+
+    test "rank-0 compare and select match BinaryBackend exactly" do
+      for type <- [{:f, 32}, {:f, 64}], {a, b} <- [{1.5, 0.5}, {0.5, 0.5}, {-1.0, 0.0}] do
+        g = fn v -> Nx.tensor(v, type: type, backend: VulkanoBackend) end
+        h = fn v -> Nx.tensor(v, type: type, backend: Nx.BinaryBackend) end
+
+        for op <- [:equal, :not_equal, :less, :less_equal, :greater, :greater_equal] do
+          got = apply(Nx, op, [g.(a), g.(b)]) |> Nx.backend_copy(Nx.BinaryBackend)
+          want = apply(Nx, op, [h.(a), h.(b)])
+
+          assert Nx.to_binary(got) == Nx.to_binary(want),
+                 "#{op}(#{a}, #{b}) #{inspect(type)} diverged"
+        end
+
+        got = Nx.select(Nx.greater(g.(a), g.(b)), g.(a), g.(b)) |> Nx.backend_copy(Nx.BinaryBackend)
+        want = Nx.select(Nx.greater(h.(a), h.(b)), h.(a), h.(b))
+        assert Nx.to_binary(got) == Nx.to_binary(want), "select(#{a}, #{b}) #{inspect(type)} diverged"
+      end
+    end
+
+    test "a mixed-dtype scalar pair stays on the GPU" do
+      # Same gate, third face: two scalars of *different* dtypes miss the flat
+      # apply_binary path (types differ) and land in the broadcast path, whose
+      # rank check also read `>= 1`. Same-dtype scalars never exercised it.
+      a = Nx.tensor(1.5, type: {:f, 64}, backend: VulkanoBackend)
+      b = Nx.tensor(0.5, type: {:f, 32}, backend: VulkanoBackend)
+
+      for op <- [:multiply, :add, :subtract, :divide, :max, :min] do
+        assert Fallback.count_total(fn -> apply(Nx, op, [a, b]) end) == 0,
+               "#{op} on a mixed-dtype scalar pair left the GPU"
+      end
+    end
+
+    test "pad — every padding_config the shader claims" do
+      # pad has had a shader since thrust 2, but the gate required the pad value
+      # to already carry the tensor's dtype, and `Nx.pad(t, 0.0, cfg)` hands it
+      # an f32 (or s32) literal: 8 fallbacks per eXMC gradient.
+      x = t({6}, 1)
+
+      assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{1, 2, 0}]) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(x, 0, [{1, 2, 0}]) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{0, 0, 2}]) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{-1, -2, 0}]) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{2, 3, 1}]) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(t({2, 3}, 1), 0.0, [{1, 1, 0}, {0, 2, 1}]) end) == 0
+
+      assert Fallback.count_total(fn ->
+               Nx.pad(t({2, 2, 3, 2}, 1), 0.0, [{0, 1, 0}, {1, 0, 1}, {0, 0, 2}, {1, 1, 0}])
+             end) == 0
+
+      assert Fallback.count_total(fn ->
+               Nx.pad(Nx.tensor(3.25, type: {:f, 64}, backend: VulkanoBackend), 0.0, [])
+             end) == 0
+    end
+
+    test "pad matches BinaryBackend exactly" do
+      cases = [
+        {{6}, [{1, 2, 0}]},
+        {{6}, [{0, 0, 2}]},
+        {{6}, [{2, 3, 1}]},
+        {{6}, [{-2, 0, 0}]},
+        {{6}, [{-1, -2, 0}]},
+        {{6}, [{-1, 1, 1}]},
+        {{1}, [{2, 2, 3}]},
+        {{2, 3}, [{1, 1, 0}, {0, 2, 1}]},
+        {{2, 3}, [{-1, 0, 0}, {0, -1, 0}]},
+        {{2, 3, 2}, [{1, 0, 1}, {0, 1, 0}, {2, 2, 0}]},
+        {{2, 2, 3, 2}, [{0, 1, 0}, {1, 0, 1}, {0, 0, 2}, {1, 1, 0}]}
+      ]
+
+      for {shape, cfg} <- cases, pv <- [0.0, 0, -7.5] do
+        v = t(shape, 4)
+        h = Nx.backend_copy(v, Nx.BinaryBackend)
+
+        got = Nx.pad(v, pv, cfg) |> Nx.backend_copy(Nx.BinaryBackend)
+        want = Nx.pad(h, pv, cfg)
+
+        assert Nx.to_binary(got) == Nx.to_binary(want),
+               "pad #{inspect(shape)} #{inspect(cfg)} value #{pv} diverged"
+      end
+    end
+
+    test "put_slice — the overlay that decides residency" do
+      # No shader at any rank until T11. Worse than its count: `PointMap` unpacks
+      # the flat parameter vector with it, so once the position vector landed on
+      # BinaryBackend everything downstream computed there unrecorded.
+      x = t({6}, 1)
+      s = t({2}, 2)
+
+      assert Fallback.count_total(fn -> Nx.put_slice(x, [2], s) end) == 0
+      assert Fallback.count_total(fn -> Nx.put_slice(x, [0], s) end) == 0
+      # starts are clamped to [0, dim - slice_dim], here and in BinaryBackend
+      assert Fallback.count_total(fn -> Nx.put_slice(x, [99], s) end) == 0
+      assert Fallback.count_total(fn -> Nx.put_slice(x, [-3], s) end) == 0
+      # a tensor start index resolves to a number rather than dropping the op
+      assert Fallback.count_total(fn ->
+               Nx.put_slice(x, [Nx.tensor(2, backend: VulkanoBackend)], s)
+             end) == 0
+
+      assert Fallback.count_total(fn -> Nx.put_slice(t({3, 4}, 1), [1, 1], t({2, 2}, 2)) end) == 0
+
+      assert Fallback.count_total(fn ->
+               Nx.put_slice(t({2, 2, 3, 4}, 1), [1, 0, 1, 2], t({1, 1, 2, 2}, 2))
+             end) == 0
+
+      # and the chain it exists for: unpack a flat vector, then compute
+      assert Fallback.count_total(fn ->
+               t({8}, 3)
+               |> Nx.put_slice([0], t({2}, 4))
+               |> Nx.put_slice([4], t({2}, 5))
+               |> Nx.multiply(2.0)
+               |> Nx.sum()
+             end) == 0
+    end
+
+    test "put_slice matches BinaryBackend exactly" do
+      cases = [
+        {{6}, {2}, [2]},
+        {{6}, {2}, [0]},
+        {{6}, {2}, [4]},
+        {{6}, {2}, [5]},
+        {{6}, {2}, [99]},
+        {{6}, {2}, [-3]},
+        {{6}, {6}, [0]},
+        {{6}, {1}, [3]},
+        {{1}, {1}, [0]},
+        {{3, 4}, {2, 2}, [1, 1]},
+        {{3, 4}, {2, 2}, [2, 3]},
+        {{3, 4}, {1, 4}, [2, 0]},
+        {{2, 3, 4}, {1, 2, 2}, [1, 1, 2]},
+        {{2, 2, 3, 4}, {1, 1, 2, 2}, [1, 0, 1, 2]}
+      ]
+
+      for {tshape, sshape, starts} <- cases do
+        v = t(tshape, 6)
+        s = t(sshape, 7)
+        vh = Nx.backend_copy(v, Nx.BinaryBackend)
+        sh = Nx.backend_copy(s, Nx.BinaryBackend)
+
+        got = Nx.put_slice(v, starts, s) |> Nx.backend_copy(Nx.BinaryBackend)
+        want = Nx.put_slice(vh, starts, sh)
+
+        assert Nx.to_binary(got) == Nx.to_binary(want),
+               "put_slice #{inspect(tshape)} <- #{inspect(sshape)} at #{inspect(starts)} diverged"
+
+        # the same call with tensor start indices takes the same path
+        idx = Enum.map(starts, &Nx.tensor(&1, backend: VulkanoBackend))
+        got_idx = Nx.put_slice(v, idx, s) |> Nx.backend_copy(Nx.BinaryBackend)
+
+        assert Nx.to_binary(got_idx) == Nx.to_binary(want),
+               "put_slice with tensor starts #{inspect(starts)} diverged"
+      end
+    end
+
+    test "put_slice and pad are exact in f32 as well as f64" do
+      f32 = fn shape, seed ->
+        t(shape, seed) |> Nx.as_type({:f, 32})
+      end
+
+      v = f32.({3, 4}, 8)
+      s = f32.({2, 2}, 9)
+      vh = Nx.backend_copy(v, Nx.BinaryBackend)
+      sh = Nx.backend_copy(s, Nx.BinaryBackend)
+
+      assert Nx.to_binary(Nx.put_slice(v, [1, 1], s) |> Nx.backend_copy(Nx.BinaryBackend)) ==
+               Nx.to_binary(Nx.put_slice(vh, [1, 1], sh))
+
+      assert Nx.to_binary(Nx.pad(v, 0.0, [{1, 1, 0}, {0, 2, 1}]) |> Nx.backend_copy(Nx.BinaryBackend)) ==
+               Nx.to_binary(Nx.pad(vh, 0.0, [{1, 1, 0}, {0, 2, 1}]))
+
+      assert Fallback.count_total(fn -> Nx.put_slice(v, [1, 1], s) end) == 0
+      assert Fallback.count_total(fn -> Nx.pad(v, 0.0, [{1, 1, 0}, {0, 2, 1}]) end) == 0
+    end
+
     test "conv gradient performs no host fallback at all" do
       x = t({2, 3, 7, 7}, 1)
       k = t({4, 3, 3, 3}, 2)

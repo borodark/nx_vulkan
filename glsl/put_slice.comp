@@ -1,0 +1,65 @@
+#version 450
+
+// put_slice as a type-generic overlay: out has the tensor's shape, and each
+// output element either comes from the slice (when its coordinates fall inside
+// the [start, start + slice_dim) window on every axis) or straight from the
+// tensor. One thread per output element, copying `ews` u32 words per element
+// (element_bytes / 4), so one shader serves any 4/8-byte dtype (f32/f64/s32/
+// s64/…); 1/2-byte types host-fall-back. rank <= 4.
+//
+// Starts are pre-clamped on the host to [0, tensor_dim - slice_dim], which is
+// what Nx.BinaryBackend.put_slice does before it writes, so the shader can
+// assume the window is fully in bounds.
+//
+// Params: [rank, ews, T[4], S[4], start[4]] where T = tensor (== output) dims,
+// S = slice dims, start = per-dim clamped start offsets.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) readonly buffer Sl { uint sl[]; };
+layout(std430, binding = 2) writeonly buffer Out { uint o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    int T[4];
+    int S[4];
+    int st[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        T[i] = prm[2 + i];
+        S[i] = prm[6 + i];
+        st[i] = prm[10 + i];
+    }
+
+    // Decompose the output index (row-major over T) and accumulate the matching
+    // flat index into the slice (row-major over S).
+    uint idx = gid;
+    uint sidx = 0u;
+    uint sstride = 1u;
+    bool inside = true;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        int coord = int(idx % uint(T[d]));
+        idx = idx / uint(T[d]);
+
+        int rel = coord - st[d];
+        if (rel < 0 || rel >= S[d]) inside = false;
+        else sidx += uint(rel) * sstride;
+
+        sstride *= uint(S[d]);
+    }
+
+    if (inside) {
+        for (uint w = 0u; w < ews; ++w) o[gid * ews + w] = sl[sidx * ews + w];
+    } else {
+        for (uint w = 0u; w < ews; ++w) o[gid * ews + w] = inp[gid * ews + w];
+    }
+}
