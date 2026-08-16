@@ -136,14 +136,23 @@ build_workload = fn jitter ->
 end
 
 run_step = fn {params, x, y} ->
-  {loss, grads} = Nx.Defn.jit_apply(step, [params, x, y], compiler: Nx.Defn.Evaluator)
-  # The readback is what forces the pending batch to the GPU. Without it this
-  # would time the *recording* of a step, and under batching that charges a
-  # whole loop to whichever iteration happens to trip the cap.
-  l = Nx.to_number(Nx.backend_transfer(loss, Nx.BinaryBackend))
-  {g1, _, _, _} = grads
-  _ = Nx.to_number(Nx.sum(Nx.backend_transfer(g1, Nx.BinaryBackend)))
-  l
+  {loss, _grads} = Nx.Defn.jit_apply(step, [params, x, y], compiler: Nx.Defn.Evaluator)
+  # Reading the SCALAR loss back is what forces the pending batch to the GPU.
+  # Without a readback this would time the *recording* of a step, and under
+  # batching that charges a whole loop to whichever iteration trips the cap.
+  #
+  # Read back the loss and NOTHING ELSE. A `buf_download` calls `flush_pending`,
+  # which submits every queued dispatch — the gradients included — and
+  # `submit_and_wait` blocks on the whole command buffer, so the scalar is
+  # sufficient to account for all the work. The first version of this benchmark
+  # also transferred a {784,128} gradient and summed it on the host every step,
+  # which added ~400 KB over PCIe plus a 100k-element BinaryBackend reduction to
+  # each timed iteration. That is a large constant added equally to every arm,
+  # and on a GT 750M it flattened NXV_BATCH_MAX=0/4/64 to within noise of each
+  # other — i.e. it hid the very effect being measured, and disagreed with this
+  # repo's own published 1.45x on the same box. If a future change makes the
+  # timed path transfer anything but a scalar, that is a bug.
+  Nx.to_number(Nx.backend_transfer(loss, Nx.BinaryBackend))
 end
 
 # --- residency + sanity, once, before any timing -------------------------
