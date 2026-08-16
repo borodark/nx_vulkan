@@ -19,6 +19,30 @@ defmodule Nx.Vulkan.ShaderTemplate do
   disk + load via Vulkan.
 
   See `Nx.Vulkan.ChainShaderSpecs` for the catalog of family specs.
+
+  ## Output contract — all four buffers are indexed by the SAME step
+
+  A chain shader writes four buffers per step `k`. **Every one of them
+  must describe the state *after* leapfrog step `k`:**
+
+      q_chain[k]    = q_{k+1}
+      p_chain[k]    = p_{k+1}
+      grad_chain[k] = dlogp/dq at q_{k+1}
+      logp_chain[k] = log p(q_{k+1})     <- NOT log p(q_k)
+
+  Consumers slice all four at one index to build a single trajectory
+  state, so a buffer that lags by a step silently corrupts that state
+  rather than failing. The skeleton below satisfies the contract by
+  placing `{{logp_block}}` *after* the position update — do not hoist it
+  next to `{{grad_block}}`, which runs at the pre-update position.
+
+  This is not hypothetical: eXMC's `MultiRvCustomSpec` generalised this
+  skeleton to multi-RV models and, in doing so, moved the log-prob body
+  above the position update. The resulting one-step lag in
+  `logp_chain` made its NUTS sampler over-disperse on *every*
+  distribution — Normal(0,1) posterior variance 8.55 against a CPU
+  reference's 1.45 — and was misattributed to the GPU for a month. See
+  `docs/T10_AMPERE_DISPERSION.md`.
   """
 
   defmodule FamilySpec do
@@ -104,6 +128,10 @@ void main() {
             }
         }
 
+        // Output contract: lp_i is evaluated HERE, after `qi` has been
+        // advanced, so logp_chain[k] describes the same state as
+        // q_chain[k]. Moving this block above the update introduces a
+        // one-step lag — see the moduledoc.
 {{logp_block}}
         partial[tid] = lp_i;
         barrier();
