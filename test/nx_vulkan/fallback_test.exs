@@ -608,6 +608,65 @@ defmodule Nx.Vulkan.FallbackTest do
       assert counts == %{{:window_scatter_max, 6} => 1}
     end
 
+    @tag :host_fallback_expected
+    test "block/4 is attributed per Nx.Block struct, not as one {:block, 4}" do
+      # T13. Until this landed, block/4 transferred to BinaryBackend without
+      # passing host_result/2, so Nx.LinAlg, top_k, cumulative_*, take and
+      # all_close were invisible to count/1 AND to strict mode: "zero
+      # fallbacks" meant "zero recorded".
+      x = t({4}, 1)
+
+      {_r, counts} = Fallback.count(fn -> Nx.cumulative_sum(x) end)
+      assert counts[{:block, Nx.Block.CumulativeSum}] == 1
+
+      {_r, counts} = Fallback.count(fn -> Nx.top_k(x, k: 2) end)
+      assert counts[{:block, Nx.Block.TopK}] == 1
+
+      # Two different blocks are two different keys — the property that lets a
+      # missing scan shader be refused while all_close stays permitted.
+      {_r, counts} = Fallback.count(fn -> Nx.all_close(x, x) end)
+      assert counts[{:block, Nx.Block.AllClose}] == 1
+      assert counts[{:block, Nx.Block.CumulativeSum}] == nil
+    end
+
+    @tag :host_fallback_expected
+    test "what an Nx.LinAlg call costs depends on the DEFAULT backend, not the tensor" do
+      # The lower-bound doctrine, demonstrated. nx composes SVD from ordinary
+      # ops. Where their intermediates land decides whether this backend ever
+      # sees them:
+      #
+      #   default BinaryBackend -> the composition runs on the host, unseen,
+      #                            and the census reports exactly 1
+      #   default VulkanoBackend -> intermediates come back here one at a time
+      #                            and the census reports hundreds
+      #
+      # Same call, same input tensor, two orders of magnitude apart. A census
+      # is a statement about a process, not about an op — which is why the
+      # benchmarks in examples/ set the global default explicitly and say so.
+      m = Nx.tensor([[4.0, 1.0], [1.0, 3.0]], type: {:f, 64}, backend: VulkanoBackend)
+
+      {_r, host_default} = Fallback.count(fn -> Nx.LinAlg.svd(m) end)
+      assert host_default == %{{:block, Nx.Block.LinAlg.SVD} => 1}
+
+      previous = Nx.default_backend(VulkanoBackend)
+
+      try do
+        {_r, gpu_default} = Fallback.count(fn -> Nx.LinAlg.svd(m) end)
+
+        assert gpu_default[{:block, Nx.Block.LinAlg.SVD}] == 1
+
+        assert Enum.sum(Map.values(gpu_default)) > 100,
+               "SVD recorded only #{Enum.sum(Map.values(gpu_default))} fallbacks with " <>
+                 "the GPU as default backend — if the composition got cheaper that is " <>
+                 "good news, but re-read it: #{inspect(gpu_default)}"
+
+        # Scholar's linear regression goes through this path.
+        assert gpu_default[{:block, Nx.Block.Take}] > 0
+      after
+        Nx.default_backend(previous)
+      end
+    end
+
     test "sort/argsort" do
       x = t({16}, 1)
       assert Fallback.count_total(fn -> Nx.sort(x) end) > 0

@@ -133,16 +133,43 @@ defmodule Nx.Vulkan.StrictFallbackTest do
   end
 
   describe "the allowlist" do
-    test "every entry names one {fun, arity}, one condition, and a reason" do
+    test "every entry names one {fun, arity} or one Nx.Block struct, a condition, and a reason" do
       for {op, condition, reason} <- Fallback.allowlist() do
-        assert match?({name, arity} when is_atom(name) and is_integer(arity), op),
-               "allowlist entry #{inspect(op)} is not a {fun, arity} pair — no wildcards"
+        # Exactly two shapes are legal, and both name ONE thing:
+        #   {fun, arity}          — one backend callback
+        #   {:block, Nx.Block.X}  — one block kind (T13)
+        # The second exists because block/4 dispatches an entire API family
+        # through a single callback, so {:block, 4} would exempt Nx.LinAlg,
+        # top_k, cumulative_* and all_close together. That is the wildcard the
+        # next assertion forbids by name.
+        assert match?({name, arity} when is_atom(name) and is_integer(arity), op) or
+                 match?({:block, mod} when is_atom(mod), op),
+               "allowlist entry #{inspect(op)} is neither a {fun, arity} pair nor a " <>
+                 "{:block, Nx.Block.X} kind — no wildcards"
+
+        refute match?({:block, arity} when is_integer(arity), op),
+               "{:block, arity} exempts every Nx.Block struct at once — the op-family " <>
+                 "wildcard this list exists to forbid. Name the struct."
 
         assert condition == :always or match?({:rank_at_least, n} when is_integer(n), condition)
 
         assert is_binary(reason) and byte_size(reason) > 40,
                "allowlist entry #{inspect(op)} has no real reason: #{inspect(reason)}"
       end
+    end
+
+    test "a block kind is exempt alone — its neighbours in the family still raise" do
+      # T13's whole point: block/4 is one callback for a large API surface, so
+      # attribution must be per Nx.Block struct. all_close is this suite's own
+      # assertion helper and must not raise; a missing cumulative_sum shader is
+      # a genuine gap and must.
+      assert Fallback.allowed?({:block, Nx.Block.AllClose})
+      assert Fallback.allowed?({:block, Nx.Block.LinAlg.SVD})
+
+      refute Fallback.allowed?({:block, Nx.Block.CumulativeSum})
+      refute Fallback.allowed?({:block, Nx.Block.TopK})
+      refute Fallback.allowed?({:block, Nx.Block.Take})
+      refute Fallback.allowed?({:block, Nx.Block.LogicalNot})
     end
 
     test "entries are unique — an op is exempt for exactly one stated reason" do

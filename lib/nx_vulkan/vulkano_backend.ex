@@ -1226,8 +1226,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # input tuple to BinaryBackend, evaluate via its block impl, then
   # transfer outputs back. Scholar's linear regression uses
   # Nx.Block.LinAlg.SVD internally; this unblocks it.
+  #
+  # The parameter names follow `Nx.Backend`'s contract, which is
+  # `block(struct, output, args, fun)` — NOT `(out, block_def, ...)`, which is
+  # what they were called here. The order was right, so the callback worked;
+  # only the names lied, and the first thing to read them (T13's attribution,
+  # below) keyed the census off the output template and reported every block
+  # in the API as `Nx.Tensor`.
   @impl true
-  def block(out, block_def, inputs, opts) do
+  def block(block_struct, output, args, fun) do
     transfer_to_bin = fn t ->
       if is_struct(t, Nx.Tensor) and match?(%__MODULE__{}, t.data) do
         Nx.backend_transfer(t, Nx.BinaryBackend)
@@ -1236,20 +1243,53 @@ defmodule Nx.Vulkan.VulkanoBackend do
       end
     end
 
-    inputs_bin =
+    args_bin =
       cond do
-        is_list(inputs) -> Enum.map(inputs, transfer_to_bin)
-        is_tuple(inputs) -> inputs |> Tuple.to_list() |> Enum.map(transfer_to_bin) |> List.to_tuple()
-        true -> transfer_to_bin.(inputs)
+        is_list(args) -> Enum.map(args, transfer_to_bin)
+        is_tuple(args) -> args |> Tuple.to_list() |> Enum.map(transfer_to_bin) |> List.to_tuple()
+        true -> transfer_to_bin.(args)
       end
 
-    result = Nx.BinaryBackend.block(out, block_def, inputs_bin, opts)
+    # T13. Every block/4 call is a host fallback by construction — there is no
+    # GPU path for any `Nx.Block.*` and the result comes back on BinaryBackend
+    # — so this is noted unconditionally rather than by inspecting the result.
+    #
+    # Attribution is per `Nx.Block.*` struct, NOT a single `{:block, 4}`. One
+    # entry would have to be allowlisted wholesale, which is the op-family
+    # wildcard `@allowlist` forbids, and it would make `Nx.all_close` (an
+    # assertion helper used throughout this suite) raise under `:raise`
+    # alongside a genuinely missing `cumulative_sum` shader. Keyed by struct,
+    # the two are separable: each carries its own reason, and when someone
+    # writes a scan shader they delete one line.
+    #
+    # Until this landed the whole family — Nx.LinAlg (svd/qr/lu/cholesky/solve/
+    # eigh/determinant), top_k, cumulative_*, take, all_close, fft2 — was
+    # invisible to count/1 AND to strict mode, so "zero fallbacks" meant "zero
+    # recorded" and a green strict run said nothing about any of it.
+    Nx.Vulkan.Fallback.note({:block, block_kind(block_struct)}, block_meta(output))
+
+    result = Nx.BinaryBackend.block(block_struct, output, args_bin, fun)
 
     # Per Tier 1 of SHAPE_C_PLAN.md: result is already on BinaryBackend,
     # leave it there. Nx supports mixed-backend tensors flowing through
     # the pipeline; the next op auto-transfers if it needs GPU.
     result
   end
+
+  # `Nx.Block.LinAlg.SVD` etc. Anything that is not a struct (no such case in
+  # nx 0.13, but the callback's contract does not forbid it) reports as-is
+  # rather than crashing the op it is trying to instrument.
+  defp block_kind(%mod{}), do: mod
+  defp block_kind(other), do: other
+
+  # The allowlist's rank conditions want a tensor. `out` is a tensor for most
+  # blocks and a tuple for the multi-output ones (SVD -> {u, s, vt}); hand over
+  # the first tensor found, or nil.
+  defp block_meta(%T{} = out), do: out
+  defp block_meta(out) when is_tuple(out), do: out |> Tuple.to_list() |> block_meta()
+  defp block_meta([%T{} = t | _]), do: t
+  defp block_meta([_ | rest]), do: block_meta(rest)
+  defp block_meta(_), do: nil
 
   # ---------------------------------------------------------------- slice (host fallback)
 

@@ -107,13 +107,21 @@ defmodule Nx.Vulkan.Fallback do
 
   ### What strict mode cannot see
 
-  `block/4` — the callback nx 0.13 routes `Nx.LinAlg` (svd/qr/lu/cholesky/
-  solve/eigh/determinant), `top_k`, `cumulative_*` and `all_close` through —
-  transfers to `Nx.BinaryBackend` **without** passing through the funnel, so it
-  is invisible to `count/1` and to `:raise` alike. Instrumenting it needs
-  attribution per `Nx.Block.*` struct, since a single `{:block, 4}` entry would
-  be exactly the op-family wildcard the allowlist forbids. Tracked, not fixed
-  here.
+  Everything reaches the funnel as of T13. `block/4` — the callback nx 0.13
+  routes `Nx.LinAlg` (svd/qr/lu/cholesky/solve/eigh/determinant), `top_k`,
+  `cumulative_*`, `take` and `all_close` through — used to transfer to
+  `Nx.BinaryBackend` without passing through it, so that whole family was
+  invisible to `count/1` and to `:raise` alike and a green strict run said
+  nothing about any of it. It is now recorded as `{:block, Nx.Block.Foo}`,
+  attributed per struct so that a missing `cumulative_sum` shader and
+  `Nx.all_close` are separately decidable.
+
+  Worth knowing what that revealed: a single `Nx.LinAlg.svd/2` records around
+  350 fallbacks, because nx composes it from ordinary ops whose intermediates
+  land back on this backend one at a time — 51 `pow`, 38 `dot`, 35
+  `concatenate`, plus nested `Cholesky`, `Eigh` and 17 `Take` blocks. Scholar's
+  linear regression goes through it. "One host fallback" was never the shape of
+  this cost.
   """
 
   require Logger
@@ -167,8 +175,8 @@ defmodule Nx.Vulkan.Fallback do
   tail position, so TCO has already discarded the frame that would name the
   callback.
   """
-  @spec note({atom(), arity()} | atom()) :: :ok
-  @spec note({atom(), arity()} | atom(), Nx.Tensor.t() | nil) :: :ok
+  @spec note({atom(), arity() | module()} | atom()) :: :ok
+  @spec note({atom(), arity() | module()} | atom(), Nx.Tensor.t() | nil) :: :ok
   def note(op, meta \\ nil) do
     case mode() do
       :allow -> :ok
@@ -259,7 +267,48 @@ defmodule Nx.Vulkan.Fallback do
     {{:reverse, 3}, {:rank_at_least, 5},
      "reverse_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"},
     {{:broadcast, 4}, {:rank_at_least, 5},
-     "broadcast_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"}
+     "broadcast_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"},
+
+    # --- block/4, keyed per Nx.Block struct (T13) -------------------------
+    #
+    # These are `{:block, Module}` rather than `{fun, arity}` deliberately. A
+    # single `{:block, 4}` entry would exempt the whole family in one line —
+    # the op-family wildcard this list forbids — and would silence a missing
+    # `cumulative_sum` shader and `Nx.all_close` together. Per struct, each
+    # carries its own reason and each can be deleted on its own.
+    #
+    # Only the *decided* ones are here. The genuine gaps — CumulativeSum/
+    # Product/Min/Max, TopK, Take, TakeAlongAxis, LogicalNot, FFT2/IFFT2/
+    # RFFT/IRFFT — are deliberately absent so `:raise` still reports them.
+    {{:block, Nx.Block.LinAlg.SVD}, :always,
+     "dense GPU SVD is iterative, convergence-sensitive, and awkward to make " <>
+       "bit-reproducible across the fleet, which is a documented property here. " <>
+       "ROADMAP withdraws any estimate for it. Correct on the host today."},
+    {{:block, Nx.Block.LinAlg.QR}, :always,
+     "Householder QR is sequential in the reflector loop; a GPU version is a " <>
+       "project rather than a kernel, and nothing here has asked for one"},
+    {{:block, Nx.Block.LinAlg.LU}, :always,
+     "pivoted LU needs a device-side pivot search and row swaps per column; " <>
+       "the host path is correct and no workload has made it hot"},
+    {{:block, Nx.Block.LinAlg.Eigh}, :always,
+     "symmetric eigendecomposition is iterative and convergence-sensitive, the " <>
+       "same class of problem as SVD and with the same reproducibility concern"},
+    {{:block, Nx.Block.LinAlg.Cholesky}, :always,
+     "the factorisation is inherently sequential down the diagonal; at the " <>
+       "matrix sizes this project sees, the host path is not the bottleneck"},
+    {{:block, Nx.Block.LinAlg.Solve}, :always,
+     "solve composes LU with two triangular solves, so it inherits their " <>
+       "decisions; triangular_solve/4 is already allowlisted above for the same reason"},
+    {{:block, Nx.Block.LinAlg.Determinant}, :always,
+     "determinant is LU plus a product of the diagonal, so it is exactly as " <>
+       "GPU-able as LU is, which is to say not yet and not urgently"},
+    {{:block, Nx.Block.AllClose}, :always,
+     "returns a scalar boolean from a comparison plus a reduction; there is no " <>
+       "kernel worth writing, and it is this suite's own assertion helper — " <>
+       "raising on it would make strict mode unusable in the tests that need it"},
+    {{:block, Nx.Block.Phase}, :always,
+     "complex-only, and the shader ISA is real-valued. LIMITATIONS.md lists it " <>
+       "as a permanent skip: there is nothing to implement, not merely nothing done"}
   ]
 
   @doc """
@@ -268,13 +317,13 @@ defmodule Nx.Vulkan.Fallback do
   Exposed so a test can assert on it — an allowlist that only exists in a
   module attribute is one nobody reviews.
   """
-  @spec allowlist() :: [{{atom(), arity()}, :always | {:rank_at_least, pos_integer()}, String.t()}]
+  @spec allowlist() :: [{{atom(), arity() | module()}, :always | {:rank_at_least, pos_integer()}, String.t()}]
   def allowlist, do: @allowlist
 
   @doc """
   Whether a fallback of `op` producing `meta` is permitted under `:raise`.
   """
-  @spec allowed?({atom(), arity()} | atom(), Nx.Tensor.t() | nil) :: boolean()
+  @spec allowed?({atom(), arity() | module()} | atom(), Nx.Tensor.t() | nil) :: boolean()
   def allowed?(op, meta \\ nil) do
     Enum.any?(@allowlist, fn {allowed_op, condition, _reason} ->
       allowed_op == op and condition_met?(condition, meta)
@@ -314,12 +363,18 @@ defmodule Nx.Vulkan.Fallback do
   defp describe(%Nx.Tensor{shape: shape, type: type}), do: {shape, type}
   defp describe(_), do: {nil, nil}
 
+  # `{:block, Nx.Block.CumulativeSum}` reads as "block Nx.Block.CumulativeSum",
+  # not "block/Elixir.Nx.Block.CumulativeSum" — the Elixir. prefix and the
+  # arity slash are both noise when the second element is a module.
+  defp describe_op({:block, mod}) when is_atom(mod) and not is_nil(mod) do
+    if Code.ensure_loaded?(mod), do: "block #{inspect(mod)}", else: "block/#{mod}"
+  end
+
+  defp describe_op({name, arity}), do: "#{name}/#{arity}"
+  defp describe_op(name), do: "#{name}/?"
+
   defp refusal_message(mode, op, meta) do
-    {name, arity} =
-      case op do
-        {n, a} -> {n, a}
-        n -> {n, "?"}
-      end
+    subject = describe_op(op)
 
     where =
       case describe(meta) do
@@ -328,7 +383,7 @@ defmodule Nx.Vulkan.Fallback do
       end
 
     """
-    host fallback #{if mode == :raise, do: "refused", else: "reported"}: #{name}/#{arity}
+    host fallback #{if mode == :raise, do: "refused", else: "reported"}: #{subject}
 
     #{where}
 
