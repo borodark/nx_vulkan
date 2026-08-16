@@ -38,6 +38,7 @@ defmodule Nx.Vulkan.PadTest do
     end
   end
 
+  @tag :host_fallback_expected
   test "u8 pad falls back but stays correct" do
     check(fn b -> Nx.pad(Nx.iota({3}, type: {:u, 8}, backend: b), Nx.tensor(0, type: {:u, 8}, backend: b), [{1, 1, 0}]) end, false)
   end

@@ -851,7 +851,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
       end
 
     result = apply(Nx, op, [bin_in, opts])
-    host_result(out, result)
+    # Explicit attribution: this helper is shared by sum/reduce_max/reduce_min,
+    # so the __CALLER__.function capture would blame `reduce_op_host_fallback/4`
+    # and hide which reduction left the GPU. (It did, until strict mode printed
+    # the helper's own name in 54 refusals.)
+    host_result(out, result, {op, 3})
   end
 
   # Explicit `//1` step: under Elixir's post-1.16 / nx-0.13 range semantics a
@@ -2180,9 +2184,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Every host fallback lands here (via the host_result/2 macro above, which
   # supplies `op`). Counting centrally is what makes a silent fallback
   # detectable — see Nx.Vulkan.Fallback for why value-based tests structurally
-  # cannot catch one.
+  # cannot catch one. `out` is passed as the strict-mode metadata: under
+  # `host_fallback: :raise` it supplies the shape and dtype in the error, and
+  # gates the rank-5+ allowlist entries.
+  #
+  # A fallback is "the result left the device", so only a result whose data is
+  # NOT on this backend is recorded. Not every caller of this helper actually
+  # host-falls-back: clip/4 composes GPU min/max and stays resident, and was
+  # being counted (and, under :raise, refused) for a round trip it never made.
+  # Strict mode found that — a censor that cries wolf gets switched off.
   defp host_result_recorded(%T{} = out, %T{} = result, op) do
-    Nx.Vulkan.Fallback.note(op)
+    unless match?(%__MODULE__{}, result.data), do: Nx.Vulkan.Fallback.note(op, out)
     %{out | data: result.data}
   end
 

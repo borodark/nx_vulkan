@@ -31,10 +31,12 @@ defmodule Nx.Vulkan.SliceTest do
     end
   end
 
+  @tag :host_fallback_expected
   test "u8 slice falls back but stays correct" do
     check(fn b -> Nx.slice(Nx.iota({6}, type: {:u, 8}, backend: b), [1], [4]) end, false)
   end
 
+  @tag :host_fallback_expected
   test "dynamic (tensor) start falls back but stays correct" do
     check(fn b -> Nx.slice(Nx.iota({6}, type: {:f, 32}, backend: b), [Nx.tensor(2, backend: b)], [3]) end, false)
   end

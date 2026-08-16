@@ -67,6 +67,7 @@ defmodule Nx.Vulkan.ConvTest do
   end
 
   describe "host fallback — correct for unsupported cases" do
+    @tag :host_fallback_expected
     test "feature groups fall back but stay correct" do
       {got, ref} = run({1, 4, 5, 5}, {4, 2, 3, 3}, feature_group_size: 2)
       refute match?(%VulkanoBackend{}, got.data)
@@ -96,6 +97,7 @@ defmodule Nx.Vulkan.ConvTest do
       assert max_abs_diff(got, ref) < 1.0e-10
     end
 
+    @tag :host_fallback_expected
     test "rank>3 (spatial rank 4) falls back but stays correct" do
       # 4 spatial dims -> sr=4 > 3, host fallback
       i = gen({1, 1, 3, 3, 3, 3}, VulkanoBackend, 1)

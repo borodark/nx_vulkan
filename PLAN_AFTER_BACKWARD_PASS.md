@@ -29,6 +29,40 @@ by default — that was not safe to assume, since the concern going in was that
 holding more descriptor sets alive would show up as Kepler pool pressure.
 Results: [`bench_results/BATCHED_DISPATCH.md`](bench_results/BATCHED_DISPATCH.md).
 
+**Re-tested under concurrency, and it holds.** Those figures were all measured
+with one dispatcher, while the queue producing them is a single
+`OnceLock<Mutex<Vec<RecordFn>>>` static shared by every BEAM process and
+`submit_and_wait` ends in a device-wide `queue.wait_idle()`. Neither costs
+anything at N=1, and the deployments this backend targets are N-concurrent
+(exmc runs a GenServer per instrument). Raced across N ∈ {4,8,16,32} on both
+Keplers, five interleaved replicates per cell:
+
+| N | GT 650M | GT 750M |
+|---:|---:|---:|
+| 4 | 1.17× | 1.01× |
+| 8 | 1.22× | 1.14× |
+| 16 | 1.20× | 1.06× |
+| 32 | **1.33×** | 1.15× |
+
+Batching wins at every N on both cards. **The shared bucket is not costing
+measurable throughput up to 32 dispatchers**, so routing batches through
+`Nx.Vulkan.Node` (`with_node/2` at the graph boundary) and owner-keyed pending
+queues have **no measured motivation** and are not filed as work. A negative
+result, recorded so it is not re-litigated:
+[`bench_results/CONCURRENT_DISPATCH.md`](bench_results/CONCURRENT_DISPATCH.md).
+
+Two things the race established that it was not looking for:
+
+1. **One process under-feeds these GPUs.** Throughput roughly doubles from N=1
+   to N=8 on both cards before saturating. Concurrency is worth having; the
+   shared queue simply is not the obstacle to it.
+2. **The GT 750M is a poor host for timing work and the GT 650M is a good one**
+   — ±11–13% run-to-run spread against ±2–4%, on the same benchmark in the same
+   session. This is not recorded anywhere else in the repo, and it invalidates
+   single-run cells on that host: a 15% "effect" measured there is a coin flip.
+   Two rounds of this race produced a confident, reproducible-looking hardware
+   crossover that five replicates then erased. Race on the 650M, or replicate.
+
 Left deliberately for T4: `matmul` and `transpose_2d` build a `ShaderModule` +
 `ComputePipeline` per call instead of going through `get_or_create_pipeline`.
 They join the batch, but per-call pipeline construction is per-dispatch cost
@@ -78,56 +112,54 @@ backing it, and no graph shape where the default path is slower than eager.
 
 ---
 
-## T3 — Strict mode: `host_fallback: :raise` `[ ]`
+## T3 — Strict mode: `host_fallback: :raise` `[x]`
 
-**Why.** `Nx.Vulkan.Fallback` makes a silent fallback *detectable if you wrote
-the right assertion*. Strict mode makes it *impossible to miss*. Prior art:
-PyTorch MPS requires `PYTORCH_ENABLE_MPS_FALLBACK=1` to allow CPU fallback at
-all; unimplemented ops raise by default.
+**Done.** `config :nx_vulkan, host_fallback: :allow | :warn | :raise`, read in
+`host_result_recorded/3`. `:allow` is and stays the default. `:raise` raises
+`Nx.Vulkan.HostFallbackError` on the first fallback not on `@allowlist` in
+`lib/nx_vulkan/fallback.ex`; `Nx.Vulkan.Fallback.strict/1,2` scopes it
+per-process, so a strict test cannot poison an `async: true` suite.
+`sh scripts/strict_test.sh` and `.github/workflows/strict-fallback.yml` are the
+ratchet.
 
-**Do.** Four steps, in this order:
+**Allowlist** — 8 entries, one line each, no wildcards. `pow/3` (broadcast
+form), `window_scatter_max/6` (overlapping windows), `sort/3`, `argsort/3`,
+`triangular_solve/4`, and `transpose/3` / `reverse/3` / `broadcast/4` **gated
+at rank ≥ 5** so a rank-4 fallback still raises.
 
-1. **The mode itself.** `config :nx_vulkan, host_fallback: :allow | :warn |
-   :raise`, read in `host_result_recorded/3` — the one funnel every fallback
-   already passes through, and the one that already knows the `{fun, arity}`
-   via the `__CALLER__.function` capture. `:allow` is today's behaviour and
-   stays the default; a library that raises on a correct-but-slow path by
-   default would be hostile to the "it always works" property that is the
-   backend's main selling point.
-2. **The allowlist**, as data rather than prose: a module attribute of
-   `{fun, arity}` pairs each carrying the reason it is permitted, sourced from
-   T7's table (`pow` f64, `window_scatter_max` overlapping, sort/argsort,
-   `Nx.LinAlg` via `block/4`, rank-5+ remaps). `:raise` consults it; anything
-   not listed raises with the op, the shapes, the dtypes, and a pointer to
-   §1b of the `vulkan-nx-compute` skill.
-3. **Scope it per-process, not globally.** The counter is already per-process
-   (`Nx.Vulkan.Fallback`); strict mode must be too, or one strict test poisons
-   an async suite. `Fallback.strict/2` taking a fun is the natural sibling to
-   `count/1` and is what tests will actually reach for.
-4. **A CI job** running the full suite under `:raise`. This is the part that
-   makes it a ratchet rather than a feature.
+**What the first strict run caught** (524 failures, one real bug class):
 
-**Watch for.** The allowlist is the whole risk surface. It must be *narrow
-entries with reasons*, not a broad "these ops may fall back" — the failure
-mode is an allowlist that grows silently until `:raise` means nothing, which
-is how the original gates got wide in the first place. Prefer a failing test
-that gets an explicit one-line exemption in the diff over a wildcard.
+- **A `{:u, 8}` mask produced on the GPU can only be consumed by `select`.**
+  `multiply`, `sum` and `as_type` on it all host-fall-back — there is no
+  `cast_u8_to_f*` shader. `reduce_max`'s gradient is exactly this shape, so the
+  **softmax backward pass leaves the GPU four times** and nobody knew. Not
+  allowlisted. See T12.
+- **`clip/4` was counted as a fallback it never made.** It composes GPU
+  min/max and stays resident, but wrapped its result in `host_result/2`, so the
+  census over-counted it and `:raise` refused it. The funnel now records only
+  results that actually left the device. Two tests assert "clip stays on GPU"
+  and were passing for the wrong reason.
+- **`sum` / `reduce_max` / `reduce_min` were attributed to their shared
+  helper.** 54 refusals said `reduce_op_host_fallback/4` and named no Nx op.
+  Fixed with the explicit-attribution `host_result/3` the skill already
+  prescribes.
+- **`block/4` is invisible to the counter *and* to strict mode.** Everything
+  nx 0.13 routes through it — `Nx.LinAlg` svd/qr/lu/cholesky/solve/eigh/
+  determinant, `top_k`, `cumulative_*`, `all_close` — transfers to
+  `BinaryBackend` without passing the funnel. So "LinAlg" is not an allowlist
+  entry: it cannot be refused, because it is never seen. See T13.
+- **The T7 table's `pow` line was wrong.** Equal-shape f32 *and* f64 `pow` run
+  on the GPU; only the **broadcasting** form falls back, for either dtype,
+  because `elementwise_binary_bcast_*` omits op code 4. Corrected below.
+- The rank-5+ family is wider than T7 said: broadcasting **elementwise binary**
+  (`add`, `multiply`, …) is also capped at rank ≤ 4, not just the remap ops.
 
-**Note the lower-bound property.** Strict mode inherits it: raising on the
-*first* refused op is strictly better than counting, because it fires before
-the tensor lands on `BinaryBackend` and takes its downstream ops with it
-unrecorded. That is an argument for `:raise` over `:warn` in CI, not merely a
-caveat.
-
-**Done when.** The suite passes under `:raise` with an explicit allowlist, CI
-runs it, and adding a new silent fallback fails the build rather than merely
-slowing things down.
-
-**Risk.** Low, and it is the highest-leverage item for preventing recurrence —
-this whole audit exists because the bug class was invisible. [`T11`](#t11--the-gaps-the-exmc-race-found-)
-is the immediate evidence that it is not a solved problem: two more instances
-of the same bug class were sitting in `main` at 0.3.0, and nothing in the suite
-was positioned to notice.
+**Corrected in the process:** the suite is green under `:raise` with two
+enumerated, greppable exclusions — `:host_fallback_expected` (tests whose
+subject *is* the fallback path, incl. `doctest Nx`, which is an
+API-completeness suite over `{:s, 32}` and not a residency one) and
+`:host_fallback_open` (the two `grad_test.exs` cases blocked on T12). Neither
+is skipped by a normal `mix test`.
 
 ---
 
@@ -186,13 +218,16 @@ already — keep the report scoped to exactly what was measured.
 
 ## T7 — Remaining host fallbacks `[ ]`
 
+Corrected against the code by T3's strict run — three of these lines were
+inaccurate as written.
+
 | op | action | rationale |
 |---|---|---|
-| `pow` f64 | `[-]` **not doing** | GLSL.std.450 has no f64 `pow`; the only fix is boundary-casting through f32, trading real precision in an f64 graph for a nicer number in a table |
+| **broadcasting** `pow` (any dtype) | `[-]` **not doing** | *Corrected:* equal-shape f32 **and f64** `pow` already run on the GPU. Only the broadcasting form falls back, because `elementwise_binary_bcast_*` omits op code 4 (GLSL.std.450 has no f64 `pow`). Fixing it means boundary-casting through f32, trading real precision for a nicer table |
 | overlapping pooling backward | `[-]` **not doing** | needs `GL_EXT_shader_atomic_float`, not guaranteed on the Kepler fleet; the one-thread-per-input design is what avoids atomics |
-| rank-5+ index-remap ops | `[ ]` if a workload appears | mechanical: extend `transpose_nd`/`reverse_nd`/`broadcast_nd` past rank 4 |
+| rank-5+ index-remap ops | `[ ]` if a workload appears | mechanical: extend `transpose_nd`/`reverse_nd`/`broadcast_nd` past rank 4. *Corrected:* broadcasting **elementwise binary** is capped at rank ≤ 4 too |
 | `sort` / `argsort` | `[ ]` if a workload appears | large; host path is correct |
-| `Nx.LinAlg` (SVD/QR/solve/cholesky) | `[ ]` unlikely | very large; correct on host today |
+| `Nx.LinAlg` (SVD/QR/solve/cholesky) | `[ ]` unlikely | very large; correct on host today. *Corrected:* these go through `block/4`, which is **not instrumented at all** — see T13. `triangular_solve/4` is the only one still an `Nx.Backend` callback |
 
 **Done when.** Each line is either done or has a recorded reason it is not — the
 point is that "still a fallback" is a decision, not an oversight.
@@ -235,9 +270,44 @@ same host — contended measurements are worse than none.
 
 ---
 
-## T10 — The Ampere over-dispersion `[ ]`
+## T10 — The Ampere over-dispersion `[x]`
 
-**Why.** `exmc/research/D90_BACKLOG_FIX_PLAN.md` (2026-07-22) disqualifies the
+**Done — and the defect was in neither the card nor this repo.**
+Diagnosis: [`docs/T10_AMPERE_DISPERSION.md`](docs/T10_AMPERE_DISPERSION.md).
+
+The fixed-input differential exonerated the shader in one step, as designed:
+Ampere against a Kepler oracle, same GLSL, byte-identical inputs, K ∈ {1,2,4,32}
+— `q_chain`, `p_chain`, `grad_chain` **bit-identical in all 8 cases**, one
+log-density differing by 1 ulp. A 1-ulp difference cannot produce a 5.9×
+variance ratio. No barrier, race, or warp-width hypothesis was needed, and the
+one this plan proposed as most likely was wrong.
+
+The actual cause is in eXMC: `multi_rv_custom_spec.ex`'s `@template` evaluates
+`{{prior_logp_body_q}}` **before** the position update, so `logp_chain[k]` is
+`log p(q_chain[k−1])` while `q/p/grad_chain[k]` hold post-step state.
+`Tree.synth_chain_subtree/10` pairs them by index, so every NUTS leaf carries a
+stale, systematically-too-high density and the multinomial over-weights the far
+end of each trajectory. Mis-scaled not mis-signed, no divergences, adaptation
+pushes `eps` up — the observed signature exactly. Moving the body below the
+update takes Normal(0,1) variance from 8.5467 to 1.4481 against a CPU 1.4523.
+
+**The second finding is the larger one.** `Validator.run_exla/2` selected its
+reference by clearing `:exmc, :compiler` and letting `auto_detect/0` run, and
+that is `EXLA -> Nx.Vulkan -> nil`. On any host without EXLA the reference arm
+*was* the candidate backend. FreeBSD has no EXLA at all, so **mac-247's 16/0
+was Vulkan compared against itself** and established nothing; super-io scored
+8/16 because it was the only host actually running the test. The fleet's
+verdict — "super-io is unfit for numerical validation, the macs are the
+reference" — was precisely inverted, and it stood for three weeks over a live
+defect. Fixed in exmc (`c69a6a6bf`): the reference is pinned explicitly to
+`:exla`, or `:none` where EXLA is absent, and raises if it ever resolves onto
+the candidate again. It now returns `{:error, %{check: :variance, ...}}` on the
+model it used to pass.
+
+**The transferable lesson:** a comparison harness must assert that its two arms
+are actually two. This one had no such assertion and could not fail.
+
+**Why (as filed).** `exmc/research/D90_BACKLOG_FIX_PLAN.md` (2026-07-22) disqualifies the
 RTX 3060 Ti as a host for sampling-accuracy validation: its Vulkan leapfrog is
 **systematically over-dispersed across every distribution**, deterministically
 and reproducibly — Normal(0,1) variance **8.5 against EXLA's 1.45**,
@@ -298,9 +368,43 @@ is that neither repo has ruled itself out.
 
 ---
 
-## T11 — The gaps the eXMC race found `[ ]`
+## T11 — The gaps the eXMC race found `[x]`
 
-**Why.** [`bench_results/EXMC_PEROP_RACE.md`](bench_results/EXMC_PEROP_RACE.md)
+**Done. Census 137 → 0**, `logp` unchanged at 7 significant figures against the
+host. Suite 843 doctests / 423 tests / 0 failures, green under `NXV_BATCH_MAX=0`
+and `=2`.
+
+Three gates were refusing shapes the shaders already handled, and only one new
+kernel was needed:
+
+- `compare` (all six) and `select/4`: `>= 1` dropped. **No GLSL change** —
+  `pad4/1` already pads with 1s and `pad_left/2` lifts a scalar; the loop bound
+  was `0` where it wanted `max(rank, 1)`.
+- `bcast_shape_ok?/3`: a third instance, found by the audit. Rank 0 reaches the
+  broadcast path only when the two scalars differ in dtype, which is why
+  nothing noticed — and it is where the census's 12 `multiply` came from.
+- **`pad` already had a shader** (`glsl/pad.comp`, since thrust 2 — `LIMITATIONS.md`
+  §2 and this item's original text were both wrong). It was refused by
+  `pv.type == t.type`: `Nx.pad(t, 0.0, cfg)` hands the callback an f32/s32
+  literal. The `{:s,32}` trap from §1b again.
+- `put_slice`: the one genuinely new shader.
+
+Two upstream bugs surfaced and were deliberately **not** fixed, because matching
+the reference means reproducing it: `BinaryBackend.pad/4` casts the pad value
+but not the tensor, returning a malformed tensor when the value is wider; and
+`BinaryBackend.put_slice/5` raises on rank 0. The latter is why `put_slice`
+keeps `rank >= 1` — a rank gate *with* evidence, unlike the one removed.
+
+**T8 answered:** do not unify. The family is already seven shaders, so the
+"fourth member" trigger fired long ago unnoticed, and the members differ in
+*arity and bindings*, not just mapping rule — a unified shader needs the union
+of bindings and dummy buffers for unused slots. The duplication worth removing
+is different: port `transpose_nd`/`reverse_nd`/`broadcast_nd` to the
+type-generic `ews` word-copy form `slice`/`pad`/`put_slice` already use, which
+collapses 6 files to 3 and gives those ops integer-dtype support they currently
+refuse.
+
+**Why (as filed).** [`bench_results/EXMC_PEROP_RACE.md`](bench_results/EXMC_PEROP_RACE.md)
 counted **137 host fallbacks in a single `value_and_grad`** of a d=8 model, and
 two causes account for all of them:
 
@@ -346,6 +450,57 @@ probabilistic consumer. Not because a d=8 posterior will get faster.
 
 **Risk.** Low. Both are mechanical, and both are exactly the kind of gap
 [`T3`](#t3--strict-mode-host_fallback-raise-) exists to stop shipping.
+## T12 — `cast_u8_to_f32/f64`: unstick the comparison mask `[ ]`
+
+**Why.** Found by T3's first strict run, and it is instance nine of the §1
+defect class. The compare shaders produce a `{:u, 8}` mask on-device, which was
+the point — but **`select/4` is the only op that can consume it.** `multiply`,
+`sum` and `as_type` on a u8 mask all host-fall-back, because `coerce_to/2` has
+no u8 cast and the reduce/binary shaders have no u8 path.
+
+`Nx.Defn.Grad` routes `reduce_max`'s gradient through exactly that mask, so
+**softmax's backward pass leaves the GPU four times** — two `multiply`, two
+`sum` — on a tensor-sized payload. Nothing detected it: the values are
+bit-identical, and `grad_test.exs` only asserted values.
+
+This is the same shape as audit instance #6, which `cast_s32_to_f32/f64` fixed,
+and the same lesson as §1's `{:s, 32}` literals: *the dtype the gate refuses is
+one the backend itself produced.*
+
+**Do.** Add `cast_u8_to_f32.comp` / `cast_u8_to_f64.comp` on the existing cast
+skeleton and wire them into `cast_spv/2`, which unblocks `as_type` directly and
+`multiply` via `coerce_to/2`. `sum` over a u8 mask needs a decision separately
+(cast-then-reduce, or a u8 path in `reduce_axis_*`).
+
+**Done when.** `Nx.Vulkan.Fallback.count_total/1` is 0 for the softmax and
+`reduce_max` gradients, and the two `@tag :host_fallback_open` tags in
+`test/nx_vulkan/grad_test.exs` are deleted rather than moved.
+
+**Risk.** Low. One new shader on a skeleton that exists three times already,
+and its correctness test is bit-equality against `BinaryBackend`.
+
+---
+
+## T13 — Instrument `block/4` `[ ]`
+
+**Why.** `block/4` is how nx 0.13 routes `Nx.LinAlg` (svd/qr/lu/cholesky/solve/
+eigh/determinant), `top_k`, `cumulative_*` and `all_close`. It transfers every
+input to `Nx.BinaryBackend` and never touches `host_result/2`, so that entire
+family is invisible to `Nx.Vulkan.Fallback.count/1` **and** to strict mode. A
+green strict run says nothing about it.
+
+**Do.** Record it — but attribute per `Nx.Block.*` struct, not as one
+`{:block, 4}`. A single entry would have to be allowlisted wholesale, which is
+precisely the op-family wildcard `@allowlist` forbids; it would also make
+`Nx.all_close` (used as an assertion helper throughout the suite) raise under
+`:raise`. Needs a key shape the allowlist can express, so it is a design
+question, not a one-liner.
+
+**Done when.** A LinAlg call shows up in a census, and a `cumulative_sum`
+fallback can be refused without also refusing `all_close`.
+
+**Risk.** Low-medium. Changes census composition, so the pinned counts in
+`fallback_test.exs` need re-reading rather than re-baselining.
 
 ---
 

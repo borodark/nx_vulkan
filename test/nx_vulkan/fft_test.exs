@@ -75,6 +75,7 @@ defmodule Nx.Vulkan.FFTTest do
   end
 
   describe "host fallback — correct for the cases the GPU path does not cover" do
+    @tag :host_fallback_expected
     test "non-power-of-two length (padded) falls back but stays correct" do
       data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
       got = Nx.fft(v(data))
@@ -83,6 +84,7 @@ defmodule Nx.Vulkan.FFTTest do
       assert max_abs_diff(got, Nx.fft(b(data))) < 1.0e-10
     end
 
+    @tag :host_fallback_expected
     test "explicit :length that slices falls back but stays correct" do
       data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
       got = Nx.fft(v(data), length: 4)
@@ -90,6 +92,7 @@ defmodule Nx.Vulkan.FFTTest do
       assert max_abs_diff(got, Nx.fft(b(data), length: 4)) < 1.0e-10
     end
 
+    @tag :host_fallback_expected
     test "non-last axis falls back but stays correct" do
       data = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]
       got = Nx.fft(v(data), axis: 0)
@@ -97,6 +100,7 @@ defmodule Nx.Vulkan.FFTTest do
       assert max_abs_diff(got, Nx.fft(b(data), axis: 0)) < 1.0e-10
     end
 
+    @tag :host_fallback_expected
     test "f32 input (maps to c64) falls back but stays correct" do
       data = [1.0, 2.0, 3.0, 4.0]
       got = Nx.fft(v(data, {:f, 32}))

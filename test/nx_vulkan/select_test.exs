@@ -52,6 +52,7 @@ defmodule Nx.Vulkan.SelectTest do
     end
   end
 
+  @tag :host_fallback_expected
   test "mixed-type branches fall back but stay correct" do
     m = Nx.tensor([1, 0, 1], type: {:u, 8}, backend: VulkanoBackend)
     got = Nx.select(m, Nx.tensor([1.0, 2.0, 3.0], type: {:f, 32}, backend: VulkanoBackend), Nx.tensor([9, 9, 9], type: {:s, 64}, backend: VulkanoBackend))

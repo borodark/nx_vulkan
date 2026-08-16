@@ -76,9 +76,17 @@ this op looks like, not just the op:
   (`coerce_operand/2`, `coerce_to/2`, the `cast_s32_to_f*` shaders) rather than
   bailing to the host.
 
+- **A GPU-produced `{:u, 8}` mask is only consumable by `select`.** The compare
+  shaders keep `x > 0` on-device, but `multiply`, `sum` and `as_type` on the
+  resulting u8 mask all host-fall-back — there is no `cast_u8_to_f*` shader.
+  `reduce_max`'s gradient is exactly this shape, so softmax's backward pass
+  leaves the GPU four times. Found by strict mode; tracked as T12 in
+  `PLAN_AFTER_BACKWARD_PASS.md`. Same lesson as the `{:s, 32}` literals above:
+  **the dtype a gate refuses is usually one the backend itself produced.**
+
 A refused gate is invisible: the host path returns a **bit-identical** result,
-so no value-based test can see it. Count fallbacks (§9) — that is the only
-signal.
+so no value-based test can see it. Count fallbacks (§9), or better, refuse them
+outright with `host_fallback: :raise` (§9/2b') — that is the only signal.
 
 ## 2. Anatomy of a static kernel (`glsl/*.comp`)
 
@@ -293,7 +301,36 @@ From the `thrust3-fusion-compiler` and `gpu-fleet-and-f32` memories:
    `BinaryBackend`, everything downstream of it computes there without being
    recorded. Attribution comes from a `__CALLER__.function` capture in the
    `host_result` macro, because Erlang TCO discards the caller frame — a runtime
-   stacktrace walk reports the wrong op.
+   stacktrace walk reports the wrong op. **If your op goes through a shared
+   helper, pass the real op explicitly** (`host_result(out, result, {op, 3})`) —
+   otherwise the census names the helper and hides which op left.
+2b'. **Strict mode — make it fail instead of just counting.**
+   `config :nx_vulkan, host_fallback: :allow | :warn | :raise`, read in
+   `host_result_recorded/3`. `:allow` is the default and must stay the default.
+   `:raise` raises `Nx.Vulkan.HostFallbackError` on the first fallback not on
+   `@allowlist` in `lib/nx_vulkan/fallback.ex`. Per-process, so it is safe in an
+   `async: true` suite:
+
+   ```elixir
+   Nx.Vulkan.Fallback.strict(fn -> Nx.Defn.jit_apply(step, args) end)
+   Nx.Vulkan.Fallback.strict(:allow, fn -> Nx.LinAlg.svd(a) end)   # escape hatch
+   ```
+
+   **Prefer this to `assert count_total(...) == 0`.** Because the count is a
+   lower bound, a census names the visible edge of a cascade; `:raise` fires
+   before the tensor leaves the device, so it names the *cause*. `sh
+   scripts/strict_test.sh` runs the whole suite this way and is the CI ratchet.
+
+   When a strict run goes red, the answer is almost always **widen the gate**,
+   not widen the allowlist — see §1b. An allowlist entry is one line, one
+   `{fun, arity}`, one reason, no wildcards; that constraint is the feature.
+
+   Two things strict mode still cannot see, both worth knowing before you trust
+   a green run: **`block/4`** (how nx 0.13 routes `Nx.LinAlg`, `top_k`,
+   `cumulative_*`, `all_close`) transfers to `BinaryBackend` without passing
+   through the funnel at all; and a fallback whose result stays resident is
+   deliberately not recorded, so an op that composes GPU primitives and wraps
+   them in `host_result/2` is correctly silent.
 2c. **Gradients need their own tests.** `test/nx_vulkan/grad_test.exs` compares
    `Nx.Defn.grad` under both backends. Upstream Nx has a central-differences
    `check_grads!` but ships it only under `nx/test/`, not in the Hex package —

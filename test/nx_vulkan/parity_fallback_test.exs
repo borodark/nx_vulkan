@@ -20,6 +20,11 @@ defmodule Nx.Vulkan.ParityFallbackTest do
 
   use ExUnit.Case, async: false
 
+  # The subject of this module IS the host-fallback path — every test here
+  # asserts a fallback computes the right answer. Excluded from the strict
+  # run (scripts/strict_test.sh), which asserts fallbacks do not happen.
+  @moduletag :host_fallback_expected
+
   alias Nx.Vulkan.VulkanoBackend
 
   setup_all do

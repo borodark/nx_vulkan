@@ -18,6 +18,11 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
 
   @moduletag :vulkan_live
 
+  # The subject of this module IS the host-fallback path — it asserts the Tier 1
+  # contract that a fallback's result stays on BinaryBackend. Excluded from the
+  # strict run (scripts/strict_test.sh), which asserts fallbacks do not happen.
+  @moduletag :host_fallback_expected
+
   defp v(t), do: Nx.backend_transfer(t, VulkanoBackend)
 
   defp f32(list_or_int, shape \\ nil) when not is_nil(list_or_int) do

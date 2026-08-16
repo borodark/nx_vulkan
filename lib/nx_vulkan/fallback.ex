@@ -1,3 +1,14 @@
+defmodule Nx.Vulkan.HostFallbackError do
+  @moduledoc """
+  Raised when a host fallback happens under `host_fallback: :raise` and the op
+  is not on `Nx.Vulkan.Fallback`'s allowlist.
+
+  See `Nx.Vulkan.Fallback` for the mode, the allowlist, and how to scope strict
+  mode to a single block.
+  """
+  defexception [:message, :op, :shape, :type]
+end
+
 defmodule Nx.Vulkan.Fallback do
   @moduledoc """
   Counts host fallbacks so a silent one becomes a test failure.
@@ -49,9 +60,67 @@ defmodule Nx.Vulkan.Fallback do
   So a count going *up* after a fix can mean the fix worked and exposed
   something that was already happening. Read the composition, not just the
   total.
+
+  ## Strict mode
+
+      config :nx_vulkan, host_fallback: :allow | :warn | :raise
+
+  `:allow` is the default and is today's behaviour: a fallback is correct, just
+  slower, and "it always works" is this backend's main property. `:warn` logs
+  each refused fallback and returns the same (correct) answer. `:raise` raises
+  `Nx.Vulkan.HostFallbackError` on the first fallback that is not on the
+  allowlist below.
+
+  Scope it to a block instead of the whole VM — the sibling of `count/1`, and
+  what a test should reach for:
+
+      Nx.Vulkan.Fallback.strict(fn -> Nx.Defn.jit_apply(step, args) end)
+      Nx.Vulkan.Fallback.strict(:warn, fn -> ... end)
+
+  Strict mode is **per-process**, like counting, so one strict test cannot
+  poison an `async: true` suite. The application config sets the default for
+  processes that have not scoped it.
+
+  ### Why raising beats counting
+
+  The count above is a *lower bound*: once a fallback strands a tensor on
+  `Nx.BinaryBackend`, everything downstream computes there without reaching
+  this backend at all, so the census shows the visible edge of a cascade rather
+  than its cause. `:raise` fires at the **first** refused fallback — before the
+  tensor has left the device — so a strict run names the op that actually
+  started it. That is the whole reason to prefer it to an assertion on
+  `count_total/1`.
+
+  ### The allowlist
+
+  `@allowlist` is the entire risk surface of strict mode. An allowlist that
+  grows loosely makes `:raise` mean nothing, which is the same failure that
+  produced the narrow forward-pass gates in the first place
+  (`docs/BACKWARD_PASS_AUDIT.md` §1). So:
+
+    * every entry is one line, names one `{fun, arity}`, and carries the reason
+      it is permitted — a new exemption is legible in a diff;
+    * there are **no wildcards and no op families** — `{:transpose, 3}` is not
+      exempt, only `{:transpose, 3}` *at rank ≥ 5* is, because a rank-4
+      transpose falling back is a bug and must still raise;
+    * "it made CI red" is not a reason. Widen the gate instead.
+
+  ### What strict mode cannot see
+
+  `block/4` — the callback nx 0.13 routes `Nx.LinAlg` (svd/qr/lu/cholesky/
+  solve/eigh/determinant), `top_k`, `cumulative_*` and `all_close` through —
+  transfers to `Nx.BinaryBackend` **without** passing through the funnel, so it
+  is invisible to `count/1` and to `:raise` alike. Instrumenting it needs
+  attribution per `Nx.Block.*` struct, since a single `{:block, 4}` entry would
+  be exactly the op-family wildcard the allowlist forbids. Tracked, not fixed
+  here.
   """
 
+  require Logger
+
   @key :nx_vulkan_fallback_counts
+  @strict_key :nx_vulkan_fallback_strict
+  @modes [:allow, :warn, :raise]
 
   @doc """
   Run `fun` with fallback recording enabled, returning `{result, counts}` where
@@ -88,13 +157,24 @@ defmodule Nx.Vulkan.Fallback do
   @doc """
   Record one host fallback, attributed to `op` (a `{function, arity}` pair).
 
-  A no-op unless the calling process is inside `count/1`, which is the normal
-  state. `op` is supplied by the caller at **compile time** rather than derived
-  from a stacktrace: the backend calls its fallback wrapper in tail position, so
-  TCO has already discarded the frame that would name the callback.
+  `meta` is the op's output template (an `Nx.Tensor`, or `nil` when the
+  callback has no single one); it is only read when strict mode has something
+  to report, so `:allow` pays nothing for it.
+
+  Counting is a no-op unless the calling process is inside `count/1`, which is
+  the normal state. `op` is supplied by the caller at **compile time** rather
+  than derived from a stacktrace: the backend calls its fallback wrapper in
+  tail position, so TCO has already discarded the frame that would name the
+  callback.
   """
   @spec note({atom(), arity()} | atom()) :: :ok
-  def note(op) do
+  @spec note({atom(), arity()} | atom(), Nx.Tensor.t() | nil) :: :ok
+  def note(op, meta \\ nil) do
+    case mode() do
+      :allow -> :ok
+      strict -> enforce(strict, op, meta)
+    end
+
     case Process.get(@key) do
       nil -> :ok
       counts -> Process.put(@key, Map.update(counts, op, 1, &(&1 + 1)))
@@ -106,4 +186,169 @@ defmodule Nx.Vulkan.Fallback do
   @doc "Whether the calling process is currently recording."
   @spec recording?() :: boolean()
   def recording?, do: Process.get(@key) != nil
+
+  # ------------------------------------------------------------ strict mode
+
+  @doc """
+  Run `fun` with host fallbacks strict in the calling process only.
+
+  `strict/1` uses `:raise`. Restores the previous mode afterwards, so it nests
+  the same way `count/1` does, and never affects another process.
+
+      Nx.Vulkan.Fallback.strict(fn -> Nx.Defn.jit_apply(step, args) end)
+      Nx.Vulkan.Fallback.strict(:warn, fn -> maybe_slow_thing() end)
+      Nx.Vulkan.Fallback.strict(:allow, fn -> known_host_op() end)
+  """
+  @spec strict((-> result)) :: result when result: term()
+  def strict(fun) when is_function(fun, 0), do: strict(:raise, fun)
+
+  @spec strict(:allow | :warn | :raise, (-> result)) :: result when result: term()
+  def strict(mode, fun) when mode in @modes and is_function(fun, 0) do
+    previous = Process.get(@strict_key)
+    Process.put(@strict_key, mode)
+
+    try do
+      fun.()
+    after
+      if previous, do: Process.put(@strict_key, previous), else: Process.delete(@strict_key)
+    end
+  end
+
+  @doc """
+  The mode in effect for the calling process.
+
+  A `strict/2` scope wins; otherwise `config :nx_vulkan, host_fallback:`;
+  otherwise `:allow`.
+
+  The application lookup is an ETS read, and it happens only on a path that is
+  by construction about to copy a tensor off the device — a GPU-resident op
+  never reaches it. There is no per-op cost on the fast path.
+  """
+  @spec mode() :: :allow | :warn | :raise
+  def mode do
+    case Process.get(@strict_key) do
+      nil -> Application.get_env(:nx_vulkan, :host_fallback, :allow)
+      mode -> mode
+    end
+  end
+
+  # Ops permitted to fall back. Each line: {fun, arity}, a condition, and the
+  # reason. Adding one is a deliberate, reviewable act — read the "allowlist"
+  # section of the moduledoc before you do.
+  #
+  # Conditions:
+  #   :always              — this callback has no GPU path at all
+  #   {:rank_at_least, n}  — permitted only from rank n up; below that it is a bug
+  @allowlist [
+    {{:pow, 3}, :always,
+     "broadcasting/scalar-exponent pow has no shader: elementwise_binary_bcast_* " <>
+       "omits op code 4 because GLSL.std.450 has no f64 pow. Equal-shape f32/f64 " <>
+       "pow does run on the GPU; only the broadcasting form lands here."},
+    {{:window_scatter_max, 6}, :always,
+     "OVERLAPPING pooling backward only. One thread per input element is what " <>
+       "avoids float atomics, and that only holds for non-overlapping windows; " <>
+       "the overlapping case needs GL_EXT_shader_atomic_float, which the Kepler " <>
+       "fleet does not guarantee. Non-overlapping runs on the GPU."},
+    {{:sort, 3}, :always, "no sort shader and no plan for one; the host path is correct"},
+    {{:argsort, 3}, :always, "no sort shader and no plan for one; the host path is correct"},
+    {{:triangular_solve, 4}, :always,
+     "the one Nx.LinAlg op still an Nx.Backend callback; a GPU solver is a " <>
+       "project, and the host path is correct"},
+    {{:transpose, 3}, {:rank_at_least, 5},
+     "transpose_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"},
+    {{:reverse, 3}, {:rank_at_least, 5},
+     "reverse_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"},
+    {{:broadcast, 4}, {:rank_at_least, 5},
+     "broadcast_nd handles rank <= 4; rank 5+ is mechanical to add if a workload appears"}
+  ]
+
+  @doc """
+  The strict-mode allowlist as `[{{fun, arity}, condition, reason}]`.
+
+  Exposed so a test can assert on it — an allowlist that only exists in a
+  module attribute is one nobody reviews.
+  """
+  @spec allowlist() :: [{{atom(), arity()}, :always | {:rank_at_least, pos_integer()}, String.t()}]
+  def allowlist, do: @allowlist
+
+  @doc """
+  Whether a fallback of `op` producing `meta` is permitted under `:raise`.
+  """
+  @spec allowed?({atom(), arity()} | atom(), Nx.Tensor.t() | nil) :: boolean()
+  def allowed?(op, meta \\ nil) do
+    Enum.any?(@allowlist, fn {allowed_op, condition, _reason} ->
+      allowed_op == op and condition_met?(condition, meta)
+    end)
+  end
+
+  defp condition_met?(:always, _meta), do: true
+
+  defp condition_met?({:rank_at_least, n}, %Nx.Tensor{shape: shape}),
+    do: tuple_size(shape) >= n
+
+  defp condition_met?({:rank_at_least, _n}, _meta), do: false
+
+  defp enforce(mode, op, meta) do
+    if allowed?(op, meta) do
+      :ok
+    else
+      message = refusal_message(mode, op, meta)
+
+      case mode do
+        :warn ->
+          Logger.warning(message)
+          :ok
+
+        :raise ->
+          {shape, type} = describe(meta)
+
+          raise Nx.Vulkan.HostFallbackError,
+            message: message,
+            op: op,
+            shape: shape,
+            type: type
+      end
+    end
+  end
+
+  defp describe(%Nx.Tensor{shape: shape, type: type}), do: {shape, type}
+  defp describe(_), do: {nil, nil}
+
+  defp refusal_message(mode, op, meta) do
+    {name, arity} =
+      case op do
+        {n, a} -> {n, a}
+        n -> {n, "?"}
+      end
+
+    where =
+      case describe(meta) do
+        {nil, nil} -> "  (no output template)"
+        {shape, type} -> "  output: #{inspect(shape)} #{inspect(type)}"
+      end
+
+    """
+    host fallback #{if mode == :raise, do: "refused", else: "reported"}: #{name}/#{arity}
+
+    #{where}
+
+    `host_fallback: #{inspect(mode)}` flags every fallback that is not on
+    Nx.Vulkan.Fallback's allowlist. This op left the GPU and computed on
+    Nx.BinaryBackend, which returns a bit-identical result — so no assertion on
+    values could ever have seen it.
+
+    The usual cause is a GPU fast path whose gate is narrower than its
+    capability: six of the eight instances in docs/BACKWARD_PASS_AUDIT.md had
+    the shader already and only the `if` was wrong. Gradients are where this
+    shows up — Nx.Defn.Grad emits permuted, reversed, and {:s, 32}-typed
+    versions of ops your forward pass never produces. See §1b of
+    .claude/skills/vulkan-nx-compute/SKILL.md.
+
+    If this fallback is correct and intended, add a one-line entry to
+    @allowlist in lib/nx_vulkan/fallback.ex saying why. If it is not, widen
+    the gate rather than the allowlist.
+
+    To permit it for one block: Nx.Vulkan.Fallback.strict(:allow, fn -> ... end)
+    """
+  end
 end
