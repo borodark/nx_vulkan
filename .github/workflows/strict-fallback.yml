@@ -1,0 +1,68 @@
+# The host-fallback ratchet.
+#
+# This backend's most expensive bug class was invisible: a GPU fast path whose
+# gate was written against forward-pass shapes refused the backward pass and
+# silently computed it on the CPU. A host fallback returns a BIT-IDENTICAL
+# result — it *is* the reference implementation — so no assertion on values can
+# detect one, and the suite stayed green while a CNN training step took 21
+# seconds. See docs/BACKWARD_PASS_AUDIT.md.
+#
+# This job is the thing that fails a build for it. `mix test` runs with
+# `config :nx_vulkan, host_fallback: :raise`, so the first host fallback that
+# is not on Nx.Vulkan.Fallback's allowlist raises. Adding a new silent fallback
+# turns this job red instead of merely making things slower.
+#
+# RUNNER. This needs a real Vulkan device and a built Rust NIF, so it runs on
+# the self-hosted fleet (the same hosts scripts/race.sh targets), not on a
+# GitHub-hosted runner. GitHub's Ubuntu images have no GPU; lavapipe (the Mesa
+# software Vulkan implementation) does run this backend, but a couple of the
+# `select` tests fail only under it, so it is not a clean substitute. If this
+# repo ever wants a hosted job, fix those two first.
+#
+# This job does NOT replace `mix test`. Run both: the normal one asserts the
+# answers are right, this one asserts where they were computed.
+
+name: strict host-fallback
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  strict:
+    name: mix test with host_fallback: :raise
+    runs-on: [self-hosted, vulkan]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the device
+        # A run that silently landed on llvmpipe would still pass and would
+        # mean much less. Print what it actually got.
+        run: mix run -e 'IO.inspect(Nx.Vulkan.NativeV.device_name())'
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: MIX_ENV=test mix compile --warnings-as-errors
+
+      - name: Suite (normal) — are the answers right?
+        run: mix test
+
+      - name: Suite (strict) — did the work stay on the GPU?
+        run: sh scripts/strict_test.sh
+
+      - name: Exemptions are enumerated, not accumulated
+        # Both exclusions are grep-able by design. Printing them in the log
+        # makes an allowlist that quietly grew visible in the job output, which
+        # is the failure mode this whole feature exists to prevent.
+        if: always()
+        run: |
+          echo "--- @allowlist (lib/nx_vulkan/fallback.ex) ---"
+          mix run -e 'Enum.each(Nx.Vulkan.Fallback.allowlist(), fn {op, c, _} -> IO.puts("  #{inspect(op)} #{inspect(c)}") end)'
+          echo "--- tests excluded from the strict run ---"
+          grep -rn "host_fallback_expected\|host_fallback_open" test/ || true
