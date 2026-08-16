@@ -44,3 +44,7 @@ Cargo.lock
 
 # dialyzer PLTs (see mix.exs :dialyzer plt_file)
 /priv/plts/
+
+# Agent worktrees (Claude Code `isolation: worktree`) — scratch checkouts,
+# not repository content.
+/.claude/worktrees/
