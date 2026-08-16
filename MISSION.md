@@ -253,17 +253,17 @@ left the GPU.
 | `select` | HOST | HOST | HOST | HOST | gpu | gpu |
 | `sum` (axis 0) | HOST | HOST | gpu | HOST | gpu | gpu |
 | `reduce_max` | HOST | HOST | HOST | HOST | gpu | gpu |
-| `transpose` | HOST | HOST | HOST | HOST | gpu | gpu |
-| `reverse` | HOST | HOST | HOST | HOST | gpu | gpu |
-| `broadcast` | HOST | HOST | HOST | HOST | gpu | gpu |
+| `transpose` | ~~HOST~~ gpu | ~~HOST~~ gpu | HOST | ~~HOST~~ gpu | gpu | gpu |
+| `reverse` | ~~HOST~~ gpu | ~~HOST~~ gpu | HOST | ~~HOST~~ gpu | gpu | gpu |
+| `broadcast` | ~~HOST~~ gpu | ~~HOST~~ gpu | HOST | ~~HOST~~ gpu | gpu | gpu |
 | `slice` | gpu | gpu | HOST | gpu | gpu | gpu |
 | `pad` | gpu | gpu | HOST | gpu | gpu | gpu |
 | `concatenate` | gpu | gpu | gpu | gpu | gpu | gpu |
 | `dot` (2×2) | HOST | HOST | HOST | HOST | gpu | gpu |
 | `as_type → f32` | gpu | HOST | gpu | gpu | gpu | gpu |
 
-**48 of 96 cells leave the device, and every one of the 48 is an integer
-dtype** — the f32 and f64 columns are `gpu` in all sixteen rows. This is the
+**Measured before W1. 48 of 96 cells left the device, and every one of the 48
+was an integer dtype** — the f32 and f64 columns are `gpu` in all sixteen rows. This is the
 single largest completeness gap in the repo and it is not in
 `PLAN_AFTER_BACKWARD_PASS.md`, because every item there was found by tracing a
 *float* workload's gradient.
@@ -271,11 +271,11 @@ single largest completeness gap in the repo and it is not in
 Two structurally different sub-gaps hide inside it, and they should not be
 planned as one thing:
 
-**(a) The pure-copy ops that refuse integers for no reason.** `transpose_nd`,
-`reverse_nd` and `broadcast_nd` decompose an output index, map it to an input
-index, and copy — no arithmetic — yet all three gate on `{:f, 32} | {:f, 64}`
-and return `nil` otherwise (`lib/nx_vulkan/vulkano_backend.ex:933`, `:1594`,
-`:1821`). The reason is only that their GLSL declares `buffer A { float a[]; }`.
+**(a) The pure-copy ops that refuse integers for no reason. — DONE (W1).**
+`transpose_nd`, `reverse_nd` and `broadcast_nd` decompose an output index, map
+it to an input index, and copy — no arithmetic — yet all three used to gate on
+`{:f, 32} | {:f, 64}` and return `nil` otherwise. They are now one word-generic
+shader each, gated on `word_copyable?/1`. The reason is only that their GLSL declares `buffer A { float a[]; }`.
 The repo already has the fix pattern: `slice`, `pad`, `put_slice` and `gather`
 are **type-generic word copies** gated on `rem(element_bytes, 4) == 0`, which is
 why those rows read `gpu` for s32/s64/u32 above. T11 reached the same conclusion
@@ -290,7 +290,11 @@ three *and* gives integer support as a side effect.
 this project does — the f32 shaders are the template, and the correctness test
 is bit-equality against `BinaryBackend` on integers, which is exact.
 
-*Inferred, not measured:* (a) is a day or two, (b) is a week or two. Both
+**W1 struck through the nine cells above** (three ops × s32/s64/u32); u8 stays
+HOST for the reason in §3.3.5. 39 of 96 cells now leave the device.
+
+*Inferred, not measured:* (a) was estimated at a day or two — it came in well
+under that. (b) is a week or two. Both
 figures are estimates and neither is backed by a comparable finished piece of
 work, so treat them the way `ROADMAP.md` treats its withdrawn SVD estimate.
 
@@ -340,8 +344,15 @@ back" is currently an accident.
 5. **The u8 mask family's remainder.** T12 closed softmax's backward pass, but
    `reduce_max`/`reduce_min` on u8 still fall back (Nx keeps their output at
    `{:u, 8}` and `reduce_spv/2` has no `{u,8} → {u,8}` entry), and middle-axis
-   u8 `sum` still falls back because that path transposes first and
-   `transpose_nd` has no u8 path. §3.1(a) fixes the second one for free.
+   u8 `sum` still falls back. **The claim that §3.1(a) fixes the second one for
+   free was wrong, and W1 disproved it.** `transpose_nd` is now a word copy
+   handling every 4/8-byte dtype, and middle-axis u8 `sum` still falls back —
+   because a word copy cannot address a byte, so the `rem(element_bytes, 4) == 0`
+   gate excludes u8 exactly as it always did for `slice`/`pad`. What W1 *did*
+   remove is the transpose being the binding constraint for s32/s64/u32; those
+   are now gated only by `reduce_spv/2` having no integer entry (W5). Closing u8
+   needs W10's byte-packed writer — a thread per output WORD gathering four
+   bytes — which is a different kernel and a different decision.
 6. **Sub-word dtypes generally** (u8/s8/u16/s16, f16/bf16). Every word-copy gate
    is `rem(element_bytes, 4) == 0`, which excludes all 1- and 2-byte dtypes by
    construction, and byte packing exists in exactly three hand-written places,
@@ -497,7 +508,7 @@ preference. Re-litigating one requires new evidence, not a new opinion.
 
 | # | work | value | effort | why it is where it is |
 |---|---|---|---|---|
-| **W1** | **Word-generic `transpose_nd` / `reverse_nd` / `broadcast_nd`** (§3.1a) | high | low | ~12 measured cells, one pattern that already exists four times in this tree (`slice`/`pad`/`put_slice`/`gather`), collapses 6 shader files to 3, and closes middle-axis u8 `sum` as a side effect. The best ratio available |
+| ~~**W1**~~ | ~~**Word-generic `transpose_nd` / `reverse_nd` / `broadcast_nd`** (§3.1a)~~ **DONE** — 6 shader files collapsed to 3, **12 cells** flipped (transpose r2/r3, reverse, broadcast × s32/s64/u32), 145/145 bit-identical to BinaryBackend on mac-247. Residency **319 → 347 of 843 (37.8% → 41.2%)** | high | low | **the u8 claim in the original row was wrong** — every word-copy gate is `rem(element_bytes, 4) == 0`, which excludes 1- and 2-byte dtypes by construction. Middle-axis u8 `sum` still falls back; it needs W10's byte-packed writer |
 | ~~**W2**~~ | ~~**Turn the strict ratchet on `doctest Nx`** (§2.3)~~ **DONE** — `@moduletag` retired, `test/nx_doctest_register.exs` names the 524, `scripts/doctest_residency.sh` prints **319/843 (37.8%)** in CI and fails in both directions | high | low | **every other item is now measurable.** Run the script before and after your change; if the rate did not move, the op did not reach the device |
 | **W3** | **Fix or file `Nx.LinAlg.solve/2`'s `ArithmeticError`** (§3.3.3) | high | low | a shipped backend raises on a documented-as-supported op. Scholar goes through it. It has been known since T13 and unfiled |
 | **W4** | **Decide the twelve `Nx.Block.*`** (§3.3.2) | high | low–medium | mostly allowlist lines with reasons; `Take`/`TakeAlongAxis` likely route to the existing `gather` shader and `LogicalNot` to a compare. Converts twelve accidents into decisions |

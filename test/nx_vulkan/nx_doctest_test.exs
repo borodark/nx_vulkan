@@ -18,8 +18,8 @@ defmodule Nx.Vulkan.NxDoctestTest do
   entirely by `scripts/strict_test.sh`. That tag is retired. All 843 doctests
   below now run under `NXV_HOST_FALLBACK=raise` except the ones named in
   `Nx.Vulkan.NxDoctestRegister` (`test/nx_doctest_register.exs`), which is where
-  the reasons live and which `test_helper.exs` applies. Baseline: **319 of 843
-  (37.8%) resident**. `sh scripts/doctest_residency.sh` prints it and fails if it
+  the reasons live and which `test_helper.exs` applies. Baseline: **347 of 843
+  (41.2%) resident** (319 / 37.8% at W2; W1 moved 28). `sh scripts/doctest_residency.sh` prints it and fails if it
   moves in either direction.
 
   Anything excepted *here* is excepted from both runs and never executes at all;

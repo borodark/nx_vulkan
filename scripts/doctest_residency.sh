@@ -13,7 +13,7 @@
 # HOW IT WORKS. Two passes over test/nx_vulkan/nx_doctest_test.exs, both with
 # host fallbacks refused:
 #
-#   pass A  register applied — the 524 doctests named in
+#   pass A  register applied — the 496 doctests named in
 #           test/nx_doctest_register.exs are excluded. Everything else must stay
 #           on the GPU. A failure here is a RESIDENCY REGRESSION: an op that was
 #           resident has started falling back.

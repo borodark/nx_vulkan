@@ -69,7 +69,7 @@ ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. W2 is done. Next is W1
+## 1. W2 and W1 are done. Next is W3
 
 `MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
 sequencing note put W2 first, because W2 is what tells you whether W1 and W5
@@ -77,30 +77,42 @@ worked. **That gate is open.**
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 319 / 843 (37.8%) run with host fallbacks refused
+#=> doctest Nx residency: 347 / 843 (41.2%) run with host fallbacks refused
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 524 doctests that still leave the GPU,
-140 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
+`test/nx_doctest_register.exs` names the 496 doctests that still leave the GPU,
+131 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
 fallbacks are being refused, so a normal `mix test` still runs and asserts all
-843. The strict suite went from 910 excluded to 591. CI runs the script as its
-own step. See `MISSION.md` §2.3 for what was built and the one departure from
-the plan (ExUnit's `doctest :except` is function-granularity; using it would
-have dropped 154 *resident* doctests and reported 165/843 instead of 319/843).
+843. The strict suite went from 910 excluded to 591 at W2. CI runs the script as
+its own step. See `MISSION.md` §2.3 for what was built and the one departure
+from the plan (ExUnit's `doctest :except` is function-granularity; using it
+would have dropped 154 *resident* doctests and reported 165/843).
+
+**The register is portable.** It was measured on super-io (Ampere/Linux) and
+reproduces byte-identically on mac-247 (Kepler/FreeBSD) — same 524 at W2, same
+496 at W1. The gates really are dtype/shape logic. The one exception found so
+far is **llvmpipe**, where `Nx.sum` on `{:u, 8}` returns 0 and three doctests
+plus three `select` tests fail on value; if a run reports one extra fallback,
+check `device_name()` before touching the register.
+
+**W1 was the first thing measured with it, and it worked.** The rate moved
+319 → 347 and the ratchet failed the build on 28 stale entries, naming every
+one. That is the loop this project was missing.
 
 **Use it as the acceptance test for everything that follows.** Run the script
 before and after; if the rate did not move, the op did not reach the device.
-Two buckets in the register are already scored as work items:
+The buckets are scored as work items:
 
 | bucket | doctests | item |
 |---|---:|---|
-| `@integer_dtype` | 409 | **W5** — it empties this bucket wholesale |
-| `@float_residency_gap` | 33 | **W1** and **W8** — float ops that still left a float backend, i.e. gates narrower than the capability behind them. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
+| `@integer_dtype` | 381 | **W5** — it empties this bucket wholesale. W1 already took 28 |
+| `@float_residency_gap` | 33 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
 | `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
 | `@complex_and_fft` | 45 | not work under current dtype support |
 
-Then W1 (word-generic remap family, best ratio available), W3, W4, W5.
+Then W3 (`Nx.LinAlg.solve/2`'s `ArithmeticError` — a shipped backend raising on
+a documented-as-supported op, known since T13 and still unfiled), W4, W5.
 
 ---
 

@@ -13,8 +13,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   file could ever tell them apart. The tag is retired (W2). This register
   replaces it, one line per op, bucketed by reason.
 
-  Measured on `main` @ `7b0e23f`, super-io / RTX 3060 Ti:
-  **319 of 843 doctests (37.8%) run with host fallbacks refused.**
+  Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
+  super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
+  hardware-conditioned:
+  **347 of 843 doctests (41.2%) run with host fallbacks refused.**
 
   ## How it is enforced
 
@@ -22,7 +24,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 524 listed ones step aside so the remaining 319
+  `NXV_HOST_FALLBACK=raise` the 496 listed ones step aside so the remaining 347
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -52,12 +54,15 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 409 doctests. This is a float backend (MISSION §3.1): the integer
+  # 381 doctests. This is a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks have no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}. Nothing here is a gate
   # bug — the capability does not exist yet. **W5 retires this bucket wholesale**,
   # and it is the single largest reason the rate is 38% and not 80%; these same
-  # 409 ordinals are its acceptance test.
+  # 381 ordinals are its acceptance test. W1 already took 28 out of it — the
+  # index-remap family went word-generic, so transpose/reverse/broadcast and
+  # everything composing from them (tile, fill, revectorize, iota, eye,
+  # put_slice, slice_along_axis, broadcast_vectors) now run on integers.
   @integer_dtype [
     {"Nx.abs/1", [416]},
     {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
@@ -71,8 +76,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.bitwise_not/1", [417, 418, 419]},
     {"Nx.bitwise_or/2", [283, 284, 285, 286]},
     {"Nx.bitwise_xor/2", [288, 289, 290, 291]},
-    {"Nx.broadcast/3", [131, 132, 133, 136, 137, 138, 139]},
-    {"Nx.broadcast_vectors/2", [225]},
     {"Nx.clip/3", [682]},
     {"Nx.concatenate/2", [728, 730, 731]},
     {"Nx.count_leading_zeros/1", [426, 427, 428, 429, 430, 431, 432, 433]},
@@ -85,14 +88,12 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/4", [647, 649]},
     {"Nx.dot/6", [650, 651, 652, 653, 654]},
     {"Nx.equal/2", [301, 302, 303]},
-    {"Nx.eye/2", [19]},
-    {"Nx.fill/3", [829, 830, 831]},
+    {"Nx.fill/3", [831]},
     {"Nx.gather/3", [719, 720, 721, 722]},
     {"Nx.greater/2", [320, 321, 322]},
     {"Nx.greater_equal/2", [328, 329, 330]},
     {"Nx.indexed_add/4", [347, 348, 351, 352]},
     {"Nx.indexed_put/4", [356, 357, 358, 359, 360, 361, 364, 365]},
-    {"Nx.iota/2", [14]},
     {"Nx.is_infinity/1", [408, 409, 410]},
     {"Nx.is_nan/1", [405, 406, 407]},
     {"Nx.left_shift/2", [293, 294, 295]},
@@ -117,27 +118,22 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.population_count/1", [421, 422, 423, 424]},
     {"Nx.product/2", [509, 510, 512, 513, 514, 515, 516, 517]},
     {"Nx.put_diagonal/3", [46, 47, 48, 49, 50, 51]},
-    {"Nx.put_slice/3", [698]},
     {"Nx.quotient/2", [256, 257, 258, 259, 260, 261]},
     {"Nx.reduce/4", [615, 616, 618, 619, 620, 621, 622, 623, 624, 625]},
     {"Nx.reduce_max/2", [519, 521, 522, 523, 524, 525, 526]},
     {"Nx.reduce_min/2", [527, 529, 530, 531, 532, 533, 534]},
     {"Nx.reflect/2", [821, 822]},
     {"Nx.remainder/2", [245, 246, 248, 249]},
-    {"Nx.revectorize/3", [226, 227]},
-    {"Nx.reverse/2", [672, 673, 674, 675, 676, 678]},
     {"Nx.right_shift/2", [297, 298, 299]},
     {"Nx.select/3", [336, 337, 338, 339, 340, 341, 342, 344, 345, 346]},
     {"Nx.sign/1", [415]},
-    {"Nx.slice_along_axis/4", [691, 693]},
+    {"Nx.slice_along_axis/4", [691]},
     {"Nx.stack/2", [733, 734, 735, 736, 737]},
     {"Nx.subtract/2", [229, 230, 232, 233]},
     {"Nx.sum/2", [463, 464, 466, 467, 468, 469, 470, 471]},
     {"Nx.take/3", [699, 700, 701, 702, 703, 704, 705, 706, 707]},
     {"Nx.take_along_axis/3", [709, 710, 711, 712, 713]},
-    {"Nx.tile/2", [111, 112, 113]},
     {"Nx.top_k/2", [745]},
-    {"Nx.transpose/2", [666, 668, 669]},
     {"Nx.tri/3", [29, 30]},
     {"Nx.tril/2", [21, 22, 23]},
     {"Nx.triu/2", [25, 26, 27]},
@@ -258,7 +254,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   end
 
   @doc """
-  How many doctests the register excuses. 524 as measured; the number to watch.
+  How many doctests the register excuses. 496 as measured; the number to watch.
   """
   def count, do: all() |> Enum.map(fn {_, ordinals} -> length(ordinals) end) |> Enum.sum()
 end
