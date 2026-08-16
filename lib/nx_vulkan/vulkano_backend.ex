@@ -242,17 +242,26 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # Broadcast GPU path is valid when both operands are on this backend and the
-  # output rank is 1..4 (Nx guarantees a,b broadcast to out.shape). Dtype
+  # output rank is 0..4 (Nx guarantees a,b broadcast to out.shape). Dtype
   # mismatches are handled by coerce_to; pow is excluded above (fp64 has no pow).
+  #
+  # Rank 0 reaches here only when the two scalars have *different* dtypes — equal
+  # shapes and equal types take the flat apply_binary path above — so the old
+  # `>= 1` was refusing exactly `Nx.multiply(f64_scalar, f32_scalar)`, the third
+  # face of the same gate the T11 rank-0 fix removed from compare/select. It
+  # dispatches as rank 1 {1}; see gpu_bcast_binary/5.
   defp bcast_shape_ok?(%T{} = a, %T{} = b, %T{shape: os}) do
     match?(%__MODULE__{}, a.data) and match?(%__MODULE__{}, b.data) and
-      tuple_size(os) >= 1 and tuple_size(os) <= 4
+      tuple_size(os) <= 4
   end
 
   defp bcast_shape_ok?(_a, _b, _out), do: false
 
+  # Rank 0 dispatches as rank 1 of shape {1}: pad4/1 pads the dim list with 1s
+  # and pad_left/2 lifts a scalar operand, so the shader needs only a loop bound
+  # of 1 rather than 0.
   defp gpu_bcast_binary(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
-    rank = tuple_size(out.shape)
+    rank = max(tuple_size(out.shape), 1)
     outl = Tuple.to_list(out.shape)
     al = pad_left(Tuple.to_list(a.shape), rank)
     bl = pad_left(Tuple.to_list(b.shape), rank)
@@ -1084,9 +1093,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
       merged = Nx.Type.merge(a_v.type, b_v.type)
       spv = compare_spv(merged)
 
+      # Rank 0 dispatches as rank 1 {1} (see gpu_compare/1). The old `>= 1` here
+      # had no shader justification and refused every scalar predicate — see the
+      # note on gpu_compare.
       cast =
         if spv != nil and match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data) and
-             tuple_size(out.shape) >= 1 and tuple_size(out.shape) <= 4 do
+             tuple_size(out.shape) <= 4 do
           {coerce_to(a_v, merged), coerce_to(b_v, merged)}
         end
 
@@ -1102,8 +1114,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # A rank-0 comparison dispatches as rank 1 of shape {1}: `pad4/1` already pads
+  # the dim list with 1s and `pad_left/2` lifts a scalar operand to {1}, so the
+  # only thing the shader needs is a loop bound of 1 instead of 0. Nothing in
+  # `compare_f{32,64}.comp` cares about rank beyond that — the guard that used to
+  # read `>= 1` was refusing scalars for no reason (skill §1b), and every scalar
+  # support check in a probabilistic model went to the host because of it.
   defp gpu_compare(out, %T{data: %__MODULE__{ref: a_ref}} = a, %T{data: %__MODULE__{ref: b_ref}} = b, code, spv) do
-    rank = tuple_size(out.shape)
+    rank = max(tuple_size(out.shape), 1)
 
     params =
       for v <-
@@ -1143,10 +1161,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
     f = ensure_on_backend(on_false)
     spv = select_spv(type)
 
+    # Rank 0 dispatches as rank 1 {1} (see gpu_select/5).
     shape_ok? =
       spv != nil and p.type == {:u, 8} and match?(%__MODULE__{}, p.data) and
         match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, f.data) and
-        tuple_size(os) >= 1 and tuple_size(os) <= 4
+        tuple_size(os) <= 4
 
     # coerce the branches to the output type on the GPU (handles a f32 scalar 0.0
     # against an f64 tensor); pred stays u8.
@@ -1164,8 +1183,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  # Rank 0 dispatches as rank 1 of shape {1}, exactly as in gpu_compare/5.
   defp gpu_select(out, %T{data: %__MODULE__{ref: p_ref}} = p, %T{data: %__MODULE__{ref: t_ref}} = t, %T{data: %__MODULE__{ref: f_ref}} = f, spv) do
-    rank = tuple_size(out.shape)
+    rank = max(tuple_size(out.shape), 1)
 
     params =
       for v <-
@@ -1288,20 +1308,48 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # output element back through the per-axis {low, high, interior} config —
   # elements in an edge pad, an interior gap, or outside the source get the pad
   # value (shader handles negative low/high cropping). Runs for 4/8-byte dtypes,
-  # rank 1..4, scalar same-type pad value. Everything else host-falls-back.
+  # rank 0..4. Everything else host-falls-back.
+  #
+  # The gate used to require `pv.type == t.type`, which is the {:s, 32} literal
+  # trap of skill §1b a second time over: `Nx.pad(f64_tensor, 0.0, cfg)` hands
+  # this callback an f32 (or s32) scalar, and a four-byte constant dragged the
+  # whole tensor to the host. Nx's own output type is the merge of the two, so
+  # coerce the pad value to `out.type` instead of comparing types — coerce_to/2
+  # rebuilds a rank-0 constant at the target type for one 4-byte round trip, and
+  # returns nil for anything it cannot convert (integer storage), which still
+  # host-falls-back.
+  #
+  # The source tensor is deliberately NOT coerced: `t.type == type` fails only
+  # when the pad value is *wider* than the tensor (f64 value, f32 tensor), and
+  # in exactly that case `Nx.BinaryBackend.pad/4` — the reference this backend
+  # is required to match bit-for-bit — casts the pad value to `out.type` but not
+  # the tensor, and splices an 8-byte value into a 4-byte-element binary. Its
+  # answer is wrong, and reproducing it is still the contract, so that case goes
+  # to the host rather than being silently "fixed" here.
   @impl true
-  def pad(out, tensor, pad_value, padding_config) do
+  def pad(%T{type: type} = out, tensor, pad_value, padding_config) do
     t = ensure_on_backend(tensor)
     pv = ensure_on_backend(pad_value)
-    eb = element_bytes(t.type)
+    eb = element_bytes(type)
     rank = tuple_size(t.shape)
 
-    if match?(%__MODULE__{}, t.data) and rem(eb, 4) == 0 and rank >= 1 and rank <= 4 and
-         pv.type == t.type and tuple_size(pv.shape) == 0 do
-      gpu_pad(out, t, pv, padding_config, eb)
+    cpv = if match?(%__MODULE__{}, pv.data) and tuple_size(pv.shape) == 0, do: coerce_to(pv, type)
+
+    # An empty source or an empty result means a zero-byte buffer binding, which
+    # is not a thing Vulkan will accept — those stay on the host.
+    if match?(%__MODULE__{}, t.data) and t.type == type and cpv != nil and rem(eb, 4) == 0 and
+         rank <= 4 and Nx.size(t.shape) > 0 and Nx.size(out.shape) > 0 do
+      gpu_pad(out, t, cpv, padding_config, eb)
     else
       t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
-      pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend)
+      # as_type/2 to `out.type` before re-entering Nx.pad/3: Nx computed the
+      # callback's out type from a *number* pad value (`binary_type/2` keeps
+      # {:u, 8} against a literal 0), while re-running it here passes a tensor
+      # and merges strictly to {:s, 32}. Without the cast the host path returns
+      # a differently-typed binary under a u8 header and the values come back
+      # wrong — pre-existing, found by the T11 parity sweep
+      # (`Nx.pad(Nx.iota({4}, type: :u8), 0, [{1, 1, 0}])`).
+      pv_bin = pv |> Nx.backend_transfer(Nx.BinaryBackend) |> Nx.as_type(type)
       host_result(out, Nx.pad(t_bin, pv_bin, padding_config))
     end
   end
@@ -1325,7 +1373,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
 
-    pv_bin = Nx.backend_transfer(pv, Nx.BinaryBackend) |> Nx.to_binary()
+    # backend_copy, not backend_transfer: the pad value may still be referenced
+    # elsewhere in the graph, and transfer deallocates the device buffer.
+    pv_bin = Nx.backend_copy(pv, Nx.BinaryBackend) |> Nx.to_binary()
     {:ok, padval_ref} = Nx.Vulkan.NativeV.buf_upload(pv_bin)
 
     n = byte_size_of(out.shape)
@@ -1336,15 +1386,111 @@ defmodule Nx.Vulkan.VulkanoBackend do
     put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
-  # put_slice: write `slice` into `tensor` at `start_indices`. Used by
-  # NUTS batched leapfrog to accumulate trajectory steps.
+  # put_slice: write `slice` into `tensor` at `start_indices`. Used by NUTS
+  # batched leapfrog to accumulate trajectory steps, and by every `PointMap`
+  # unpack of a flat parameter vector — the op that decides whether a
+  # probabilistic model stays resident (bench_results/EXMC_PEROP_RACE.md).
+  #
+  # GPU path: an index-remap overlay (`glsl/put_slice.comp`) — one thread per
+  # output element, reading the slice inside the window and the tensor outside
+  # it. 4/8-byte dtypes, rank 1..4, start indices that resolve to numbers.
+  # Rank 0 is excluded on purpose and with evidence, unlike the compare/select
+  # gate this task removed: `Nx.BinaryBackend.put_slice/5` raises on a scalar
+  # (`make_anchors` maps over `:init`), so answering it here would diverge from
+  # the reference by succeeding.
+  # Nx clamps the starts to [0, dim - slice_dim] (BinaryBackend.clamp_indices),
+  # so that happens here, on the host, and the shader assumes an in-bounds
+  # window.
+  @put_slice_spv Path.expand("../../priv/shaders/put_slice.spv", __DIR__)
+
   @impl true
-  def put_slice(out, tensor, start_indices, slice) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    s_bin = Nx.backend_transfer(ensure_on_backend(slice), Nx.BinaryBackend)
-    idx_bin = Enum.map(start_indices, &maybe_transfer_idx/1)
-    result = Nx.put_slice(t_bin, idx_bin, s_bin)
-    host_result(out, result)
+  def put_slice(%T{type: type, shape: shape} = out, tensor, start_indices, slice) do
+    t = ensure_on_backend(tensor)
+    s = ensure_on_backend(slice)
+    eb = element_bytes(type)
+    rank = tuple_size(shape)
+
+    ct = if match?(%__MODULE__{}, t.data), do: coerce_to(t, type)
+    cs = if match?(%__MODULE__{}, s.data), do: coerce_to(s, type)
+    starts = static_starts(start_indices)
+
+    if ct != nil and cs != nil and starts != nil and rem(eb, 4) == 0 and rank >= 1 and rank <= 4 and
+         t.shape == shape and tuple_size(s.shape) == rank and
+         Nx.size(shape) > 0 and Nx.size(s.shape) > 0 do
+      clamped =
+        [Tuple.to_list(shape), starts, Tuple.to_list(s.shape)]
+        |> Enum.zip_with(fn [dim, start, len] -> min(max(start, 0), dim - len) end)
+
+      gpu_put_slice(out, ct, cs, clamped, eb)
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      s_bin = Nx.backend_transfer(s, Nx.BinaryBackend)
+      idx_bin = Enum.map(start_indices, &maybe_transfer_idx/1)
+      result = Nx.put_slice(t_bin, idx_bin, s_bin)
+      host_result(out, result)
+    end
+  end
+
+  # Nx.put_slice/3 hands the backend either a list of plain integers or, if any
+  # index is a tensor, a list of rank-0 tensors (`Nx.to_indices/1`). A scalar
+  # tensor is 4-8 bytes: reading it back is cheaper by orders of magnitude than
+  # sending the tensor it indexes to the host, so resolve it rather than bail.
+  # Returns nil for anything that is not a number or a rank-0 numeric tensor.
+  defp static_starts(start_indices) do
+    Enum.reduce_while(start_indices, [], fn idx, acc ->
+      case idx do
+        i when is_integer(i) ->
+          {:cont, acc ++ [i]}
+
+        %T{shape: {}} = t ->
+          {:cont, acc ++ [t |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_number() |> trunc()]}
+
+        _ ->
+          {:halt, nil}
+      end
+    end)
+  end
+
+  # params: [rank, ews, T[4], S[4], start[4]] — T = tensor (== output) dims,
+  # S = slice dims, start clamped. Rank 0 dispatches with rank 0: the shader's
+  # decompose loop does not run and every one of the (single) output elements is
+  # "inside", which is the correct answer for a scalar put_slice.
+  defp gpu_put_slice(
+         %T{shape: shape} = out,
+         %T{data: %__MODULE__{ref: in_ref}},
+         %T{shape: sshape, data: %__MODULE__{ref: slice_ref}},
+         starts,
+         eb
+       ) do
+    rank = tuple_size(shape)
+    ews = div(eb, 4)
+
+    params =
+      for v <-
+            [rank, ews] ++
+              pad4(Tuple.to_list(shape)) ++
+              pad4(Tuple.to_list(sshape)) ++
+              pad4(starts),
+          into: <<>> do
+        <<v::signed-32-little>>
+      end
+
+    {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+    n = byte_size_of(shape)
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n * eb)
+
+    :ok =
+      Nx.Vulkan.NativeV.apply_put_slice(
+        out_ref,
+        in_ref,
+        slice_ref,
+        params_ref,
+        n,
+        rank,
+        @put_slice_spv
+      )
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: out.type})
   end
 
   # indexed_put: scatter updates into tensor at indices. Used to fill

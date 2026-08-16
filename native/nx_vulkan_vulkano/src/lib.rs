@@ -1351,6 +1351,53 @@ fn apply_select<'a>(
     }
 }
 
+/// put_slice overlay (type-generic u32-word copy). Bindings: tensor, slice,
+/// out, params at 0..3. Push: {n, rank} where n = output element count (== the
+/// tensor's). Params carry element word count + tensor dims + slice dims +
+/// clamped per-dim starts. Each output element reads the slice when it is
+/// inside the window and the tensor otherwise, so the whole op is one dispatch
+/// with no host round trip.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn apply_put_slice<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    in_ref: ResourceArc<VulkanoTensor>,
+    slice_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    rank: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, in_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, slice_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+                WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Strided slice (type-generic u32-word copy). Bindings: in, out, params at
 /// 0..2. Push: {n, rank} where n = output element count. Params carry element
 /// word count + source/output dims + start/stride. Keeps slice on the GPU.

@@ -41,6 +41,13 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # doctests, not just the one that drifted. Expect more entries as more ops move
   # to the GPU; that is the trade, and it is worth watching rather than
   # accumulating silently.
+  # variance/2 joined for the same reason at T11, one step further down the same
+  # road: its `ddof` divisor is an s32 scalar against an f32 scalar, a pair that
+  # missed the flat apply_binary path (types differ) and was then refused by the
+  # broadcast path's `rank >= 1` check. With rank 0 allowed it divides on the
+  # GPU, and the GPU's f32 divide is 1 ULP off a correctly-rounded one
+  # (1.6666667 vs 1.6666666) — measurably so on every f32 divide this backend
+  # has ever run, flat path included, not something rank 0 introduced.
   @rounding [
     exp: 1,
     tanh: 1,
@@ -49,7 +56,8 @@ defmodule Nx.Vulkan.NxDoctestTest do
     log: 1,
     add: 2,
     standard_deviation: 2,
-    covariance: 3
+    covariance: 3,
+    variance: 2
   ]
 
   # Dtypes the f64-real, byte-addressed backend does not represent: complex
