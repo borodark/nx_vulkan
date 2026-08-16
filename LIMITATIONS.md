@@ -119,8 +119,8 @@ correct but pays the GPU↔host round-trip on every call.
 | `indexed_add/5` | no shader (atomic adds needed) | `scatter_atomic.comp` |
 | `iota/3` | ✅ on-device (no shader needed) | — |
 | `eye/2` | tiny | trivial; not bandwidth-bound |
-| `broadcast/4` | ✅ done — `glsl/broadcast_nd_f{32,64}.comp`, rank ≤ 4 | rank 5+ |
-| `transpose/3` (rank ≥ 3) | ✅ done — `glsl/transpose_nd_f{32,64}.comp`, rank ≤ 4 | rank 5+ |
+| `broadcast/4` | ✅ done — `glsl/broadcast_nd.comp`, rank ≤ 4, any 4/8-byte dtype (W1) | rank 5+, 1/2-byte dtypes |
+| `transpose/3` (rank ≥ 3) | ✅ done — `glsl/transpose_nd.comp`, rank ≤ 4, any 4/8-byte dtype (W1) | rank 5+, 1/2-byte dtypes |
 | `select/4` | ✅ done — `glsl/select_f{32,64}.comp`, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
 | `clip/4` | no shader, has compositional API | `clip.comp` |
 | `log1p/2` | no shader | extend `elementwise_unary` op 15 |

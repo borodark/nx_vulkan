@@ -1,7 +1,6 @@
 #version 450
-#extension GL_ARB_gpu_shader_fp64 : require
 
-// Explicit Nx.broadcast/3 for rank <= 4, f64.
+// Explicit Nx.broadcast/3 for rank <= 4, TYPE-GENERIC.
 //
 // Implicit broadcasting inside a binary op already runs on the GPU
 // (elementwise_binary_bcast_*.comp does this same index arithmetic), but the
@@ -14,13 +13,23 @@
 // output axis axes[i], and any input axis of size 1 repeats along its output
 // axis. A rank-0 input (in_rank = 0) fills the output with a[0].
 //
-// Params buffer: [out_rank, in_rank, out[4], in[4], axes[4]] — shapes
+// TYPE GENERICITY (W1): was `broadcast_nd_f32` + `broadcast_nd_f64`, identical
+// but for the element type. Broadcasting is a pure index remap — every output
+// element is a copy of some input element, never a computation — so both
+// buffers are read as `uint` and each element is copied as
+// `ews = element_bytes / 4` words. See the long note in transpose_nd.comp.
+//
+// Params buffer: [out_rank, in_rank, ews, out[4], in[4], axes[4]] — shapes
 // left-aligned and padded to 4. One thread per output element.
+//
+// NOTE the params layout differs from its two siblings: this shader needs two
+// ranks, so `ews` lands at index 2 rather than 1. It is still the slot right
+// after the ranks, which is the family's convention.
 
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) readonly  buffer A { double a[]; };
-layout(std430, binding = 1) writeonly buffer O { double o[]; };
+layout(std430, binding = 0) readonly  buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
 layout(std430, binding = 2) readonly  buffer P { int prm[]; };
 
 layout(push_constant) uniform Push {
@@ -33,14 +42,15 @@ void main() {
 
     uint out_rank = uint(prm[0]);
     uint in_rank  = uint(prm[1]);
+    uint ews      = uint(prm[2]);
 
     uint outs[4];
     uint ins[4];
     uint axes[4];
     for (uint i = 0u; i < 4u; ++i) {
-        outs[i] = uint(prm[2 + i]);
-        ins[i]  = uint(prm[6 + i]);
-        axes[i] = uint(prm[10 + i]);
+        outs[i] = uint(prm[3 + i]);
+        ins[i]  = uint(prm[7 + i]);
+        axes[i] = uint(prm[11 + i]);
     }
 
     // Output coordinates.
@@ -51,7 +61,7 @@ void main() {
         idx = idx / outs[d];
     }
 
-    // Row-major strides of the input.
+    // Row-major strides of the input, in elements.
     uint istride[4];
     uint s = 1u;
     for (int i = int(in_rank) - 1; i >= 0; --i) {
@@ -68,5 +78,7 @@ void main() {
         in_off += src * istride[i];
     }
 
-    o[gid] = a[in_off];
+    for (uint w = 0u; w < ews; ++w) {
+        o[gid * ews + w] = a[in_off * ews + w];
+    }
 }

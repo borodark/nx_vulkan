@@ -1,6 +1,6 @@
 #version 450
 
-// Reverse along a set of axes, rank <= 4, f32.
+// Reverse along a set of axes, rank <= 4, TYPE-GENERIC.
 //
 // `Nx.Defn.Grad` reaches for this constantly — the conv input-gradient reverses
 // the kernel — so leaving it on the host put a CPU round trip in the middle of
@@ -12,13 +12,19 @@
 // read straight through. Input and output shapes are identical, so one shape
 // serves both.
 //
-// Params buffer: [rank, shape[4], rev[4]] — shape left-aligned and padded to 4
-// with 1s, rev a 0/1 flag per axis. One thread per output element.
+// TYPE GENERICITY (W1): was `reverse_nd_f32` + `reverse_nd_f64`, identical but
+// for the element type. Reversing is a pure index remap, so both buffers are
+// read as `uint` and each element is copied as `ews = element_bytes / 4` words.
+// See the long note in transpose_nd.comp — same reasoning, same caller-side
+// `rem(element_bytes, 4) == 0` gate, same u8 exclusion.
+//
+// Params buffer: [rank, ews, shape[4], rev[4]] — shape left-aligned and padded
+// to 4 with 1s, rev a 0/1 flag per axis. One thread per output element.
 
 layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) readonly  buffer A { float a[]; };
-layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 0) readonly  buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
 layout(std430, binding = 2) readonly  buffer P { int prm[]; };
 
 layout(push_constant) uniform Push {
@@ -30,14 +36,16 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= p.n) return;
 
+    uint ews = uint(prm[1]);
+
     uint shape[4];
     uint rev[4];
     for (uint i = 0u; i < 4u; ++i) {
-        shape[i] = uint(prm[1 + i]);
-        rev[i]   = uint(prm[5 + i]);
+        shape[i] = uint(prm[2 + i]);
+        rev[i]   = uint(prm[6 + i]);
     }
 
-    // Row-major strides; input and output share the shape.
+    // Row-major strides, in elements; input and output share the shape.
     uint stride[4];
     uint s = 1u;
     for (int d = int(p.rank) - 1; d >= 0; --d) {
@@ -54,5 +62,7 @@ void main() {
         in_off += src * stride[d];
     }
 
-    o[gid] = a[in_off];
+    for (uint w = 0u; w < ews; ++w) {
+        o[gid * ews + w] = a[in_off * ews + w];
+    }
 }

@@ -1,0 +1,83 @@
+#version 450
+
+// Generic permuted transpose for rank <= 4, TYPE-GENERIC.
+//
+// Replaces the rank-2/[1,0]-only `transpose_2d` for the general case: any
+// permutation of up to 4 axes stays on the GPU instead of host-falling-back.
+// This is what keeps conv's BACKWARD pass on-device — Nx's conv gradient emits
+// convolutions whose input/kernel/output permutations swap the first two axes
+// (`conv_spec_transpose`), and the conv GPU path can only run identity layouts,
+// so without this every backward conv round-tripped to Nx.BinaryBackend.
+//
+// Semantics match `Nx.transpose(t, axes: perm)`: output axis d is input axis
+// perm[d], i.e. out_shape[d] == in_shape[perm[d]].
+//
+// TYPE GENERICITY (W1). This was two shaders, `transpose_nd_f32` and
+// `transpose_nd_f64`, identical but for `float` vs `double` and the fp64
+// extension line. A permuted transpose does no arithmetic — it decomposes an
+// output index, maps it to an input index, and copies — so the element type
+// never needed to be in the shader at all. Reading both buffers as `uint` and
+// copying `ews = element_bytes / 4` words per element collapses the pair into
+// this file and gives s32/s64/u32 support as a side effect, which is exactly
+// how `slice`, `pad`, `put_slice` and `gather` have always worked here.
+//
+// Two consequences worth knowing:
+//   * f64 transpose no longer requires `shader_float64`. Nothing here is a
+//     double any more, so a device that cannot do fp64 arithmetic can still
+//     permute an f64 tensor.
+//   * 1- and 2-byte dtypes are still excluded, by `rem(element_bytes, 4) == 0`
+//     in the caller. u8 needs a byte-packed writer (a thread per output WORD,
+//     gathering four bytes), which is a different kernel and a different
+//     decision — see W10. A word copy cannot address a byte.
+//
+// Params buffer: [rank, ews, in[4], out[4], perm[4]] (shapes left-aligned,
+// padded to 4 with 1s / identity). One thread per OUTPUT element.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+layout(std430, binding = 2) readonly  buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+
+    uint ins[4];
+    uint outs[4];
+    uint perm[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        ins[i]  = uint(prm[2 + i]);
+        outs[i] = uint(prm[6 + i]);
+        perm[i] = uint(prm[10 + i]);
+    }
+
+    // Row-major strides of the INPUT tensor, in elements.
+    uint istride[4];
+    uint s = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        istride[d] = s;
+        s *= ins[d];
+    }
+
+    // Decompose the output index, then scatter each coordinate onto the input
+    // axis it came from.
+    uint idx = gid;
+    uint in_off = 0u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint coord = idx % outs[d];
+        idx = idx / outs[d];
+        in_off += coord * istride[perm[d]];
+    }
+
+    for (uint w = 0u; w < ews; ++w) {
+        o[gid * ews + w] = a[in_off * ews + w];
+    }
+}

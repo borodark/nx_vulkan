@@ -811,9 +811,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
       # it a trailing-suffix reduce, which the existing kernel already does —
       # the same normalise-then-dispatch move conv and dot use, and cheap now
       # that transpose is on the GPU for rank <= 4.
-      # Type-preserving only: this branch transposes before reducing, and
-      # transpose_nd has no u8 path, so routing a mask through here would trade
-      # one fallback for another.
+      # Type-preserving only: this branch transposes before reducing. Since W1
+      # transpose_nd is a word copy and handles every 4/8-byte dtype, so the
+      # transpose is no longer the binding constraint for s32/s64/u32 — what
+      # still gates those is `reduce_spv/2` having no integer entry (W5). u8 is
+      # the one that genuinely cannot come through here: a word copy cannot
+      # address a byte, so routing a mask through would trade one fallback for
+      # another. That needs W10's byte-packed writer.
       spv != nil and tensor.type == type and match?(%__MODULE__{}, tensor.data) and
         tuple_size(in_shape) <= 4 ->
         reduce_via_transpose(out, tensor, axes, op_code, spv)
@@ -927,12 +931,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # tiled special case and stays the fast path for matrices; this one handles
   # every other permutation that used to host-fall-back — notably the
   # first-two-axes swap Nx's conv gradient emits.
-  @transpose_nd_f64_spv Path.expand("../../priv/shaders/transpose_nd_f64.spv", __DIR__)
-  @transpose_nd_f32_spv Path.expand("../../priv/shaders/transpose_nd_f32.spv", __DIR__)
+  #
+  # W1: one type-generic shader, not an f32/f64 pair. A permuted transpose does
+  # no arithmetic, so the element type belongs in the params buffer (`ews`) and
+  # not in the GLSL. Any 4/8-byte dtype runs — s32/s64/u32 included; 1- and
+  # 2-byte dtypes still host-fall-back, as they do for slice/pad/put_slice/
+  # gather, because a word copy cannot address a byte.
+  @transpose_nd_spv Path.expand("../../priv/shaders/transpose_nd.spv", __DIR__)
 
-  defp transpose_nd_spv({:f, 64}), do: @transpose_nd_f64_spv
-  defp transpose_nd_spv({:f, 32}), do: @transpose_nd_f32_spv
-  defp transpose_nd_spv(_), do: nil
+  defp word_copyable?(type), do: rem(element_bytes(type), 4) == 0
 
   # Reshape + squeeze are zero-copy: same buffer, new shape metadata.
   # The buffer might be physically larger than the new shape implies
@@ -959,7 +966,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
         axes
       ) do
     spv = transpose_spv(type)
-    nd_spv = transpose_nd_spv(type)
     rank = tuple_size(in_shape)
 
     cond do
@@ -972,8 +978,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
 
-      nd_spv != nil and rank <= 4 ->
-        gpu_transpose_nd(out, tensor, axes, nd_spv)
+      word_copyable?(type) and rank <= 4 ->
+        gpu_transpose_nd(out, tensor, axes, @transpose_nd_spv)
 
       true ->
         t_bin = Nx.backend_transfer(tensor, Nx.BinaryBackend)
@@ -981,7 +987,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # params: [rank, in[4], out[4], perm[4]] — shapes left-aligned, padded to 4.
+  # params: [rank, ews, in[4], out[4], perm[4]] — shapes left-aligned, padded to
+  # 4. `ews` is element_bytes/4, the number of u32 words the shader copies per
+  # element; it is what makes one shader serve every 4/8-byte dtype.
   defp gpu_transpose_nd(
          %T{shape: out_shape, type: type} = out,
          %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
@@ -993,7 +1001,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     params =
       for v <-
-            [rank] ++
+            [rank, div(element_bytes(type), 4)] ++
               pad4(Tuple.to_list(in_shape)) ++
               pad4(Tuple.to_list(out_shape)) ++
               pad4(axes),
@@ -1588,31 +1596,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # broadcasts during binary ops route through binary_op_host_fallback,
   # but explicit Nx.broadcast/3 needs its own callback. Used at every
   # NUTS init / mass-matrix scaffolding site.
-  @broadcast_nd_f64_spv Path.expand("../../priv/shaders/broadcast_nd_f64.spv", __DIR__)
-  @broadcast_nd_f32_spv Path.expand("../../priv/shaders/broadcast_nd_f32.spv", __DIR__)
-
-  defp broadcast_nd_spv({:f, 64}), do: @broadcast_nd_f64_spv
-  defp broadcast_nd_spv({:f, 32}), do: @broadcast_nd_f32_spv
-  defp broadcast_nd_spv(_), do: nil
+  # W1: type-generic, see the note on @transpose_nd_spv.
+  @broadcast_nd_spv Path.expand("../../priv/shaders/broadcast_nd.spv", __DIR__)
 
   @impl true
   def broadcast(%T{type: type} = out, tensor, shape, axes) do
     t = ensure_on_backend(tensor)
-    spv = broadcast_nd_spv(type)
     out_rank = tuple_size(shape)
     in_rank = tuple_size(t.shape)
 
-    if spv != nil and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
+    if word_copyable?(type) and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
          match?(%__MODULE__{}, t.data) and t.type == type do
-      gpu_broadcast(out, t, shape, axes, spv)
+      gpu_broadcast(out, t, shape, axes, @broadcast_nd_spv)
     else
       t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
       host_result(out, Nx.broadcast(t_bin, shape, axes: axes))
     end
   end
 
-  # params: [out_rank, in_rank, out[4], in[4], axes[4]] — input axis i lands on
-  # output axis axes[i]; an input axis of size 1 repeats.
+  # params: [out_rank, in_rank, ews, out[4], in[4], axes[4]] — input axis i lands
+  # on output axis axes[i]; an input axis of size 1 repeats. `ews` sits after
+  # BOTH ranks here, unlike its two siblings which have only one.
   defp gpu_broadcast(
          %T{type: type} = out,
          %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
@@ -1626,7 +1630,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     params =
       for v <-
-            [out_rank, in_rank] ++
+            [out_rank, in_rank, div(element_bytes(type), 4)] ++
               pad4(Tuple.to_list(shape)) ++
               pad4(Tuple.to_list(in_shape)) ++
               pad4(axes),
@@ -1815,29 +1819,24 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # reverse: reverse along given axes. Composes from slice in some
   # cases but a direct callback handles general patterns.
-  @reverse_nd_f64_spv Path.expand("../../priv/shaders/reverse_nd_f64.spv", __DIR__)
-  @reverse_nd_f32_spv Path.expand("../../priv/shaders/reverse_nd_f32.spv", __DIR__)
-
-  defp reverse_nd_spv({:f, 64}), do: @reverse_nd_f64_spv
-  defp reverse_nd_spv({:f, 32}), do: @reverse_nd_f32_spv
-  defp reverse_nd_spv(_), do: nil
+  # W1: type-generic, see the note on @transpose_nd_spv.
+  @reverse_nd_spv Path.expand("../../priv/shaders/reverse_nd.spv", __DIR__)
 
   @impl true
   def reverse(%T{shape: shape, type: type} = out, tensor, axes) do
     t = ensure_on_backend(tensor)
-    spv = reverse_nd_spv(type)
     rank = tuple_size(shape)
 
-    if spv != nil and rank >= 1 and rank <= 4 and match?(%__MODULE__{}, t.data) and
+    if word_copyable?(type) and rank >= 1 and rank <= 4 and match?(%__MODULE__{}, t.data) and
          t.type == type do
-      gpu_reverse(out, t, axes, spv)
+      gpu_reverse(out, t, axes, @reverse_nd_spv)
     else
       t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
       host_result(out, Nx.reverse(t_bin, axes: axes))
     end
   end
 
-  # params: [rank, shape[4], rev[4]] — rev[d] is 1 when axis d is reversed.
+  # params: [rank, ews, shape[4], rev[4]] — rev[d] is 1 when axis d is reversed.
   defp gpu_reverse(
          %T{shape: shape, type: type} = out,
          %T{data: %__MODULE__{ref: a_ref}},
@@ -1849,7 +1848,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     rev = for d <- 0..(rank - 1)//1, do: if(d in axes, do: 1, else: 0)
 
     params =
-      for v <- [rank] ++ pad4(Tuple.to_list(shape)) ++ pad4(rev), into: <<>> do
+      for v <-
+            [rank, div(element_bytes(type), 4)] ++ pad4(Tuple.to_list(shape)) ++ pad4(rev),
+          into: <<>> do
         <<v::signed-32-little>>
       end
 
