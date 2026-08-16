@@ -51,11 +51,17 @@ rm -rf _build/     # fine. do it.
 
 **nx_vulkan-specific:** `_build` is not the only stale-artifact surface here.
 `priv/shaders/*.spv` are committed and are **not** rebuilt by `mix compile` —
-if you edit a `.comp`, you must re-run `glslangValidator` by hand (see the
-skill, §3). `priv/shader_cache/` is gitignored and safe to delete. And
-`~/.exmc/gpu_node/spv/` caches synthesised shaders **keyed by a hash of the
-generated GLSL**, so it invalidates itself correctly — but delete it if you
-suspect otherwise.
+if you edit a `.comp`, you must re-run `glslangValidator` by hand, or use the
+`clean_all_build` skill, which does the whole set. `priv/shader_cache/` is
+gitignored and safe to delete. And `~/.exmc/gpu_node/spv/` caches synthesised
+shaders **keyed by a hash of the generated GLSL**, so it invalidates itself
+correctly — but delete it if you suspect otherwise.
+
+**The shader invariant: 59 `.comp` ↔ 59 `.spv`, every blob regenerable.**
+Established in `ac509d2` and checked by the skill on every run. Until then,
+seven `.spv` had no source in the tree and the only copies lived in
+`~/spirit/shaders/` on the two Keplers, outside any repository. If the skill
+ever reports `orphan (kept)`, look there before anything else.
 
 ---
 

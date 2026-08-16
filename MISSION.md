@@ -339,6 +339,24 @@ back" is currently an accident.
    the elementwise/reduce families will hit this. Cheap to fix, and it is the
    kind of thing that is only cheap before you need it.
 
+   > **RESOLVED 2026-08-16 in `ac509d2`, and the count above was wrong.** It was
+   > **seven**, not three — this entry named only the three it had verified as
+   > referenced by module attributes. The full set also included
+   > `elementwise_binary_broadcast_f64`, `reduce_full_f64`,
+   > `leapfrog_chain_normal_f64` and `transpose`.
+   >
+   > All seven are recovered and committed. They were never lost: they lived in
+   > `~/spirit/shaders/` on **both** FreeBSD Keplers, a directory outside any
+   > repository, and super-io did not have it. That is why
+   > `scripts/build_and_test.sh` points at a machine-local shader dir — it was
+   > the last thing that knew where they were.
+   >
+   > Each was proven genuine rather than merely plausible: compiled with
+   > `glslangValidator`, byte-compared against the committed `.spv`, **all seven
+   > identical**. The tree now holds a checkable invariant — **59 `.comp` ↔ 59
+   > `.spv`, every blob regenerable** — and the `clean_all_build` skill verifies
+   > it on every run instead of trusting a remembered list.
+
 ---
 
 ## 4. The fusion mystery (T2) — the one open question worth the name
@@ -467,7 +485,7 @@ preference. Re-litigating one requires new evidence, not a new opinion.
 | **W4** | **Decide the twelve `Nx.Block.*`** (§3.3.2) | high | low–medium | mostly allowlist lines with reasons; `Take`/`TakeAlongAxis` likely route to the existing `gather` shader and `LogicalNot` to a compare. Converts twelve accidents into decisions |
 | **W5** | **Integer elementwise / compare / select / reduce kernels** (§3.1b) | high | medium | the bulk of the 524 strict doctest failures. Mechanical against the f32 templates; exact bit-equality test. Do W7 first if it blocks |
 | **W6** | **Chain-shader `:nif_panicked` at `n_obs` 600** (§5) | medium–high | medium | owed to the trader, blocks its stated direction, and a NIF panic is not a defect you ship. Graceful refusal counts as done |
-| **W7** | **Recover GLSL sources for the three f64 SPVs** (§3.3.7) | medium | low | unblocks W5 wherever it touches the f64 elementwise/reduce families; cheap now, expensive at the moment it blocks something |
+| ~~**W7**~~ | ~~**Recover GLSL sources for the three f64 SPVs** (§3.3.7)~~ **DONE** `ac509d2` — it was seven, not three; all recovered from `~/spirit/shaders/` on the Keplers and verified byte-identical | medium | low | **W5 is no longer blocked on this.** The f64 elementwise/reduce families are now editable from source |
 | **W8** | **`dot` beyond rank-2 × rank-2** (§3.3.4) | medium | medium | matrix·vector is batch-1 inference, batched dot is attention. Follow the `dot_orient/6` precedent: normalise into `(M,K)·(K,N)`, do not add kernels per shape |
 | **W9** | **Diagnose fusion, timeboxed to a day** (§4) | medium | low–medium | the repo's largest machine and nobody can say what it does. Value is knowledge; §4's caveat is that fixing it changes little |
 | **W10** | **`reduce_max`/`reduce_min` on u8** (§3.3.5) | low–medium | low | needs a byte-packed writer, which is also the prerequisite for any sub-word dtype work. Do it *with* a sub-word decision (§3.3.6), not before one |
