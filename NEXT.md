@@ -1,6 +1,8 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
+**Refreshed:** 2026-08-16, against `main` @ `a25432f` — state tables only; the
+ranking and the reasoning are unchanged.
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -24,13 +26,13 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `40d3137` | |
-| `origin/main` | `7067499` | **1 behind** — the stale-figure sweep is unpushed |
-| `upstream/main` | `6ab64ac` | **30 behind** |
+| `HEAD` / local `main` | `a25432f` | |
+| `origin/main` | `a25432f` | **in sync** — nothing unpushed |
+| `upstream/main` | `6ab64ac` | **33 behind** |
 
-`7067499` is also the sha that `_exmc-things/exmc/mix.lock` pins, so pushing
-`40d3137` to `origin` does not move either consumer until someone bumps the pin
-deliberately. That is the right default; see §4.
+The consumer pin has since been bumped to match: `../_exmc-things/exmc/mix.lock`
+pins `a25432f`. It is not known whether that bump came with the
+`bench/nuts_truth.exs` run on both arms that §4 asks for — assume it did not.
 
 ### `rm -rf _build/` — do it early, do not agonise
 
@@ -51,14 +53,16 @@ rm -rf _build/     # fine. do it.
 
 **nx_vulkan-specific:** `_build` is not the only stale-artifact surface here.
 `priv/shaders/*.spv` are committed and are **not** rebuilt by `mix compile` —
-if you edit a `.comp`, you must re-run `glslangValidator` by hand, or use the
+the sources are `glsl/*.comp`, and if you edit one you must re-run
+`glslangValidator` by hand, or use the
 `clean_all_build` skill, which does the whole set. `priv/shader_cache/` is
 gitignored and safe to delete. And `~/.exmc/gpu_node/spv/` caches synthesised
 shaders **keyed by a hash of the generated GLSL**, so it invalidates itself
 correctly — but delete it if you suspect otherwise.
 
 **The shader invariant: 59 `.comp` ↔ 59 `.spv`, every blob regenerable.**
-Established in `ac509d2` and checked by the skill on every run. Until then,
+Established in `ac509d2`, checked by the skill on every run, and holding as of
+`a25432f`. Until then,
 seven `.spv` had no source in the tree and the only copies lived in
 `~/spirit/shaders/` on the two Keplers, outside any repository. If the skill
 ever reports `orphan (kept)`, look there before anything else.
@@ -75,7 +79,9 @@ sequencing note there is the important part and bears repeating:
 
 **W2 — turn the strict ratchet on `doctest Nx`.** Baseline **319 of 843 (38%)**
 run entirely on the GPU. The work is retiring one `@moduletag` in favour of an
-except list and printing the rate in CI. Until that number is in CI, every other
+except list — it is `@moduletag :host_fallback_expected` at
+`test/nx_vulkan/nx_doctest_test.exs:23`, the only one in the suite — and
+printing the rate in CI. Until that number is in CI, every other
 item is unmeasurable, and "unmeasurable" is how this project's two worst bugs
 survived.
 
@@ -93,9 +99,9 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 
 | item | state | who can do it |
 |---|---|---|
-| **Push `40d3137` to `origin`** | 1 commit unpushed | anyone |
+| ~~Push `40d3137` to `origin`~~ | **done** — `origin/main` is at `a25432f` | |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
-| **`upstream/main` is 30 commits behind** | unpublished | **operator** — publishing decision |
+| **`upstream/main` is 33 commits behind** | unpublished | **operator** — publishing decision |
 
 The retirement command, for when someone has the password:
 
@@ -118,6 +124,11 @@ sample). `docs/TODO_CHAIN_SHADER_BUGS.md` Bug 1 has the reproducer. Graceful
 refusal — `{:unsupported, _}` the way `push_too_large` already does — counts as
 done. A panic in a NIF takes down more than the caller.
 
+**Do not mistake `1633073` for this.** That commit ("a failed dispatch panicked
+the NIF instead of returning an error", branch `fix/nif-panic-on-dispatch-error`,
+merged into `main`) hardened the *general* dispatch-error path. Bug 1's
+`n_obs = 600` panic is a separate size/bounds computation and is still open.
+
 **Bug 2 in that same document is now fixed downstream, and the fix confirms the
 number.** The documented `d ≤ 256` cap really is `d ≤ 13`; measured with
 `Push.pack/1` in the consumer repo: the header is 24 bytes, not the 16 the
@@ -133,7 +144,8 @@ thread-tile size. It simply is never the binding constraint.
 The consumer found a defect that lives at the boundary this repo owns:
 `compiler: :vulkan` returns a **frozen chain** for models with observations —
 1 distinct value in 500 draws. Write-up in
-`_exmc-things/exmc/docs/OPEN_VULKAN_OBSERVED_MODEL.md`.
+`../_exmc-things/exmc/docs/OPEN_VULKAN_OBSERVED_MODEL.md` — note that
+`_exmc-things/` is a **sibling** of this repo, not a directory inside it.
 
 It is not yet known which side of the NIF the fault is on, and the experiment
 that decides it is one this repo is better placed to run:
@@ -156,8 +168,10 @@ in the trajectory, which points at the host side.
 
 `MISSION.md` §5 covers this; two additions from 2026-08-16.
 
-**The pin is a feature, not friction.** `_exmc-things/exmc/mix.lock` pins
-`7067499`. Bumping it is a deliberate act that should come with a run of that
+**The pin is a feature, not friction.** `../_exmc-things/exmc/mix.lock` pins
+`a25432f` as of this refresh — it tracked `7067499` when §0 was first written,
+so it has been bumped once already. Bumping it is a deliberate act that should
+come with a run of that
 repo's `bench/nuts_truth.exs` on both arms, because a backend change that
 alters numerics shows up in a posterior long before it shows up in a test that
 compares two backends to each other.
@@ -175,7 +189,9 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite (super-io, at 40d3137): 843 doctests, 456 tests, 0 failures
+# suite (super-io, last measured at 40d3137): 843 doctests, 456 tests, 0 failures
+# not re-run at a25432f — that commit adds a skill and recovers .comp sources,
+# so the counts should be unchanged, but they are unverified.
 mix test
 
 # strict — the number that actually means something
