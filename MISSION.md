@@ -11,6 +11,11 @@ worth doing. Where the two disagree, this one is newer.
 
 ## Read these first, in this order
 
+0. **[`NEXT.md`](NEXT.md)** — current state and what to do next. Shorter than
+   this file and written later, so where the two disagree about *state*, NEXT
+   wins. It also carries the two things that waste the most time if you do not
+   know them: `origin` is the private server and `upstream` publishes, and
+   `rm -rf _build/` is fine to run without ceremony.
 1. **§9 of this document — "contradictory or stale".** Start there, not at the
    top. Seven items, and three of them are numbers you will otherwise trust:
    `README`, `ROADMAP` and `T11` circulate three *different* suite counts, all
