@@ -73,6 +73,13 @@ too — moved separately so it can be measured separately.
 on dense and is neutral on conv. So the deficit is per-dispatch cost. Every op
 today is its own submit + fence wait in `run_single_dispatch`.
 
+*(Postscript, 2026-08-16: batching delivered what it promised and the gap is
+structural anyway. A width sweep put EXLA on the **host CPU** 20–215× ahead of
+this backend across every size tested, widening — so per-dispatch cost was a
+real deficit but not the deciding one. See
+[`bench_results/MODEL_SCALING.md`](bench_results/MODEL_SCALING.md) and the
+reframing in `ROADMAP.md`.)*
+
 **Do.** Record several dispatches into one command buffer and fence once.
 Natural seam: `Nx.Vulkan.Compiler` already knows a whole stage schedule, so it
 can batch a stage's dispatches even when it does not fuse them into one shader.
@@ -89,11 +96,29 @@ just super-io.
 
 ---
 
-## T2 — Gate fusion by graph shape `[ ]`
+## T2 — Gate fusion by graph shape `[~]` — and first, find out why it does nothing
 
-**Why.** `Nx.Vulkan.Compiler` measures **0.76×** on dense-only and **0.98×** on
-conv. It genuinely wins on elementwise-heavy chains. Presenting it as a default
-win is not supported by the evidence.
+**The premise changed, and this item is now downstream of a mystery.**
+
+`EXMC_PEROP_RACE.md` explained fusion's flat result by the 137 host fallbacks
+in that graph: the compiler hands unsupported nodes to the Evaluator, which
+hands them to the same backend callbacks. **That explanation is dead.** T11 and
+T12 took the census to **0**, and fusion is still worth nothing — within noise
+of per-op on **13 of 13 cells** of a width sweep, on exactly the
+elementwise-heavy graph it was built for
+([`bench_results/MODEL_SCALING.md`](bench_results/MODEL_SCALING.md)).
+
+So there is no longer a story for why whole-graph compilation buys nothing
+here, and that is worth more than the gating heuristic: fusion is the **only
+mechanism that could close the 20–215× EXLA gap**. A heuristic that gates a
+no-op is not worth building. Profile a fused dispatch against its per-op
+equivalent first — is the generated shader running, is it being recompiled per
+call, is the stage schedule inserting boundary copies that cost what the fusion
+saved?
+
+**Original why.** `Nx.Vulkan.Compiler` measures **0.76×** on dense-only and
+**0.98×** on conv. It genuinely wins on elementwise-heavy chains. Presenting it
+as a default win is not supported by the evidence.
 
 **Do.** Follow the CSE precedent
 ([`bench_results/CSE_SOFTMAX_RACE.md`](bench_results/CSE_SOFTMAX_RACE.md) —
@@ -450,7 +475,20 @@ probabilistic consumer. Not because a d=8 posterior will get faster.
 
 **Risk.** Low. Both are mechanical, and both are exactly the kind of gap
 [`T3`](#t3--strict-mode-host_fallback-raise-) exists to stop shipping.
-## T12 — `cast_u8_to_f32/f64`: unstick the comparison mask `[ ]`
+## T12 — `cast_u8_to_f32/f64`: unstick the comparison mask `[x]`
+
+**Done.** softmax backward 2 fallbacks → **0**, `reduce_max`'s gradient exact on
+ties (`[0.5, 0.5, 0.0]`, ⅓ each), bit-identical to `BinaryBackend` across a
+60-cell (shape, axes, op) sweep. Three pieces were needed, not one: the cast
+alone moved the census from `{multiply, sum}` to `{divide, sum}` — same total,
+because `sum` of a u8 is typed `{:u, 32}` by Nx, so the *output* is integer and
+no input cast reaches it. `reduce_axis_u8_to_u32` closed that, and
+`cast_u32_to_f32/f64` closed the divide-by-tie-count left stranded after.
+Pinned as still-host: middle-axis u8 `sum` (that path transposes first and
+`transpose_nd` has no u8 path) and `reduce_max`/`reduce_min` on u8 (Nx keeps
+their output at `{:u, 8}`, needing a byte-packed writer).
+
+**Why (as filed).**
 
 **Why.** Found by T3's first strict run, and it is instance nine of the §1
 defect class. The compare shaders produce a `{:u, 8}` mask on-device, which was
@@ -481,7 +519,24 @@ and its correctness test is bit-equality against `BinaryBackend`.
 
 ---
 
-## T13 — Instrument `block/4` `[ ]`
+## T13 — Instrument `block/4` `[x]`
+
+**Done.** Keyed `{:block, Nx.Block.Foo}` per struct, so a missing
+`cumulative_sum` shader and `Nx.all_close` are separately decidable. Fixed on
+the way in: this backend's `block/4` had its first two parameters **misnamed**
+against the `Nx.Backend` contract (`block(struct, output, args, fun)`), which
+the first code to read them promptly tripped over.
+
+Two things it revealed. An `Nx.LinAlg.svd/2` records **~350** fallbacks, not
+one — nx composes it from ordinary ops whose intermediates return here one at a
+time. And the count depends on the process **default backend**, not the input
+tensor: the same call records 1 with `BinaryBackend` as default and 350+ with
+Vulkano. A census is a statement about a process.
+
+Separately found and **not fixed**: `Nx.LinAlg.solve/2` raises `ArithmeticError`
+on this backend, verified pre-existing on clean `main`.
+
+**Why (as filed).**
 
 **Why.** `block/4` is how nx 0.13 routes `Nx.LinAlg` (svd/qr/lu/cholesky/solve/
 eigh/determinant), `top_k`, `cumulative_*` and `all_close`. It transfers every

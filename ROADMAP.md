@@ -75,6 +75,20 @@ parity with EXLA" estimate ran together:
 Coverage parity is a matter of grinding through a list. Performance
 parity is not, and no date is claimed for it here.
 
+**And it may not be the goal.** A width sweep in August 2026
+([`bench_results/MODEL_SCALING.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/MODEL_SCALING.md))
+measured EXLA on the *host CPU* beating this backend by 20–215× on the same
+gradient across every size tested, with the gap widening — on the same machine,
+without touching a GPU. Against `BinaryBackend` this backend wins decisively
+above ~10³ elements; against a compiler it does not win anywhere reachable.
+
+That reframes the project rather than diminishing it. The value is **reach**:
+the FreeBSD Keplers cannot run EXLA at all, and there `BinaryBackend` is the
+real alternative. Performance parity with EXLA is not the bar this has to
+clear, and pursuing it on a CUDA-capable box is chasing a race that is already
+lost to a better-resourced compiler. The bar is being *correct and available*
+where nothing else is.
+
 Which ops actually get built is **demand-driven** — the standing
 position in `PLAN_AFTER_BACKWARD_PASS.md` T7 is that a remaining
 fallback is a recorded decision, not an oversight, and each is picked up

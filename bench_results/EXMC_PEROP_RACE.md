@@ -1,5 +1,34 @@
 # The eXMC per-op Vulkan path, re-measured on 0.3.0
 
+> ⚠️ **SUPERSEDED IN TWO PLACES (2026-08-16).** Both of this report's
+> forward-looking conclusions were tested and both were wrong. The measurements
+> below stand as taken; the reasoning built on them does not.
+>
+> 1. **"The chain shader is still earning its keep"** — no. Measured across a
+>    width sweep, the synthesised chain shader is **3.2× slower than the CPU**
+>    at d=8/n_obs=60, its real ceiling is **d ≤ 13** (a 128-byte push block, and
+>    only d ≤ 6 with `Normal` priors — not the 256 assumed here), and at
+>    n_obs=600 it **panics the NIF** on the same IR and shader with only the
+>    observation count changed. See [`MODEL_SCALING.md`](MODEL_SCALING.md).
+> 2. **"The GPU case has to be made on width"** — true, and against the wrong
+>    baseline. The width crossover is real and large *against `BinaryBackend`*
+>    (~10³ f64 elements, 410× by 4×10⁵). But **EXLA on the same host's CPU beats
+>    the per-op Vulkan path by 20× at the small end and 215× at 6×10⁶ elements,
+>    and the gap widens with size.** There is no reachable model width on
+>    super-io where this backend is the right answer. Every eXMC GPU benchmark
+>    in this directory — including this one — raced against an interpreter,
+>    which flatters the GPU by one to two orders of magnitude.
+>
+> The standing conclusion is that **nx_vulkan's case is portability, not
+> performance**: on the FreeBSD Keplers EXLA is not built and `BinaryBackend`
+> genuinely is the alternative. That is worth having. It is not what a
+> speedup-versus-BinaryBackend table appears to say.
+>
+> Also superseded: the 137-fallback census below is **now 0** after T11 and T12
+> (rank-0 compare/select gates, `put_slice`/`pad`, the u8 mask family). The
+> per-op gradient is fully GPU-resident and still ~8× slower than the CPU —
+> 50.4 ms against 6.2 ms — so the fallbacks were never the whole story.
+
 **Date:** 2026-08-15 · **Host:** super-io, RTX 3060 Ti (Ampere), Linux
 **Harness:** [`exmc/bench/perop_vulkan_race.exs`](https://github.com/borodark/exmc)
 **Model:** `Exmc.Trading.RegimeModel`, 3-regime mixture, **d = 8** free
@@ -34,11 +63,18 @@ been tested against it.
 host — agreement to 7 significant figures, i.e. the numbers are right and the
 path is simply slow.
 
-Fusion changes nothing, and the identical fallback count says why: the refusals
-happen at the **backend** callback, below the compiler. `Nx.Vulkan.Compiler`
-hands unsupported nodes to the Evaluator, which hands them to the same
-`VulkanoBackend` callbacks, which take the same host path. Whole-graph
-compilation cannot fuse across an op that is not on the device to begin with.
+Fusion changes nothing, and the identical fallback count *appeared* to say why:
+the refusals happen at the **backend** callback, below the compiler, so
+`Nx.Vulkan.Compiler` hands unsupported nodes to the Evaluator, which hands them
+to the same `VulkanoBackend` callbacks and the same host path.
+
+**That explanation was wrong.** T11 and T12 took this census to zero, and
+fusion is *still* worth nothing: measured across 13 cells of a width sweep, on
+exactly the elementwise graph it was built for, `Nx.Vulkan.Compiler` is within
+noise of per-op everywhere ([`MODEL_SCALING.md`](MODEL_SCALING.md)). The cause
+is unknown, and it matters — whole-graph compilation is the only mechanism that
+could close the EXLA gap, so "fusion does nothing and nobody knows why" is now
+the most valuable open question about this backend.
 
 ### End-to-end NUTS, 25 warmup + 25 samples
 
@@ -130,10 +166,19 @@ Ordered by the measurement:
    — they are real gaps in a general-purpose backend — but they will not make a
    d=8 model faster than a CPU, and no one should expect them to.
 
-The honest conclusion for eXMC is unchanged by any of it: **the chain shader is
-still earning its keep**, and the reason to keep investing in it is that it
-turns ~30 dispatches per leapfrog step into one. What has changed is that the
-per-op path's failure is now itemised rather than asserted.
+~~The honest conclusion for eXMC is unchanged by any of it: **the chain shader is
+still earning its keep**~~ — **retracted, see the banner.** Steps 1 and 2 were
+done (T11, T12) and took the census to 0; step 3 was done and refuted the
+conclusion. The chain shader is slower than the CPU at the width eXMC actually
+runs, cannot reach the widths where the GPU wins against an interpreter, and
+panics above n_obs=60. The reason to keep investing in it was that it turns ~30
+dispatches into one — that is still true and still not enough.
+
+The transferable lesson is about the baseline, not the backend: this report
+compared a GPU against a pure-Elixir interpreter, concluded the GPU needed
+bigger models, and was right about the mechanism and wrong about the question.
+A speedup table is a statement about two things, and the one that is not the
+subject deserves as much scrutiny as the one that is.
 
 ## Method notes
 

@@ -191,6 +191,25 @@ gradient sum agreeing to 1e-8 against the `BinaryBackend` reference.
 
 ## Benchmarks
 
+> **Read the baseline before the multipliers.** Most tables here compare against
+> `Nx.BinaryBackend`, which is a pure-Elixir interpreter. That is the right
+> reference for *correctness* — it is the host fallback, so it is what every
+> result must match bit-for-bit — and it is the honest reference on the FreeBSD
+> Keplers, where EXLA is not built and the interpreter genuinely is the
+> alternative. It is **not** a performance reference on a machine that can run
+> EXLA.
+>
+> Measured across a width sweep on the RTX 3060 Ti: **EXLA on the host CPU
+> computes the same gradient 20× faster than this backend at small model sizes
+> and 215× faster at 6×10⁶ elements**, with the gap widening. There is no
+> reachable model width on that box where this backend is the faster choice
+> ([`bench_results/MODEL_SCALING.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/MODEL_SCALING.md)).
+>
+> So a "436×" below means *436× a tree-walking interpreter*, not 436× a
+> competent CPU. **This project's case is reach, not speed** — see
+> [Position vs EXLA and EMLX](#position-vs-exla-and-emlx). Where CUDA exists,
+> use EXLA.
+
 ### Batched dispatch (August 2026)
 
 One `value_and_grad` step of an MNIST MLP at batch 32, submit-per-dispatch
