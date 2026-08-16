@@ -46,13 +46,21 @@ A GPU tensor backend for [Nx](https://github.com/elixir-nx/nx) that runs on **an
   managing it. `NXV_BATCH_MAX=0` restores submit-per-dispatch; `flush/0` exists
   for benchmarks that need to time the work rather than the recording of it.
 - **Host fallback for the long tail** — sort/argsort, SVD/QR/solve/cholesky
-  from `Nx.LinAlg` (via `Nx.Block.LinAlg`), rank-5+ shapes, and `pow` in f64
-  (GLSL.std.450 has no f64 `pow`). Slow but correct.
+  from `Nx.LinAlg` (via `Nx.Block.LinAlg`), rank-5+ shapes, and broadcasting
+  `pow` (GLSL.std.450 has no f64 `pow`, so the broadcast shader omits it).
+  Slow but correct.
 - **A fallback counter** (`Nx.Vulkan.Fallback`) — a host fallback returns a
   bit-identical result, so no assertion on values can detect one. `count/1`
   makes it countable, and the suite asserts *zero* fallbacks for ops that must
-  stay on-device. A full CNN training step now performs exactly **one**: `pow`
-  in f64.
+  stay on-device. A full CNN training step now performs exactly **one**:
+  broadcasting `pow`.
+- **Strict mode** (`config :nx_vulkan, host_fallback: :allow | :warn | :raise`)
+  — turns "detectable if you wrote the right assertion" into "impossible to
+  miss". `:allow` is the default and always will be; `:raise` refuses any
+  fallback not on a documented, one-line-per-entry allowlist. Scope it to a
+  block with `Nx.Vulkan.Fallback.strict/1,2`, which is per-process and so safe
+  in an `async: true` suite. `sh scripts/strict_test.sh` runs the whole suite
+  that way. See [Strict mode](#strict-mode).
 - **`Nx.Defn.grad` autograd**, for free — see [The autograd insight](#the-autograd-insight).
 - **Axon training step** end-to-end, gradient sum agrees to 1e-8
   vs `BinaryBackend` reference.
@@ -115,7 +123,7 @@ compilation now present in the one place a Vulkan backend can offer it —
 on any GPU with a driver, CUDA or not.
 
 - **Correctness first.** Every fused result is checked exact against
-  `Nx.BinaryBackend`. The suite — **851 doctests, 415 tests, 0 failures**
+  `Nx.BinaryBackend`. The suite — **851 doctests, 439 tests, 0 failures**
   — is green on both a 2012 Kepler (GT 650M, FreeBSD) and a 2021 Ampere
   (RTX 3060 Ti, Linux), with the f64 fused path active on both. Gradient
   parity and host-fallback counts are asserted, not assumed: `Nx.Defn.grad`
@@ -322,6 +330,64 @@ y_bin = Nx.backend_transfer(y_vk, Nx.BinaryBackend)
 IO.inspect(Nx.to_list(y_bin))
 # [0.7310585975646973, 0.8807970881462097, 0.9525741338729858, 0.9820137619972229]
 ```
+
+### Strict mode
+
+Every op this backend cannot run natively transfers to `Nx.BinaryBackend`,
+computes, and transfers back. The result is **bit-identical** — the fallback
+*is* the reference implementation — so no assertion on values can ever tell
+"ran on the GPU" from "silently didn't." That is not hypothetical: conv's
+entire backward pass ran on the CPU for the whole life of the conv shaders,
+with a green suite and green doctests, until somebody counted.
+
+`Nx.Vulkan.Fallback.count/1` makes a fallback detectable. Strict mode makes it
+impossible to miss:
+
+```elixir
+config :nx_vulkan, host_fallback: :allow   # default — correct, just slower
+config :nx_vulkan, host_fallback: :warn    # log every non-allowlisted fallback
+config :nx_vulkan, host_fallback: :raise   # raise Nx.Vulkan.HostFallbackError
+```
+
+`:allow` is the default and is meant to stay the default. A library that
+raised on a correct-but-slow path would give up the property that makes this
+backend usable at all: *every* `Nx` op works on it.
+
+Scope it to a block instead of the whole VM. This is per-process, so one strict
+test cannot poison an `async: true` suite:
+
+```elixir
+Nx.Vulkan.Fallback.strict(fn -> Nx.Defn.jit_apply(train_step, params) end)
+Nx.Vulkan.Fallback.strict(:warn, fn -> ... end)
+Nx.Vulkan.Fallback.strict(:allow, fn -> Nx.LinAlg.svd(a) end)   # escape hatch
+```
+
+**Why raise rather than count.** The counter is documented as a *lower bound*:
+once a fallback strands a tensor on `Nx.BinaryBackend`, Nx dispatches
+everything downstream there without this backend ever seeing it, so a census
+shows the visible edge of a cascade. `:raise` fires on the **first** refused
+op, before the tensor has left the device — so a strict failure names the
+cause, not the symptom.
+
+**The allowlist is the whole risk surface.** `@allowlist` in
+`lib/nx_vulkan/fallback.ex` is one line per exemption, each naming a single
+`{fun, arity}` and the reason it is permitted. There are no wildcards and no
+"this op family may fall back": `{:transpose, 3}` is not exempt — only
+`{:transpose, 3}` *at rank ≥ 5* is, because the rank-4 case has a shader and a
+rank-4 transpose leaving the GPU is a bug. An allowlist that grows loosely is
+how `:raise` comes to mean nothing, which is the same way the original gates
+got too wide.
+
+Run the whole suite that way:
+
+```sh
+sh scripts/strict_test.sh
+```
+
+Two tag-based exclusions, both enumerated in the tree and both printed by the
+CI job: `:host_fallback_expected` for tests whose *subject* is the fallback
+path, and `:host_fallback_open` for real fallbacks that are tracked and open.
+Neither is skipped by a normal `mix test`.
 
 ### Try the Axon training example
 

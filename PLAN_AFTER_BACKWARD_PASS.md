@@ -78,23 +78,54 @@ backing it, and no graph shape where the default path is slower than eager.
 
 ---
 
-## T3 — Strict mode: `host_fallback: :raise` `[ ]`
+## T3 — Strict mode: `host_fallback: :raise` `[x]`
 
-**Why.** `Nx.Vulkan.Fallback` makes a silent fallback *detectable if you wrote
-the right assertion*. Strict mode makes it *impossible to miss*. Prior art:
-PyTorch MPS requires `PYTORCH_ENABLE_MPS_FALLBACK=1` to allow CPU fallback at
-all; unimplemented ops raise by default.
+**Done.** `config :nx_vulkan, host_fallback: :allow | :warn | :raise`, read in
+`host_result_recorded/3`. `:allow` is and stays the default. `:raise` raises
+`Nx.Vulkan.HostFallbackError` on the first fallback not on `@allowlist` in
+`lib/nx_vulkan/fallback.ex`; `Nx.Vulkan.Fallback.strict/1,2` scopes it
+per-process, so a strict test cannot poison an `async: true` suite.
+`sh scripts/strict_test.sh` and `.github/workflows/strict-fallback.yml` are the
+ratchet.
 
-**Do.** `config :nx_vulkan, host_fallback: :allow | :warn | :raise` read in
-`host_result_recorded/3`, with a documented allowlist of ops that may fall back
-(`pow` f64, sort, LinAlg, rank-5+, overlapping pooling). Add a CI job running
-the suite under `:raise` with that allowlist.
+**Allowlist** — 8 entries, one line each, no wildcards. `pow/3` (broadcast
+form), `window_scatter_max/6` (overlapping windows), `sort/3`, `argsort/3`,
+`triangular_solve/4`, and `transpose/3` / `reverse/3` / `broadcast/4` **gated
+at rank ≥ 5** so a rank-4 fallback still raises.
 
-**Done when.** The suite passes under `:raise` with an explicit allowlist, and
-adding a new silent fallback fails CI rather than merely slowing things down.
+**What the first strict run caught** (524 failures, one real bug class):
 
-**Risk.** Low, and it is the highest-leverage item for preventing recurrence —
-this whole audit exists because the bug class was invisible.
+- **A `{:u, 8}` mask produced on the GPU can only be consumed by `select`.**
+  `multiply`, `sum` and `as_type` on it all host-fall-back — there is no
+  `cast_u8_to_f*` shader. `reduce_max`'s gradient is exactly this shape, so the
+  **softmax backward pass leaves the GPU four times** and nobody knew. Not
+  allowlisted. See T12.
+- **`clip/4` was counted as a fallback it never made.** It composes GPU
+  min/max and stays resident, but wrapped its result in `host_result/2`, so the
+  census over-counted it and `:raise` refused it. The funnel now records only
+  results that actually left the device. Two tests assert "clip stays on GPU"
+  and were passing for the wrong reason.
+- **`sum` / `reduce_max` / `reduce_min` were attributed to their shared
+  helper.** 54 refusals said `reduce_op_host_fallback/4` and named no Nx op.
+  Fixed with the explicit-attribution `host_result/3` the skill already
+  prescribes.
+- **`block/4` is invisible to the counter *and* to strict mode.** Everything
+  nx 0.13 routes through it — `Nx.LinAlg` svd/qr/lu/cholesky/solve/eigh/
+  determinant, `top_k`, `cumulative_*`, `all_close` — transfers to
+  `BinaryBackend` without passing the funnel. So "LinAlg" is not an allowlist
+  entry: it cannot be refused, because it is never seen. See T13.
+- **The T7 table's `pow` line was wrong.** Equal-shape f32 *and* f64 `pow` run
+  on the GPU; only the **broadcasting** form falls back, for either dtype,
+  because `elementwise_binary_bcast_*` omits op code 4. Corrected below.
+- The rank-5+ family is wider than T7 said: broadcasting **elementwise binary**
+  (`add`, `multiply`, …) is also capped at rank ≤ 4, not just the remap ops.
+
+**Corrected in the process:** the suite is green under `:raise` with two
+enumerated, greppable exclusions — `:host_fallback_expected` (tests whose
+subject *is* the fallback path, incl. `doctest Nx`, which is an
+API-completeness suite over `{:s, 32}` and not a residency one) and
+`:host_fallback_open` (the two `grad_test.exs` cases blocked on T12). Neither
+is skipped by a normal `mix test`.
 
 ---
 
@@ -153,13 +184,16 @@ already — keep the report scoped to exactly what was measured.
 
 ## T7 — Remaining host fallbacks `[ ]`
 
+Corrected against the code by T3's strict run — three of these lines were
+inaccurate as written.
+
 | op | action | rationale |
 |---|---|---|
-| `pow` f64 | `[-]` **not doing** | GLSL.std.450 has no f64 `pow`; the only fix is boundary-casting through f32, trading real precision in an f64 graph for a nicer number in a table |
+| **broadcasting** `pow` (any dtype) | `[-]` **not doing** | *Corrected:* equal-shape f32 **and f64** `pow` already run on the GPU. Only the broadcasting form falls back, because `elementwise_binary_bcast_*` omits op code 4 (GLSL.std.450 has no f64 `pow`). Fixing it means boundary-casting through f32, trading real precision for a nicer table |
 | overlapping pooling backward | `[-]` **not doing** | needs `GL_EXT_shader_atomic_float`, not guaranteed on the Kepler fleet; the one-thread-per-input design is what avoids atomics |
-| rank-5+ index-remap ops | `[ ]` if a workload appears | mechanical: extend `transpose_nd`/`reverse_nd`/`broadcast_nd` past rank 4 |
+| rank-5+ index-remap ops | `[ ]` if a workload appears | mechanical: extend `transpose_nd`/`reverse_nd`/`broadcast_nd` past rank 4. *Corrected:* broadcasting **elementwise binary** is capped at rank ≤ 4 too |
 | `sort` / `argsort` | `[ ]` if a workload appears | large; host path is correct |
-| `Nx.LinAlg` (SVD/QR/solve/cholesky) | `[ ]` unlikely | very large; correct on host today |
+| `Nx.LinAlg` (SVD/QR/solve/cholesky) | `[ ]` unlikely | very large; correct on host today. *Corrected:* these go through `block/4`, which is **not instrumented at all** — see T13. `triangular_solve/4` is the only one still an `Nx.Backend` callback |
 
 **Done when.** Each line is either done or has a recorded reason it is not — the
 point is that "still a fallback" is a decision, not an oversight.
@@ -199,6 +233,60 @@ commit (this happened during the audit).
 
 **Risk.** Low. Guard against running while another benchmark is in flight on the
 same host — contended measurements are worse than none.
+
+---
+
+## T12 — `cast_u8_to_f32/f64`: unstick the comparison mask `[ ]`
+
+**Why.** Found by T3's first strict run, and it is instance nine of the §1
+defect class. The compare shaders produce a `{:u, 8}` mask on-device, which was
+the point — but **`select/4` is the only op that can consume it.** `multiply`,
+`sum` and `as_type` on a u8 mask all host-fall-back, because `coerce_to/2` has
+no u8 cast and the reduce/binary shaders have no u8 path.
+
+`Nx.Defn.Grad` routes `reduce_max`'s gradient through exactly that mask, so
+**softmax's backward pass leaves the GPU four times** — two `multiply`, two
+`sum` — on a tensor-sized payload. Nothing detected it: the values are
+bit-identical, and `grad_test.exs` only asserted values.
+
+This is the same shape as audit instance #6, which `cast_s32_to_f32/f64` fixed,
+and the same lesson as §1's `{:s, 32}` literals: *the dtype the gate refuses is
+one the backend itself produced.*
+
+**Do.** Add `cast_u8_to_f32.comp` / `cast_u8_to_f64.comp` on the existing cast
+skeleton and wire them into `cast_spv/2`, which unblocks `as_type` directly and
+`multiply` via `coerce_to/2`. `sum` over a u8 mask needs a decision separately
+(cast-then-reduce, or a u8 path in `reduce_axis_*`).
+
+**Done when.** `Nx.Vulkan.Fallback.count_total/1` is 0 for the softmax and
+`reduce_max` gradients, and the two `@tag :host_fallback_open` tags in
+`test/nx_vulkan/grad_test.exs` are deleted rather than moved.
+
+**Risk.** Low. One new shader on a skeleton that exists three times already,
+and its correctness test is bit-equality against `BinaryBackend`.
+
+---
+
+## T13 — Instrument `block/4` `[ ]`
+
+**Why.** `block/4` is how nx 0.13 routes `Nx.LinAlg` (svd/qr/lu/cholesky/solve/
+eigh/determinant), `top_k`, `cumulative_*` and `all_close`. It transfers every
+input to `Nx.BinaryBackend` and never touches `host_result/2`, so that entire
+family is invisible to `Nx.Vulkan.Fallback.count/1` **and** to strict mode. A
+green strict run says nothing about it.
+
+**Do.** Record it — but attribute per `Nx.Block.*` struct, not as one
+`{:block, 4}`. A single entry would have to be allowlisted wholesale, which is
+precisely the op-family wildcard `@allowlist` forbids; it would also make
+`Nx.all_close` (used as an assertion helper throughout the suite) raise under
+`:raise`. Needs a key shape the allowlist can express, so it is a design
+question, not a one-liner.
+
+**Done when.** A LinAlg call shows up in a census, and a `cumulative_sum`
+fallback can be refused without also refusing `all_close`.
+
+**Risk.** Low-medium. Changes census composition, so the pinned counts in
+`fallback_test.exs` need re-reading rather than re-baselining.
 
 ---
 
