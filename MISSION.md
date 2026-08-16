@@ -9,6 +9,38 @@ That document is a worklist with a "done when" per item; this one says what the
 project is *for*, what "finished" would mean, and which of the available work is
 worth doing. Where the two disagree, this one is newer.
 
+## Read these first, in this order
+
+1. **§9 of this document — "contradictory or stale".** Start there, not at the
+   top. Seven items, and three of them are numbers you will otherwise trust:
+   `README`, `ROADMAP` and `T11` circulate three *different* suite counts, all
+   wrong (actual: **843 doctests, 456 tests**), and `ROADMAP.md` still carries
+   the pre-reframing performance goal *above* the reach-not-speed paragraph, so
+   stopping early gets you the old mission.
+2. **This document**, §1–§8.
+3. [`bench_results/MODEL_SCALING.md`](bench_results/MODEL_SCALING.md) — the
+   measurement the mission rests on: EXLA on the *host CPU* beats this backend
+   20–215× at every size tested. If you internalise one number, that is it.
+4. [`PLAN_AFTER_BACKWARD_PASS.md`](PLAN_AFTER_BACKWARD_PASS.md) — the T-items
+   the W-list below maps onto.
+5. [`docs/BACKWARD_PASS_AUDIT.md`](docs/BACKWARD_PASS_AUDIT.md) §1b and
+   [`.claude/skills/vulkan-nx-compute/SKILL.md`](.claude/skills/vulkan-nx-compute/SKILL.md)
+   — the defect class this repo keeps producing (a gate written against the
+   shapes one workload happens to emit). Nine instances so far. You will meet
+   the tenth.
+
+**Before you measure anything:** this GPU is shared. Check `uptime`; a
+concurrent test suite has inflated an established figure by 43% here. And the
+GT 750M has ±11–13% run-to-run spread against the GT 650M's ±2–4%
+([`bench_results/CONCURRENT_DISPATCH.md`](bench_results/CONCURRENT_DISPATCH.md))
+— a 15% effect measured once on that host is a coin flip. Race on the 650M, or
+replicate.
+
+**If you are editing this repo while an eXMC session is running:** both eXMC
+repos path-depend on this one, so your half-finished `lib/` breaks their build.
+Work in a git worktree. That is not hypothetical advice — it was necessary
+twice on the day this was written.
+
 Everything below is labelled **measured** (with the file that holds the numbers)
 or **inferred** (a reading of the source, or an argument). The distinction is
 load-bearing: this repo has twice built work on an inference that a measurement
