@@ -101,35 +101,41 @@ inventories ship in `priv/shaders/`.
 The following backend callbacks **always** host-materialize. Each is
 correct but pays the GPU↔host round-trip on every call.
 
+> **The rows marked ✅ below are done** and were re-verified by counting
+> fallbacks, not by reading this file. It said `pad/4` had "no shader" for a
+> year after `pad.comp` shipped, which is part of why `pad` kept
+> host-falling-back on a mistyped literal with nobody noticing (T11). Trust
+> `test/nx_vulkan/fallback_test.exs` over this table.
+
 | Callback | Why host | Proper fix |
 |---|---|---|
-| `concatenate/3` | no shader | `concat.comp` strided copy |
+| `concatenate/3` | ✅ GPU for `axis == 0` (buffer append, no shader needed); other axes host | `concat.comp` strided copy for inner axes |
 | `stack/3` | no shader | composes from concatenate |
-| `pad/4` | no shader | `pad.comp` |
-| `slice/5` | no shader | `slice.comp` strided copy |
-| `put_slice/4` | no shader | `put_slice.comp` overlay |
-| `gather/4` | no shader | `gather.comp` |
+| `pad/4` | ✅ done — `glsl/pad.comp`, 4/8-byte dtypes, rank ≤ 4, edge/interior/negative configs | — |
+| `slice/5` | ✅ done — `glsl/slice.comp`, static starts, 4/8-byte dtypes, rank ≤ 4 | — |
+| `put_slice/4` | ✅ done — `glsl/put_slice.comp` overlay, 4/8-byte dtypes, rank 1-4 (rank 0 raises in `BinaryBackend`, so it stays host) | — |
+| `gather/4` | ✅ done — `glsl/gather.comp` for the leading-prefix / default-axes case | other axis sets |
 | `indexed_put/5` | no shader | `scatter.comp` |
 | `indexed_add/5` | no shader (atomic adds needed) | `scatter_atomic.comp` |
-| `iota/3` | tiny | trivial; not bandwidth-bound |
+| `iota/3` | ✅ on-device (no shader needed) | — |
 | `eye/2` | tiny | trivial; not bandwidth-bound |
-| `broadcast/4` | no shader | spirit has `elementwise_binary_broadcast.spv` — **unwired** |
-| `transpose/3` (rank ≥ 3) | only 2D shader | `transpose_nd.comp` with axes permutation push constant |
-| `select/4` | no shader, has compositional API | `select.comp` |
+| `broadcast/4` | ✅ done — `glsl/broadcast_nd_f{32,64}.comp`, rank ≤ 4 | rank 5+ |
+| `transpose/3` (rank ≥ 3) | ✅ done — `glsl/transpose_nd_f{32,64}.comp`, rank ≤ 4 | rank 5+ |
+| `select/4` | ✅ done — `glsl/select_f{32,64}.comp`, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
 | `clip/4` | no shader, has compositional API | `clip.comp` |
 | `log1p/2` | no shader | extend `elementwise_unary` op 15 |
 | `is_infinity/2` | no shader | extend `elementwise_unary` |
 | `right_shift/3`, `left_shift/3`, `remainder/3`, `quotient/3` | no shader, integer ops | low priority |
 | `bitwise_and/3`, `bitwise_or/3`, `bitwise_xor/3` | no shader, integer ops | low priority |
-| `less_equal/3`, `greater_equal/3`, `not_equal/3` | no shader (compose from existing) | one-line shader extension |
-| Per-axis reduction over **multiple** axes | only single-axis shader | iterate `reduce_axis.spv` N times |
+| `less_equal/3`, `greater_equal/3`, `not_equal/3` | ✅ done — `glsl/compare_f{32,64}.comp` spec constant, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
+| Per-axis reduction over **multiple** axes | ✅ done — contiguous axis sets rotate into a trailing-suffix reduce | non-contiguous patterns |
 | Linear algebra: `determinant`, `solve`, `cholesky`, `triangular_solve` | host BinaryBackend | LU/Cholesky shader (only wins at d ≥ 256, irrelevant for MCMC) |
 | `sort/3`, `argsort/3` | not implemented | `bitonic_sort.comp` |
 | `argmax/3`, `argmin/3` | not implemented | extend `reduce_axis.comp` to track index |
 | `all/3`, `any/3` | not implemented | reduce_axis variant |
 | `product/3` | not implemented | reduce_axis variant |
-| `conv/4` | not implemented | im2col + matmul, or `conv.comp` |
-| `window_*/{4,6}` | not implemented | window-reduce shader family |
+| `conv/4` | ✅ done — im2col + GEMM, f32/f64, both directions | grouped conv, rank 5+ |
+| `window_*/{4,6}` | ✅ done for non-overlapping windows, both directions | overlapping backward (needs float atomics) |
 | `lu/3`, `qr/3` | not implemented | host fallback acceptable for MCMC sizes |
 
 **The unwired broadcast shader is the highest-impact missing piece.**
