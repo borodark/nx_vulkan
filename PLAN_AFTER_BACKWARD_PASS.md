@@ -85,16 +85,49 @@ the right assertion*. Strict mode makes it *impossible to miss*. Prior art:
 PyTorch MPS requires `PYTORCH_ENABLE_MPS_FALLBACK=1` to allow CPU fallback at
 all; unimplemented ops raise by default.
 
-**Do.** `config :nx_vulkan, host_fallback: :allow | :warn | :raise` read in
-`host_result_recorded/3`, with a documented allowlist of ops that may fall back
-(`pow` f64, sort, LinAlg, rank-5+, overlapping pooling). Add a CI job running
-the suite under `:raise` with that allowlist.
+**Do.** Four steps, in this order:
 
-**Done when.** The suite passes under `:raise` with an explicit allowlist, and
-adding a new silent fallback fails CI rather than merely slowing things down.
+1. **The mode itself.** `config :nx_vulkan, host_fallback: :allow | :warn |
+   :raise`, read in `host_result_recorded/3` — the one funnel every fallback
+   already passes through, and the one that already knows the `{fun, arity}`
+   via the `__CALLER__.function` capture. `:allow` is today's behaviour and
+   stays the default; a library that raises on a correct-but-slow path by
+   default would be hostile to the "it always works" property that is the
+   backend's main selling point.
+2. **The allowlist**, as data rather than prose: a module attribute of
+   `{fun, arity}` pairs each carrying the reason it is permitted, sourced from
+   T7's table (`pow` f64, `window_scatter_max` overlapping, sort/argsort,
+   `Nx.LinAlg` via `block/4`, rank-5+ remaps). `:raise` consults it; anything
+   not listed raises with the op, the shapes, the dtypes, and a pointer to
+   §1b of the `vulkan-nx-compute` skill.
+3. **Scope it per-process, not globally.** The counter is already per-process
+   (`Nx.Vulkan.Fallback`); strict mode must be too, or one strict test poisons
+   an async suite. `Fallback.strict/2` taking a fun is the natural sibling to
+   `count/1` and is what tests will actually reach for.
+4. **A CI job** running the full suite under `:raise`. This is the part that
+   makes it a ratchet rather than a feature.
+
+**Watch for.** The allowlist is the whole risk surface. It must be *narrow
+entries with reasons*, not a broad "these ops may fall back" — the failure
+mode is an allowlist that grows silently until `:raise` means nothing, which
+is how the original gates got wide in the first place. Prefer a failing test
+that gets an explicit one-line exemption in the diff over a wildcard.
+
+**Note the lower-bound property.** Strict mode inherits it: raising on the
+*first* refused op is strictly better than counting, because it fires before
+the tensor lands on `BinaryBackend` and takes its downstream ops with it
+unrecorded. That is an argument for `:raise` over `:warn` in CI, not merely a
+caveat.
+
+**Done when.** The suite passes under `:raise` with an explicit allowlist, CI
+runs it, and adding a new silent fallback fails the build rather than merely
+slowing things down.
 
 **Risk.** Low, and it is the highest-leverage item for preventing recurrence —
-this whole audit exists because the bug class was invisible.
+this whole audit exists because the bug class was invisible. [`T11`](#t11--the-gaps-the-exmc-race-found-)
+is the immediate evidence that it is not a solved problem: two more instances
+of the same bug class were sitting in `main` at 0.3.0, and nothing in the suite
+was positioned to notice.
 
 ---
 
@@ -202,11 +235,137 @@ same host — contended measurements are worse than none.
 
 ---
 
+## T10 — The Ampere over-dispersion `[ ]`
+
+**Why.** `exmc/research/D90_BACKLOG_FIX_PLAN.md` (2026-07-22) disqualifies the
+RTX 3060 Ti as a host for sampling-accuracy validation: its Vulkan leapfrog is
+**systematically over-dispersed across every distribution**, deterministically
+and reproducibly — Normal(0,1) variance **8.5 against EXLA's 1.45**,
+Exponential mean **2.77 against 0.5**, 8/16 `validator_test.exs` failures where
+mac-247 (Kepler, MoltenVK) shows 2/16 and then 16/0 after G1/G4. The fleet's
+strongest GPU is currently trusted for compile-and-crash checks only, and the
+reference for numerical correctness is a 2012 laptop card. That is backwards,
+and it has stood unexplained for three weeks.
+
+It is also, right now, **an accusation without a defendant.** Nobody has
+established whether the bug is in this repo at all.
+
+**Do.** Bisect by layer before touching a shader. The point of the order below
+is that each step is cheap and each one can exonerate a whole layer:
+
+1. **Is it the backend or the synthesised chain shader?** This repo's own
+   suite — including `grad_test.exs`, which compares `Nx.Defn.grad` against
+   `BinaryBackend` op by op — is **green on this exact card**, and
+   [`bench_results/EXMC_PEROP_RACE.md`](bench_results/EXMC_PEROP_RACE.md)
+   measured log_p agreeing with the host to 7 significant figures on it. Both
+   are evidence for the chain shader and against the op set. Make it decisive:
+   run eXMC's validator battery on the **per-op path** (`chain_meta` stripped,
+   as that harness does) on super-io. If per-op is well-dispersed and chain is
+   not, the bug is in `Exmc.NUTS.CustomSynth`'s generated GLSL, this repo is
+   exonerated, and the work moves to the exmc side.
+2. **If it is the chain shader — differential, not statistical.** Do not chase
+   it through posteriors; sampling error is the fog this bug has been hiding
+   in for a month. Dispatch **one** `leapfrog_chain_synth` step with a fixed
+   `(q, p, eps, inv_mass)` on super-io and on mac-247 and diff the outputs
+   elementwise. Kepler↔Kepler is documented bit-identical, so a Kepler is a
+   trustworthy oracle. A single divergent step localises this in one run;
+   1,000 sampled iterations localise nothing.
+3. **Then bisect within the step.** Same fixed inputs, compare the chain
+   shader's output against the same leapfrog composed from eager ops on the
+   same card. That splits "the synthesised GLSL is wrong" from "a kernel it
+   calls is wrong on Ampere".
+
+**Hypotheses worth holding, in the order the evidence favours them.** An
+over-dispersed chain with *no* divergences and a mis-scaled — not mis-signed —
+step is the signature of a gradient that is too small or an `eps` that is too
+large, not of a numerically noisy one. Warp width is the obvious architectural
+difference (32 on both, but occupancy and scheduling are not), as is anything
+in the shader that assumes a workgroup reduction completes without a barrier —
+a missing `barrier()`/`memoryBarrierShared()` can be benign on a 2012 part
+whose scheduler serialises what Ampere runs concurrently. That class of bug is
+**exactly** "correct on weak hardware, wrong on strong", which is the shape of
+the observation.
+
+**Done when.** The defect is localised to a repo and a layer, with a fixed-input
+reproducer that does not involve sampling. Whether it is then *fixed* is a
+separate decision — but "super-io is not valid for numerical validation" stops
+being a standing exclusion and becomes either a fixed bug or a documented one.
+
+**Risk.** Medium, and mostly of the sunk-cost kind: this is a real
+cross-architecture numerics investigation and step 1 may hand the whole thing
+to another repo. That is a good outcome, not a wasted day — the current state
+is that neither repo has ruled itself out.
+
+---
+
+## T11 — The gaps the eXMC race found `[ ]`
+
+**Why.** [`bench_results/EXMC_PEROP_RACE.md`](bench_results/EXMC_PEROP_RACE.md)
+counted **137 host fallbacks in a single `value_and_grad`** of a d=8 model, and
+two causes account for all of them:
+
+- **`compare` and `select` refuse rank 0.** Both gates read
+  `tuple_size(out.shape) >= 1 and tuple_size(out.shape) <= 4`
+  (`vulkano_backend.ex:1087`, `:1148`). The upper bound is the documented
+  rank-4 remap ceiling. The lower bound has **no shader justification** —
+  elementwise arithmetic handles scalars on the same host without complaint.
+  108 of the 137 are this one guard, refusing the scalar support checks
+  (`x > 0` and friends) that every distribution log-prob is made of.
+- **`pad` and `put_slice` have no shader at any rank.** `PointMap` unpacks the
+  parameter vector with `put_slice`, once per RV. This is the one that decides
+  residency: the census is a **lower bound**, so once the position vector lands
+  on `BinaryBackend` everything after it computes there unrecorded.
+
+The first is **§1b of the `vulkan-nx-compute` skill, a third time** — a gate
+written against the shapes one workload produces. The audit's two instances
+were a forward pass refusing its own gradient and Nx's `{:s, 32}` literals.
+This one is a neural-network workload, where predicates are batched masks of
+rank ≥ 1, refusing a probabilistic one. It survived a release because nothing
+in the suite compares scalars on the GPU.
+
+**Do.**
+1. `>= 1` → `>= 0` in both gates, reshaping rank-0 to `{1}` for dispatch and
+   back. Add `fallback_test.exs` assertions **at zero** for scalar
+   `equal`/`greater`/`select`, in the "must not leave the GPU" describe block.
+2. `put_slice` and `pad` shaders. Both are index-remap-family members
+   (decompose the output index, map to an input index, copy) — the skeleton
+   exists three times over in `transpose_nd`/`reverse_nd`/`broadcast_nd`. Per
+   [`T8`](#t8--unify-the-index-remap-shader-family-), a **fourth** member is
+   the stated trigger to unify behind one shader with a mode selector; two more
+   arriving together makes that decision live rather than hypothetical.
+
+**Done when.** A scalar compare/select performs zero fallbacks, `put_slice` and
+`pad` dispatch natively, and the eXMC harness is re-run to a recorded census.
+
+**Do not expect it to be a speed win for eXMC.** The same measurement found the
+chain shader running **1.7× slower than `BinaryBackend`** on this host at d=8:
+the model is dispatch-bound, and closing fallbacks does not change that. Build
+these because they are real gaps in a general-purpose backend, and because the
+scalar gate is a correctness-adjacent defect that will bite the next
+probabilistic consumer. Not because a d=8 posterior will get faster.
+
+**Risk.** Low. Both are mechanical, and both are exactly the kind of gap
+[`T3`](#t3--strict-mode-host_fallback-raise-) exists to stop shipping.
+
+---
+
 ## Housekeeping `[ ]`
 
 - Both Keplers are parked on `feat/conv-backward-on-gpu`; restore mac.247 to
   `feat/168-ssbo-captures` and mac.248 to `f32-matmul-prototype` when done.
 - The `f32_race_*_c622757.json` reports exist on each host and are not committed.
+- ~~`ROADMAP.md` called "~12× ahead after batching" a measurement while
+  `README.md` explicitly declined to claim a post-batching figure~~ — fixed:
+  the 20× is the measurement, the 12× is arithmetic, and the ROADMAP now says
+  so. Re-running the race needs a working EXLA, which this repo deliberately
+  does not depend on.
+- **`mix hex.retire nx_vulkan 0.2.0` is still not done** — hex.pm reports
+  `retirement: None`. Needs the maintainer's interactive Hex local password:
+  ```
+  mix hex.retire nx_vulkan 0.2.0 deprecated --message "Backward pass ran on the host: GPU training was ~250x slower than advertised. Results were correct; use 0.3.0 for training."
+  ```
+  `deprecated` rather than `defect` is the accurate reason code: 0.2.0's
+  results were correct, its performance was not what the README claimed.
 - ~~`CHANGELOG.md` has an `## Unreleased` section; renumber to `0.3.0` at tag
   time~~ — done: `## 0.3.0 (2026-08-08)`, `mix.exs` at `0.3.0`, merged to
   `main`. The v0.2.0 entry was deliberately left unedited, since it is tagged.

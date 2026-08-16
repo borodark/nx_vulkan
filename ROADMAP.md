@@ -64,8 +64,13 @@ parity with EXLA" estimate ran together:
   evidence for it: six of the eight ops recovered there needed no new
   kernel at all, only a wider gate. Plausible at months of work.
 - **Performance parity** — being *competitive* per op. Not the same
-  problem and not the same timescale: measured, EXLA is ~12× ahead on a
-  dense MLP after batching, and the remaining lever is GEMM quality.
+  problem and not the same timescale: EXLA was **measured ~20× ahead** on a
+  dense MLP *before* batched dispatch landed, and the remaining lever is GEMM
+  quality. A post-batching figure of ~12× circulates by dividing that 20× by
+  the 1.71× batching gain — it is arithmetic, not a measurement. The race has
+  not been re-run (it needs a working EXLA, which this repo deliberately does
+  not depend on), so no post-batching number is claimed. See the README's
+  [vs EXLA section](README.md#vs-exla-august-2026-pre-batching).
 
 Coverage parity is a matter of grinding through a list. Performance
 parity is not, and no date is claimed for it here.
