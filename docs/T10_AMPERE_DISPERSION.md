@@ -27,9 +27,11 @@ against itself.
 The defect is in **eXMC**, not `nx_vulkan`:
 `exmc/lib/exmc/nuts/custom_synth/multi_rv_custom_spec.ex`, `@template` (and the
 same bug in `@batched_template`). `nx_vulkan`'s own
-`Nx.Vulkan.ShaderTemplate` skeleton — the one that renders the Phase-1
-Beta/Gamma/Lognormal families — has the ordering **right**; eXMC's multi-RV
-generalisation moved the log-prob body above the position update.
+`Nx.Vulkan.ShaderTemplate` skeleton — the one eXMC's template was generalised
+from — has the ordering **right**; the multi-RV generalisation moved the
+log-prob body above the position update. (That `nx_vulkan` path is itself stale
+for an unrelated reason — see the side finding below — so this is a statement
+about provenance, not about a shader anyone currently dispatches.)
 
 ---
 
@@ -54,6 +56,12 @@ Max elementwise absolute difference:
 
 K ∈ {1, 2, 4, 32} all behave the same; only K=32 is tabulated. **1–4 ulp at
 f64.** The chain shader's arithmetic on Ampere is correct.
+
+Note on the Δlogp column: the host reference was written to mirror the
+shader's control flow *exactly*, including evaluating the log-density at the
+pre-update position. So Δlogp ≈ 0 confirms the shader computes what its source
+says it computes — it does **not** validate that the source is right. That is
+§4's job.
 
 ### 2. Fixed-input differential, Ampere vs Kepler
 
@@ -91,13 +99,19 @@ f64); Vulkan arm is the synthesised f64 chain shader.
 | Exponential(λ=2) | CPU (`:none`) | **0.5021** | 0.2600 | 0.5 / 0.25 |
 | Exponential(λ=2) | Vulkan chain | **1.4477** | 2.8661 | — |
 | | | **2.88× mean** | **11.02× variance** | |
+| HalfNormal(σ=1) | CPU (`:none`) | 0.8056 | 0.3773 | 0.7979 / 0.3634 |
+| HalfNormal(σ=1) | Vulkan chain | 1.3943 | 1.7459 | — |
+| | | **1.73× mean** | **4.63× variance** | |
 
 The Normal(0,1) numbers reproduce D90's report (variance **8.5** against
 **1.45**) to three significant figures — but note that D90's 1.45 was never
 EXLA either: it is what the CPU arm gives, and it is itself 45% above the
 analytic 1.0. Exponential reproduces in the same direction (D90 reported mean
 2.77 against 0.5; at this warmup/sample count it is 1.45 against 0.50, with the
-CPU arm landing on the analytic value to 3 decimal places).
+CPU arm landing on the analytic value to 3 decimal places). The CPU arm is
+close to analytic for Exponential and HalfNormal; only its Normal variance
+(1.4523 against 1.0) is itself off, and that is the very number D90 quoted as
+"EXLA's 1.45".
 
 The over-dispersion is therefore **real, current, and reproducible on super-io
 at HEAD** — but per §2 it is not caused by the GPU.
@@ -195,6 +209,81 @@ that (disqualify the Ampere box, trust the 2012 Kepler) inverted the evidence.
 
 ---
 
+## 4. Confirming causality — move the log-prob body below the update
+
+The one-line change described under "Recommended fix" below was applied to
+eXMC's `@template` and the §1 and §3 measurements re-run on super-io. The
+change was **not committed to eXMC** — it was reverted afterwards, and this
+repo's branch carries no eXMC code.
+
+First, the fixed-input check. `q`, `p` and `grad` are unchanged (bit-identical
+to §1, as expected — the fix moves only where the density is sampled), and
+`logp_chain` shifts forward by exactly one index:
+
+```
+Normal(0,1), q_init = 0.3, eps = 0.05, K = 32
+  before:  logp_chain[0..2] = [-0.9639385175704956, -0.9800573378829956, -0.9982902113599976]
+  after:   logp_chain[0..2] = [-0.9800573378829956, -0.9982902113599976, -1.0184549232221907]
+```
+
+`logp_chain[0]` now equals `log p(q_chain[0])` instead of `log p(q_init)`.
+
+Then the sampling comparison, identical settings to §3:
+
+| model | arm | mean | variance | var ratio vk/cpu |
+|---|---|--:|--:|--:|
+| Normal(0,1) | CPU | −0.0353 | 1.4523 | |
+| Normal(0,1) | Vulkan, **before** | −0.1223 | 8.5467 | **5.885** |
+| Normal(0,1) | Vulkan, **after** | −0.0377 | 1.4481 | **0.997** |
+| Exponential(λ=2) | CPU | 0.5021 | 0.2600 | |
+| Exponential(λ=2) | Vulkan, **before** | 1.4477 | 2.8661 | **11.02** |
+| Exponential(λ=2) | Vulkan, **after** | 0.5128 | 0.2295 | **0.883** |
+| HalfNormal(σ=1) | CPU | 0.8056 | 0.3773 | |
+| HalfNormal(σ=1) | Vulkan, **before** | 1.3943 | 1.7459 | **4.63** |
+| HalfNormal(σ=1) | Vulkan, **after** | 0.9522 | 0.4505 | **1.194** |
+
+**Normal and Exponential are closed.** Normal goes from 5.885× to 0.997×;
+Exponential's mean goes from 1.4477 to 0.5128 against a 0.5021 CPU arm and a
+0.5 analytic value. The one-line change accounts for essentially all of the
+reported over-dispersion in both.
+
+**HalfNormal is improved but not closed.** Variance ratio drops 4.63 → 1.19,
+mean 1.3943 → 0.9522, but the CPU arm gives 0.8056 and the analytic mean is
+0.7979. At 800 samples the standard error on that mean is ≈0.024, so a 0.147
+gap is ~6 SE — a real residual, not Monte-Carlo noise. HalfNormal is also the
+one family in this battery with a documented history of a *separate* bug (W7
+Stage 2.5: a `:softplus` vs `:log` transform mismatch, `research/gpu_node/
+WORKSTREAM_W7_linux_nvidia_drift.md`). That residual is a separate
+investigation and this document does not claim it.
+
+---
+
+## Side finding: this repo's own Phase-1 synthesis path is stale
+
+Not part of T10, recorded because it was found on the way and it explains why
+`nx_vulkan` could not have caught the bug in its own test suite.
+
+`Nx.Vulkan.ShaderTemplate`'s GLSL declares the push block as
+`{uint n; uint K; float eps; …}` — offsets 0, 4, 8 — and
+`Nx.Vulkan.ChainShaderSpecs.beta_push/6` packs exactly that. But
+`parse_push_block/1` in `native/nx_vulkan_vulkano/src/lib.rs:293`, which backs
+`leapfrog_chain_synth/6`, reads `{k_steps@0, n_obs@4, d@8, _pad@12, eps@16}` —
+eXMC's `MultiRvCustomSpec` layout — and `PushBlockF64` (`:318`) uses the same
+shape for the f64 entry point. The two are incompatible: fed a
+`ChainShaderSpecs` push, the NIF would read `d` out of the float bits of `eps`.
+
+Consequence: **the `ShaderTemplate` / `ChainShaderSpecs` / `Synthesis` trio
+cannot currently be dispatched through either NIF.** `native_v.ex:329` already
+says as much for the f32 entry point ("kept as stub only (unused)"). This is
+consistent with the test suite: `test/nx_vulkan/synthesis_test.exs` only checks
+that GLSL compiles to SPIR-V and caches, never dispatches, and renders its spec
+with `logp_block: "float lp_i = 0.0;"` — a template that never computes a
+log-density cannot detect a misaligned one.
+
+Established from source reading only; no dispatch was attempted against it.
+
+---
+
 ## Established vs inferred
 
 **Established by measurement.**
@@ -210,12 +299,13 @@ that (disqualify the Ampere box, trust the 2012 Kepler) inverted the evidence.
   stores the pre-step density.
 - The validator's reference arm resolves to `Nx.Vulkan` on super-io, and the
   validator battery is 16/0 there under that (vacuous) configuration.
-- Vulkan vs CPU sampling variance ratios (§3).
+- Vulkan vs CPU sampling variance ratios before and after the fix (§3, §4).
+- Moving the log-prob body below the position update removes the
+  over-dispersion for Normal (5.885× → 0.997×) and Exponential
+  (11.02× → 0.883×) and most of it for HalfNormal (4.63× → 1.19×).
 
 **Inferred, not proven.**
 
-- That the off-by-one is the *whole* cause of the over-dispersion. The
-  supporting experiment is §4 below; anything it does not close is open.
 - That mac-247 would show the same over-dispersion against a genuine CPU
   reference. It follows from bit-identical trajectories plus host-independent
   Elixir, but it was not run there.
@@ -229,6 +319,13 @@ that (disqualify the Ampere box, trust the 2012 Kepler) inverted the evidence.
   recoverable from the doc.
 - Whether `@batched_template` (Task #154) is exercised anywhere in the failing
   battery. It carries the identical off-by-one and should be fixed with it.
+- The HalfNormal residual after the fix (mean 0.9522 against a 0.8056 CPU arm
+  and 0.7979 analytic, ~6 SE). Not chased; W7 Stage 2.5 already records a
+  transform mismatch for this family, which is the first place to look.
+- Whether the Normal CPU arm's own variance (1.4523 against 1.0) is warmup
+  length, the adapted step size, or something else. It is common to both arms
+  so it does not affect any conclusion here, but it means the CPU arm is a
+  *relative* reference, not a certified one.
 
 ---
 
@@ -239,7 +336,38 @@ into the post-update one, next to `{{prior_grad_body_qn}}`, in **both**
 `@template` and `@batched_template`. The emitted fragments read `qi` and
 `q_shared[]`, both of which hold the new position at that point (the template
 already refreshes `q_shared` and barriers around it), and `lp_i` is declared at
-loop scope, so no other change is needed.
+loop scope, so no other change is needed. Verified in §4; **not committed** —
+the eXMC working tree was restored after measuring.
+
+```diff
+         double grad_q = 0.0lf;
+         double lp_i   = 0.0lf;
+         if (in_bounds) {
+ {{prior_grad_body_q}}
+-{{prior_logp_body_q}}
+         }
+         double p_half = pi + 0.5lf * pc.eps * grad_q;
+         double qn = qi + pc.eps * mi * p_half;
+         qi = qn;
+ 
+         barrier();
+         if (in_bounds) q_shared[tid] = qi;
+         barrier();
+ 
+         double grad_qn = 0.0lf;
+         if (in_bounds) {
+ {{prior_grad_body_qn}}
++{{prior_logp_body_q}}
+         }
+```
+
+Two related items eXMC should fix in the same pass:
+
+1. **`Validator.run_exla/2` must fail loud when EXLA is unavailable** rather
+   than silently self-comparing. One `Code.ensure_loaded?(EXLA)` guard turns a
+   fleet-wide false green into a skip. Until it lands, no validator result from
+   any FreeBSD host means anything.
+2. **`@batched_template` carries the identical lag** and was not measured here.
 
 Then add the missing contract test. Neither repo has one:
 `nx_vulkan/test/nx_vulkan/synthesis_test.exs` renders its spec with
@@ -264,3 +392,15 @@ d = 1, K = 4, `q_init = [0.3]`, `p_init = [1.0]`, `inv_mass = [1.0]`,
 
 Actual equals expected shifted by one index; `logp_chain[0]` equals
 `log p(0.3)`, the input. Identical on RTX 3060 Ti and GT 650M.
+
+---
+
+## What this retires
+
+"super-io is not a valid host for Vulkan numerical validation" was the wrong
+lesson. The correct one is the opposite: **super-io was the only host running a
+real comparison, and the fleet's reference host has never run one at all.**
+T10's `Done when` is met — the defect is localised to a repo (eXMC), a file
+(`multi_rv_custom_spec.ex`), and a line, with a fixed-input reproducer that
+involves no sampling. The standing exclusion should be lifted and replaced with
+a validator that cannot pass vacuously.
