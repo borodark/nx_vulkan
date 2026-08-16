@@ -408,6 +408,20 @@ CI job: `:host_fallback_expected` for tests whose *subject* is the fallback
 path, and `:host_fallback_open` for real fallbacks that are tracked and open.
 Neither is skipped by a normal `mix test`.
 
+Nx's own doctests run under the ratchet too, minus the ones named in
+`test/nx_doctest_register.exs` — 524 of 843 that still leave the GPU for at
+least one op, each line carrying its reason. That makes the share of upstream
+Nx this backend actually computes on-device a number you can print:
+
+```sh
+sh scripts/doctest_residency.sh
+#=> doctest Nx residency: 319 / 843 (37.8%) run with host fallbacks refused
+```
+
+It fails if a doctest not in the register falls back (a regression) *or* if one
+in the register stops falling back (a stale entry holding the number down), so
+the rate moves only when someone edits the register deliberately.
+
 ### Try the Axon training example
 
 ```sh

@@ -69,21 +69,36 @@ ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. The plan is unchanged: W2 first
+## 1. W2 is done. Next is W1
 
-`MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. The
-sequencing note there is the important part and bears repeating:
+`MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
+sequencing note put W2 first, because W2 is what tells you whether W1 and W5
+worked. **That gate is open.**
 
-> **W2 before W1 and W5**, because W2 is what tells you whether W1 and W5
-> worked. The residency rate is the acceptance test for the whole of §3.
+```sh
+sh scripts/doctest_residency.sh
+#=> doctest Nx residency: 319 / 843 (37.8%) run with host fallbacks refused
+```
 
-**W2 — turn the strict ratchet on `doctest Nx`.** Baseline **319 of 843 (38%)**
-run entirely on the GPU. The work is retiring one `@moduletag` in favour of an
-except list — it is `@moduletag :host_fallback_expected` at
-`test/nx_vulkan/nx_doctest_test.exs:23`, the only one in the suite — and
-printing the rate in CI. Until that number is in CI, every other
-item is unmeasurable, and "unmeasurable" is how this project's two worst bugs
-survived.
+`@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
+`test/nx_doctest_register.exs` names the 524 doctests that still leave the GPU,
+140 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
+fallbacks are being refused, so a normal `mix test` still runs and asserts all
+843. The strict suite went from 910 excluded to 591. CI runs the script as its
+own step. See `MISSION.md` §2.3 for what was built and the one departure from
+the plan (ExUnit's `doctest :except` is function-granularity; using it would
+have dropped 154 *resident* doctests and reported 165/843 instead of 319/843).
+
+**Use it as the acceptance test for everything that follows.** Run the script
+before and after; if the rate did not move, the op did not reach the device.
+Two buckets in the register are already scored as work items:
+
+| bucket | doctests | item |
+|---|---:|---|
+| `@integer_dtype` | 409 | **W5** — it empties this bucket wholesale |
+| `@float_residency_gap` | 33 | **W1** and **W8** — float ops that still left a float backend, i.e. gates narrower than the capability behind them. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
+| `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
+| `@complex_and_fft` | 45 | not work under current dtype support |
 
 Then W1 (word-generic remap family, best ratio available), W3, W4, W5.
 
@@ -189,13 +204,14 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite (super-io, last measured at 40d3137): 843 doctests, 456 tests, 0 failures
-# not re-run at a25432f — that commit adds a skill and recovers .comp sources,
-# so the counts should be unchanged, but they are unverified.
+# suite (super-io, re-run at W2): 843 doctests, 456 tests, 0 failures
 mix test
 
-# strict — the number that actually means something
-NXV_HOST_FALLBACK=raise mix test     # 843/456/0, 910 excluded
+# strict — did the work stay on the GPU?
+sh scripts/strict_test.sh            # 843/456/0, 591 excluded
+
+# the number that actually means something
+sh scripts/doctest_residency.sh      # 319 / 843 (37.8%)
 
 # confirm the real GPU, not llvmpipe, before believing any perf figure
 Nx.Vulkan.NativeV.device_name()      #=> {:ok, "NVIDIA GeForce RTX 3060 Ti", "DiscreteGpu"}
@@ -204,9 +220,11 @@ Nx.Vulkan.NativeV.device_name()      #=> {:ok, "NVIDIA GeForce RTX 3060 Ti", "Di
 **Residency is not correctness, and a value assertion cannot see the
 difference** — the host fallback *is* `Nx.BinaryBackend`, the reference every
 test compares against, so a refused GPU gate returns a bit-identical result.
-Count fallbacks (`Nx.Vulkan.Fallback.count/1`); it is the only signal. And the
-count is a **lower bound**: once a tensor lands on `BinaryBackend`, everything
-downstream computes there unrecorded.
+Count fallbacks (`Nx.Vulkan.Fallback.count/1`), or refuse them
+(`NXV_HOST_FALLBACK=raise`); those are the only signals. And the count is a
+**lower bound**: once a tensor lands on `BinaryBackend`, everything downstream
+computes there unrecorded — which is why the ratchet *raises* on the first
+refused op rather than tallying at the end.
 
 **Validate perf heuristics across the fleet, never on one box.** Win/loss
 crossovers here are hardware-specific — the many-slot fused reduce wins ~4.4× on

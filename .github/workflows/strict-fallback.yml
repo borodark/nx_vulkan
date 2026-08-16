@@ -56,13 +56,25 @@ jobs:
       - name: Suite (strict) — did the work stay on the GPU?
         run: sh scripts/strict_test.sh
 
+      - name: Residency rate — how much of Nx actually runs on the GPU?
+        # The mid-flight number, and the acceptance test for every coverage
+        # item in MISSION.md §3. `mix test` says the answers are right and the
+        # step above says nothing regressed; this one says how far along we
+        # are. It fails if the register in test/nx_doctest_register.exs
+        # disagrees with reality in EITHER direction — a new fallback, or an
+        # entry that has quietly become unnecessary and is dragging the
+        # reported rate below the truth.
+        run: sh scripts/doctest_residency.sh
+
       - name: Exemptions are enumerated, not accumulated
-        # Both exclusions are grep-able by design. Printing them in the log
-        # makes an allowlist that quietly grew visible in the job output, which
-        # is the failure mode this whole feature exists to prevent.
+        # Every exemption is grep-able by design. Printing them in the log makes
+        # an allowlist that quietly grew visible in the job output, which is the
+        # failure mode this whole feature exists to prevent.
         if: always()
         run: |
           echo "--- @allowlist (lib/nx_vulkan/fallback.ex) ---"
           mix run -e 'Enum.each(Nx.Vulkan.Fallback.allowlist(), fn {op, c, _} -> IO.puts("  #{inspect(op)} #{inspect(c)}") end)'
           echo "--- tests excluded from the strict run ---"
           grep -rn "host_fallback_expected\|host_fallback_open" test/ || true
+          echo "--- doctest Nx residency register (test/nx_doctest_register.exs) ---"
+          mix run -e 'Code.require_file("test/nx_doctest_register.exs"); alias Nx.Vulkan.NxDoctestRegister, as: R; IO.puts("  #{length(R.all())} ops, #{R.count()} doctests excused"); Enum.each(R.all(), fn {fun, ns} -> IO.puts("  #{fun} (#{length(ns)})") end)'

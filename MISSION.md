@@ -149,11 +149,13 @@ doctest fails unless it is both *correct* and *resident*, and Nx's doctests are
 already the community-standard backend conformance suite, written by people with
 no stake in this backend's gates.
 
-**Measured today, on `main`:**
+**Measured today, on `main`** (this is now `sh scripts/doctest_residency.sh`,
+which prints the rate and checks it; the raw form is kept here because it is
+what the number means):
 
 ```
-NXV_HOST_FALLBACK=raise mix test test/nx_vulkan/nx_doctest_test.exs \
-    --include host_fallback_expected
+NXV_HOST_FALLBACK=raise NXV_DOCTEST_REGISTER=off \
+    mix test test/nx_vulkan/nx_doctest_test.exs
 #=> 843 doctests, 524 failures
 ```
 
@@ -170,34 +172,50 @@ Three properties make it the right ratchet:
   by someone else.
 - **It composes with the existing machinery.** `sh scripts/strict_test.sh` and
   `.github/workflows/strict-fallback.yml` already exist (T3) and already have
-  the enforcement primitive. What is missing is only that `nx_doctest_test.exs`
-  carries `@moduletag :host_fallback_expected`, which excludes it.
-- **It exposes how narrow today's ratchet is.** The green strict run reports
-  `843 doctests, 456 tests, 0 failures, **912 excluded**` — i.e. roughly 387 of
-  1,299 assertions actually run under `:raise`, and the excluded majority is
-  exactly the integer-typed surface with the largest gap. A ratchet that
-  excludes the gap is not a ratchet.
+  the enforcement primitive.
+- **It exposed how narrow the ratchet was.** Before W2 the green strict run
+  reported `843 doctests, 456 tests, 0 failures, **910 excluded**` — roughly 389
+  of 1,299 assertions actually running under `:raise`, with the excluded
+  majority being exactly the integer-typed surface where the gap is. A ratchet
+  that excludes the gap is not a ratchet. It now reports **591 excluded**: the
+  319 resident doctests moved into the run.
 
-### 2.3 The proposed definition of done
+### 2.3 The definition of done — **DONE**, `main` @ W2
 
 **Complete** = `sh scripts/strict_test.sh` is green *with `doctest Nx` no longer
 excluded*, and every remaining exclusion is one line naming one op with a
-reason.
+reason. That is now the state of the tree. The three artefacts:
 
-That is a real finish line, reachable, and it decomposes: each of the 524
-failures is a named op at a named dtype. It also comes with a mid-flight number
-(the residency rate) that a future session can quote without re-deriving
-anything.
+1. **`@moduletag :host_fallback_expected` on `nx_doctest_test.exs` is retired.**
+   In its place, `test/nx_doctest_register.exs` names all 524 doctests that
+   still leave the GPU, as 140 `{"Nx.fun/arity", [ordinals]}` lines in four
+   reason-bucketed lists: `@integer_dtype` (409 — W5 retires it wholesale),
+   `@f64_transcendental` (37 — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`),
+   `@complex_and_fft` (45), `@float_residency_gap` (33 — the interesting ones,
+   float ops on a float backend that still left the device; read this bucket
+   before picking up W1 or W8).
 
-Concretely, three artefacts:
+   **One departure from the plan as written above.** It says "in exactly the
+   shape the file already uses for `@rounding` / `@unsupported` / `@backlog`",
+   i.e. `doctest :except`. That option is *function*-granularity: excepting the
+   121 functions involved would also have dropped 154 doctests that are resident
+   today — `add/2` has both `{:s, 32}` and `{:f, 32}` examples — and the run
+   would have reported 165/843 instead of 319/843. So the register keys on
+   ExUnit `:test`-name filters instead, which are per-doctest. The cost is that
+   the ordinals renumber if the `:except` buckets or the `nx` dep change; that
+   breaks loudly and the script prints the replacement list.
 
-1. **`@moduletag :host_fallback_expected` on `nx_doctest_test.exs` is retired**
-   in favour of a per-doctest except list, in exactly the shape the file already
-   uses for `@rounding` / `@unsupported` / `@backlog` — each bucket carrying its
-   reason. The list shrinks; it is a diff, so it is reviewable.
-2. **A residency rate recorded in CI**, printed by the same job. One number,
-   monotone by policy, and a regression is a red build rather than an
-   archaeology exercise.
+   A second consequence, and an improvement: register entries still **run** and
+   still assert their values in the normal `mix test`. Only the residency claim
+   is waived. An `:except` entry stops executing altogether, so correctness
+   coverage would have dropped by 524 doctests. Prefer the register.
+
+2. **A residency rate recorded in CI**, printed by the same job:
+   `sh scripts/doctest_residency.sh` → `319 / 843 (37.8%)`. It fails in both
+   directions — a doctest not in the register that falls back is a regression, a
+   doctest in the register that no longer falls back is a stale entry
+   understating the rate — and prints the exact doctest names either way, so the
+   repair is a paste. That is what makes the number monotone by policy.
 3. **`Nx.Vulkan.Fallback`'s allowlist stays the decision register** — 8 op
    entries plus 9 `{:block, Nx.Block.*}` entries today
    (`lib/nx_vulkan/fallback.ex:250-312`). Its length is the count of things this
@@ -480,7 +498,7 @@ preference. Re-litigating one requires new evidence, not a new opinion.
 | # | work | value | effort | why it is where it is |
 |---|---|---|---|---|
 | **W1** | **Word-generic `transpose_nd` / `reverse_nd` / `broadcast_nd`** (§3.1a) | high | low | ~12 measured cells, one pattern that already exists four times in this tree (`slice`/`pad`/`put_slice`/`gather`), collapses 6 shader files to 3, and closes middle-axis u8 `sum` as a side effect. The best ratio available |
-| **W2** | **Turn the strict ratchet on `doctest Nx`** (§2.3) | high | low | makes every other item measurable. Today's baseline is 319/843; the work is retiring one `@moduletag` in favour of an except list and printing the rate in CI |
+| ~~**W2**~~ | ~~**Turn the strict ratchet on `doctest Nx`** (§2.3)~~ **DONE** — `@moduletag` retired, `test/nx_doctest_register.exs` names the 524, `scripts/doctest_residency.sh` prints **319/843 (37.8%)** in CI and fails in both directions | high | low | **every other item is now measurable.** Run the script before and after your change; if the rate did not move, the op did not reach the device |
 | **W3** | **Fix or file `Nx.LinAlg.solve/2`'s `ArithmeticError`** (§3.3.3) | high | low | a shipped backend raises on a documented-as-supported op. Scholar goes through it. It has been known since T13 and unfiled |
 | **W4** | **Decide the twelve `Nx.Block.*`** (§3.3.2) | high | low–medium | mostly allowlist lines with reasons; `Take`/`TakeAlongAxis` likely route to the existing `gather` shader and `LogicalNot` to a compare. Converts twelve accidents into decisions |
 | **W5** | **Integer elementwise / compare / select / reduce kernels** (§3.1b) | high | medium | the bulk of the 524 strict doctest failures. Mechanical against the f32 templates; exact bit-equality test. Do W7 first if it blocks |
@@ -493,8 +511,12 @@ preference. Re-litigating one requires new evidence, not a new opinion.
 | **W12** | **Rank-5+ remap and rank-5+ broadcasting binary** | low | low | mechanical, and no workload in four months has produced one. Leave demand-driven |
 | **W13** | **Upstream: `Nx.Helpers.check_grads!` into `Nx.Testing`; file the XLA gradient tiling bug** (old T5/T6) | low here, high elsewhere | low | neither changes this backend. Both are recorded in `PLAN_AFTER_BACKWARD_PASS.md` with reproducers; do them when blocked on something else |
 
-**Sequencing note.** W2 before W1 and W5, because W2 is what tells you whether
-W1 and W5 worked. The residency rate is the acceptance test for the whole of §3.
+**Sequencing note.** W2 came before W1 and W5, because W2 is what tells you
+whether W1 and W5 worked. That gate is now open: the residency rate is the
+acceptance test for the whole of §3, and W1 and W5 each have their acceptance
+criterion already written down as a bucket in `test/nx_doctest_register.exs` —
+W5 is "`@integer_dtype` empties, 409 doctests", W1 and W8 are lines in
+`@float_residency_gap`. Next by ranking: **W1**.
 
 ---
 
@@ -517,12 +539,14 @@ the doctest compares `inspect` strings. **Expect this to keep happening**; the
 bucket in `test/nx_vulkan/nx_doctest_test.exs` is the place to watch, and
 excepting a function drops *all* of its doctests, not just the one that drifted.
 
-**The strict run is the one that matters** for anything in §3. It excludes 912
-assertions via `:host_fallback_expected` (the fallback-parity modules and
-`doctest Nx`) and `:host_fallback_open` (tracked debt — two tags in
-`grad_test.exs`, both **stale**, see §9.9). Neither tag skips anything in a
-normal `mix test`. If your change adds a `:host_fallback_open` tag, that is a
-visible line in a diff — which is the point.
+**The strict run is the one that matters** for anything in §3. It now excludes
+591 assertions: 524 via `test/nx_doctest_register.exs` (the doctests that still
+leave the GPU, each named with a reason — §2.3) and 67 via
+`:host_fallback_expected` (the fallback-parity modules and a scatter of
+individual cases) and `:host_fallback_open` (tracked debt — two tags in
+`grad_test.exs`, both **stale**, see §9.9). None of them skips anything in a
+normal `mix test`. If your change adds a `:host_fallback_open` tag or a register
+line, that is a visible line in a diff — which is the point.
 
 **Residency, per op:**
 

@@ -15,25 +15,33 @@
 # fires on the FIRST refused op, before the tensor leaves the device, so a red
 # strict run names the cause.
 #
-# TWO EXCLUSIONS, both enumerated in the tree (`grep -rn` them):
+# TWO TAGS AND ONE REGISTER, all enumerated in the tree (`grep -rn` them):
 #
 #   :host_fallback_expected — the test's SUBJECT is the fallback path. It
 #       asserts a host fallback returns the right answer, so refusing fallbacks
-#       there is a category error. Covers the two fallback-parity modules and
-#       `doctest Nx` (upstream's own examples, written in {:s, 32} across the
-#       whole Nx API — an API-completeness suite, not a residency one).
+#       there is a category error. Covers the two fallback-parity modules and a
+#       scatter of individual cases in cast/fft/pad/slice/gather/conv/select.
 #
 #   :host_fallback_open — a REAL fallback nobody knew about until strict mode
 #       found it, tracked and not waived. Every one of these is debt with a
 #       plan item. Adding a tag is a visible line in a diff; that is the point.
 #
-# Neither tag skips anything in the normal `mix test` run.
+#   test/nx_doctest_register.exs — `doctest Nx` USED to be under the first tag,
+#       843 doctests behind one line. It is not any more (W2). The register
+#       names the 524 that still leave the GPU, one line per op with a reason,
+#       and test_helper.exs applies it only when fallbacks are being refused.
+#       The other 319 run here like everything else. `sh
+#       scripts/doctest_residency.sh` prints the rate and checks the register
+#       against reality in both directions.
+#
+# None of the three skips anything in the normal `mix test` run.
 
 set -eu
 
 echo "==> mix test with host_fallback: :raise"
 echo "    excluding :host_fallback_expected (fallback is the test's subject)"
 echo "    excluding :host_fallback_open (tracked, open — see PLAN_AFTER_BACKWARD_PASS.md T12)"
+echo "    doctest Nx is IN, minus test/nx_doctest_register.exs (319 of 843 resident)"
 echo
 
 NXV_HOST_FALLBACK=raise exec mix test \

@@ -11,16 +11,23 @@ defmodule Nx.Vulkan.NxDoctestTest do
   f64-real backend does not represent). `@backlog` are REAL bugs the conformance
   run found that are tracked in ROADMAP_NEXT_BEST_NX.md (thrust 0) — excepted to
   keep the suite green, NOT waived.
+
+  ## This module is in the strict run (W2)
+
+  It used to carry `@moduletag :host_fallback_expected` and so was skipped
+  entirely by `scripts/strict_test.sh`. That tag is retired. All 843 doctests
+  below now run under `NXV_HOST_FALLBACK=raise` except the ones named in
+  `Nx.Vulkan.NxDoctestRegister` (`test/nx_doctest_register.exs`), which is where
+  the reasons live and which `test_helper.exs` applies. Baseline: **319 of 843
+  (37.8%) resident**. `sh scripts/doctest_residency.sh` prints it and fails if it
+  moves in either direction.
+
+  Anything excepted *here* is excepted from both runs and never executes at all;
+  anything in the register still runs and still asserts its value. Prefer the
+  register: an op that computes the right answer on the host is a residency
+  problem, not a correctness one, and the two should not share an off switch.
   """
   use ExUnit.Case, async: false
-
-  # Excluded from the strict-fallback run (scripts/strict_test.sh). Nx's own
-  # doctests are an API-COMPLETENESS suite: they are written in {:s, 32} integer
-  # tensors and cover the whole Nx surface — bitwise, trig, sort, concatenate,
-  # indexed_put — including everything this backend documents as f32/f64-only.
-  # Asserting residency over them would assert a capability the backend has
-  # never claimed. Correctness over them is asserted here, in the normal run.
-  @moduletag :host_fallback_expected
 
   setup do
     Nx.default_backend(Nx.Vulkan.VulkanoBackend)
@@ -71,8 +78,7 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # Dtypes the f64-real, byte-addressed backend does not represent: complex
   # (skip set), f8 special values (e.g. :infinity in :f8_e4m3fn), and sub-byte
   # types (u2/u4/s4 — a non-byte-aligned bitstring can't upload to a GPU buffer).
-  @unsupported [complex: 2, real: 1, imag: 1, conjugate: 1, phase: 1,
-                tensor: 2, bit_size: 1]
+  @unsupported [complex: 2, real: 1, imag: 1, conjugate: 1, phase: 1, tensor: 2, bit_size: 1]
 
   # REAL bugs still open — tracked in ROADMAP thrust 0, not waived. These three
   # share one systemic root: Nx composes them (dynamic-index slice,

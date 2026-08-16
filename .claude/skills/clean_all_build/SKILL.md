@@ -123,8 +123,9 @@ roughly two minutes on super-io, longer on the Keplers.
 ## 5. Afterwards
 
 ```sh
-mix test                                # nx_vulkan @ 40d3137: 843 doctests, 456 tests, 0 failures
-NXV_HOST_FALLBACK=raise mix test        # strict: 843/456/0, 910 excluded
+mix test                                # nx_vulkan @ W2: 843 doctests, 456 tests, 0 failures
+sh scripts/strict_test.sh               # strict: 843/456/0, 591 excluded
+sh scripts/doctest_residency.sh         # residency: 319 / 843 (37.8%)
 ```
 
 If `git status --short priv/shaders/` shows a modified `.spv` you did not

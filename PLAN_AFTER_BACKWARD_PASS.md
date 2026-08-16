@@ -181,10 +181,16 @@ at rank ≥ 5** so a rank-4 fallback still raises.
 
 **Corrected in the process:** the suite is green under `:raise` with two
 enumerated, greppable exclusions — `:host_fallback_expected` (tests whose
-subject *is* the fallback path, incl. `doctest Nx`, which is an
-API-completeness suite over `{:s, 32}` and not a residency one) and
-`:host_fallback_open` (the two `grad_test.exs` cases blocked on T12). Neither
-is skipped by a normal `mix test`.
+subject *is* the fallback path) and `:host_fallback_open` (the two
+`grad_test.exs` cases blocked on T12). Neither is skipped by a normal
+`mix test`.
+
+**Superseded since (W2):** `doctest Nx` was in that first bucket too, on the
+argument that it is an API-completeness suite over `{:s, 32}` rather than a
+residency one. That was one tag standing in for 843 unmeasured decisions. It is
+retired; `test/nx_doctest_register.exs` now names the 524 doctests that
+actually fall back, and the other 319 run under `:raise` like everything else.
+See MISSION.md §2.3.
 
 ---
 
