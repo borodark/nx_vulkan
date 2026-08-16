@@ -1,0 +1,31 @@
+#version 450
+// Widen u8 -> f32 on the GPU. n = element count.
+//
+// T12. The compare shaders produce a {:u, 8} mask on-device, which was the
+// point — but until this existed `select/4` was the ONLY op that could consume
+// one. `coerce_to/2` had no u8 entry, so multiply, sum and as_type on a mask
+// all host-fell-back, dragging a tensor-sized payload with them.
+//
+// Nx.Defn.Grad routes reduce_max's gradient through exactly that mask, so
+// softmax's backward pass left the GPU every time it ran. Nothing detected it:
+// the values are bit-identical, and the mask stays a mask, so only a fallback
+// census could see it. Instance nine of the gate/coverage class in
+// docs/BACKWARD_PASS_AUDIT.md.
+//
+// Storage: a u8 tensor is packed one byte per element and read here as u32
+// words (the same trick select_f32.comp uses for `pred`), so element i lives in
+// byte i%4 of word i/4. The buffer is allocated padded to a 4-byte multiple;
+// robust_buffer_access makes a read past the tail return 0, which is harmless
+// because only the valid byte of each word is ever extracted.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { float outp[]; };
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+    uint word = inp[i >> 2u];
+    uint b = (word >> ((i & 3u) * 8u)) & 0xFFu;
+    outp[i] = float(b);
+}

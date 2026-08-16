@@ -750,9 +750,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @reduce_axis_f64_spv Path.expand("../../priv/shaders/reduce_axis_f64.spv", __DIR__)
   @reduce_axis_f32_spv Path.expand("../../priv/shaders/reduce_axis_f32.spv", __DIR__)
 
-  defp reduce_spv({:f, 64}), do: @reduce_axis_f64_spv
-  defp reduce_spv({:f, 32}), do: @reduce_axis_f32_spv
-  defp reduce_spv(_), do: nil
+  # T12. Keyed on the (input, output) PAIR, not one type, because the one case
+  # that is not type-preserving is the one that mattered: Nx types the sum of a
+  # {:u, 8} tensor as {:u, 32}, and Nx.Defn.Grad's reduce_max rule counts tied
+  # maxima by summing exactly such a mask. With no entry here that sum stranded
+  # the tensor on the host and took softmax's whole backward pass with it.
+  @reduce_axis_u8_to_u32_spv Path.expand("../../priv/shaders/reduce_axis_u8_to_u32.spv", __DIR__)
+
+  defp reduce_spv({:f, 64}, {:f, 64}), do: @reduce_axis_f64_spv
+  defp reduce_spv({:f, 32}, {:f, 32}), do: @reduce_axis_f32_spv
+  defp reduce_spv({:u, 8}, {:u, 32}), do: @reduce_axis_u8_to_u32_spv
+  defp reduce_spv(_from, _to), do: nil
 
   @impl true
   def sum(out, t, opts), do: do_reduce(out, t, opts, 0)
@@ -775,10 +783,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
        ) do
     axes = Keyword.get(opts, :axes) || all_axes(in_shape)
 
-    spv = reduce_spv(type)
+    spv = reduce_spv(tensor.type, type)
 
     fast_path =
-      spv != nil and tensor.type == type and
+      spv != nil and
         match?(%__MODULE__{}, tensor.data) and
         match?({:ok, _}, classify_reduce_axes(in_shape, axes))
 
@@ -803,6 +811,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
       # it a trailing-suffix reduce, which the existing kernel already does —
       # the same normalise-then-dispatch move conv and dot use, and cheap now
       # that transpose is on the GPU for rank <= 4.
+      # Type-preserving only: this branch transposes before reducing, and
+      # transpose_nd has no u8 path, so routing a mask through here would trade
+      # one fallback for another.
       spv != nil and tensor.type == type and match?(%__MODULE__{}, tensor.data) and
         tuple_size(in_shape) <= 4 ->
         reduce_via_transpose(out, tensor, axes, op_code, spv)
@@ -1011,10 +1022,25 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @cast_s32_to_f32_spv Path.expand("../../priv/shaders/cast_s32_to_f32.spv", __DIR__)
   @cast_s32_to_f64_spv Path.expand("../../priv/shaders/cast_s32_to_f64.spv", __DIR__)
 
+  # T12. A GPU-produced {:u, 8} mask (compare output, select pred) was
+  # consumable by select/4 and nothing else: multiply, sum and as_type on one
+  # all host-fell-back for want of these two entries. Nx.Defn.Grad routes
+  # reduce_max's gradient through that mask, so softmax's backward pass left
+  # the GPU on a tensor-sized payload every time, undetected — the values are
+  # bit-identical and only a fallback census could see it.
+  @cast_u8_to_f32_spv Path.expand("../../priv/shaders/cast_u8_to_f32.spv", __DIR__)
+  @cast_u8_to_f64_spv Path.expand("../../priv/shaders/cast_u8_to_f64.spv", __DIR__)
+  @cast_u32_to_f32_spv Path.expand("../../priv/shaders/cast_u32_to_f32.spv", __DIR__)
+  @cast_u32_to_f64_spv Path.expand("../../priv/shaders/cast_u32_to_f64.spv", __DIR__)
+
   defp cast_spv({:f, 32}, {:f, 64}), do: @cast_f32_to_f64_spv
   defp cast_spv({:f, 64}, {:f, 32}), do: @cast_f64_to_f32_spv
   defp cast_spv({:s, 32}, {:f, 32}), do: @cast_s32_to_f32_spv
   defp cast_spv({:s, 32}, {:f, 64}), do: @cast_s32_to_f64_spv
+  defp cast_spv({:u, 8}, {:f, 32}), do: @cast_u8_to_f32_spv
+  defp cast_spv({:u, 8}, {:f, 64}), do: @cast_u8_to_f64_spv
+  defp cast_spv({:u, 32}, {:f, 32}), do: @cast_u32_to_f32_spv
+  defp cast_spv({:u, 32}, {:f, 64}), do: @cast_u32_to_f64_spv
   defp cast_spv(_from, _to), do: nil
 
   # Coerce an on-GPU tensor to `to` type via the f32<->f64 cast shader so

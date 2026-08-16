@@ -1,0 +1,72 @@
+#version 450
+
+// u8 axis reduction to a 32-bit integer slot. Same (outer, reduce_size, inner)
+// virtual shape and the same (outer, reduce_size, inner, op) push layout as
+// reduce_axis_f32/f64; one invocation per output slot. op: 0=sum, 1=max, 2=min.
+//
+// T12, second half. Casting u8 -> f32 unstuck `multiply` and `as_type` on a
+// comparison mask, but not `sum`: Nx types the sum of a {:u, 8} tensor as
+// {:u, 32}, so the OUTPUT is integer and no amount of input casting reaches it.
+// That mattered because Nx.Defn.Grad's reduce_max rule counts tied maxima by
+// summing exactly this mask — so softmax's backward pass still left the GPU
+// there, and everything downstream of it (the divide by that count) went with
+// it. Fixing the cast alone moved the census from {multiply, sum} to
+// {divide, sum}: same total, because `sum` was always the one stranding the
+// tensor.
+//
+// Accumulating in `uint` is exact here and needs no f64: every input byte is
+// 0..255 and the result is declared 32-bit, so a sum can only overflow if the
+// reduced axis is longer than 2^24 elements, which the dispatch geometry
+// (65535 workgroups x 256) cannot reach for a single slot in one pass.
+//
+// Storage: a u8 tensor is packed one byte per element and read as u32 words —
+// element i is byte i%4 of word i/4, the same trick select_f32.comp uses for
+// `pred`. The buffer is padded to a 4-byte multiple and robust_buffer_access
+// makes a read past the tail return 0, which is harmless because only the
+// valid byte of each word is extracted.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} p;
+
+uint byte_at(uint i) {
+    return (a[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint slots = p.outer * p.inner;
+    if (gid >= slots) return;
+
+    uint outr = gid / p.inner;
+    uint inr = gid % p.inner;
+    uint base = outr * p.reduce_size * p.inner + inr;
+
+    if (p.op == 0u) {
+        uint acc = 0u;
+        for (uint r = 0u; r < p.reduce_size; ++r) {
+            acc += byte_at(base + r * p.inner);
+        }
+        o[gid] = acc;
+    } else if (p.op == 1u) {
+        uint acc = byte_at(base);
+        for (uint r = 1u; r < p.reduce_size; ++r) {
+            acc = max(acc, byte_at(base + r * p.inner));
+        }
+        o[gid] = acc;
+    } else {
+        uint acc = byte_at(base);
+        for (uint r = 1u; r < p.reduce_size; ++r) {
+            acc = min(acc, byte_at(base + r * p.inner));
+        }
+        o[gid] = acc;
+    }
+}

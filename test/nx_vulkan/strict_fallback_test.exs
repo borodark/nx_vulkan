@@ -273,14 +273,21 @@ defmodule Nx.Vulkan.StrictFallbackTest do
       # sum/reduce_max/reduce_min share reduce_op_host_fallback/4; the
       # __CALLER__.function capture blamed the helper, so a refusal said
       # `reduce_op_host_fallback/4` and named no Nx op at all.
+      #
+      # This used to reduce a u8 mask with `sum`, which T12 has since made
+      # native (reduce_axis_u8_to_u32). The pin broke because the fix worked —
+      # which is the point of pinning at an exact value rather than "> 0".
+      # `reduce_max` on a mask is still a host reduce: Nx keeps its output at
+      # {:u, 8}, which would need a byte-packed writer rather than a word one.
       mask = Nx.greater(t({4, 5}), 0.0)
 
       {_r, counts} =
         Fallback.count(fn ->
-          Fallback.strict(:allow, fn -> Nx.sum(mask, axes: [1]) end)
+          Fallback.strict(:allow, fn -> Nx.reduce_max(mask, axes: [1]) end)
         end)
 
-      assert counts == %{{:sum, 3} => 1}
+      assert counts == %{{:reduce_max, 3} => 1},
+             "expected the reduction to name itself, got #{inspect(counts)}"
     end
   end
 end

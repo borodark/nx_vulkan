@@ -591,7 +591,116 @@ defmodule Nx.Vulkan.FallbackTest do
     end
   end
 
+  describe "u8 comparison masks — T12" do
+    test "a GPU-produced u8 mask is consumable — not just by select/4" do
+      # T12. The compare shaders produce a {:u, 8} mask on-device, which was the
+      # point, but select/4 was the only op that could take one back: multiply,
+      # sum and as_type on a mask all host-fell-back for want of a cast.
+      x = Nx.tensor([[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], type: {:f, 32}, backend: VulkanoBackend)
+      mask = fn -> Nx.equal(x, Nx.reduce_max(x, axes: [1], keep_axes: true)) end
+
+      assert Nx.type(mask.()) == {:u, 8}
+
+      assert Fallback.count_total(fn -> Nx.select(mask.(), x, x) end) == 0
+      assert Fallback.count_total(fn -> Nx.multiply(mask.(), x) end) == 0
+      assert Fallback.count_total(fn -> Nx.as_type(mask.(), {:f, 32}) end) == 0
+      # sum of a u8 is typed {:u, 32} by Nx, so this one needed a reduce whose
+      # input and output types differ — not a cast.
+      assert Nx.type(Nx.sum(mask.())) == {:u, 32}
+      assert Fallback.count_total(fn -> Nx.sum(mask.()) end) == 0
+    end
+
+    test "u8 mask consumption matches BinaryBackend exactly" do
+      l = [[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]]
+
+      for {label, f} <- [
+            {"multiply", fn b -> m = b |> mask_of() ; Nx.multiply(m, tf32(l, b)) end},
+            {"sum", fn b -> Nx.sum(mask_of(b)) end},
+            {"sum axis", fn b -> Nx.sum(mask_of(b), axes: [1]) end},
+            {"as_type", fn b -> Nx.as_type(mask_of(b), {:f, 32}) end}
+          ] do
+        gpu = f.(VulkanoBackend) |> Nx.backend_transfer(Nx.BinaryBackend)
+        host = f.(Nx.BinaryBackend)
+        assert Nx.to_binary(gpu) == Nx.to_binary(host), "#{label} diverged from the host"
+      end
+    end
+
+    test "softmax's backward pass no longer leaves the GPU" do
+      # This is what T12 was for. Nx.Defn.Grad's reduce_max rule builds a u8
+      # tie mask, sums it to count ties, and divides by that count — three ops
+      # on a mask, none of which had a GPU path. The values were bit-identical
+      # throughout, so only a census could ever have seen it.
+      softmax = fn t ->
+        e = Nx.exp(Nx.subtract(t, Nx.reduce_max(t, axes: [1], keep_axes: true)))
+        Nx.divide(e, Nx.sum(e, axes: [1], keep_axes: true))
+      end
+
+      grad_fn = fn x -> Nx.Defn.grad(x, &Nx.sum(softmax.(&1))) end
+
+      for l <- [[[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], [[5.0, 5.0, 2.0], [3.0, 3.0, 3.0]]] do
+        assert Fallback.count_total(fn ->
+                 Nx.Defn.jit_apply(grad_fn, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
+               end) == 0
+
+        gpu =
+          Nx.Defn.jit_apply(grad_fn, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
+          |> Nx.backend_transfer(Nx.BinaryBackend)
+
+        host = Nx.Defn.jit_apply(grad_fn, [tf32(l, Nx.BinaryBackend)], compiler: Nx.Defn.Evaluator)
+        assert Nx.to_binary(gpu) == Nx.to_binary(host)
+      end
+    end
+
+    test "reduce_max's gradient splits across TIES on the GPU, exactly" do
+      # Ties are the case random data never produces and the whole reason the
+      # mask exists — with one maximum the gradient is a one-hot and any
+      # half-correct implementation passes.
+      f = fn x -> Nx.Defn.grad(x, &Nx.sum(Nx.reduce_max(&1, axes: [1]))) end
+
+      for {l, expected} <- [
+            {[[1.0, 5.0, 2.0]], [0.0, 1.0, 0.0]},
+            {[[5.0, 5.0, 2.0]], [0.5, 0.5, 0.0]},
+            {[[7.0, 7.0, 7.0]], [1 / 3, 1 / 3, 1 / 3]}
+          ] do
+        assert Fallback.count_total(fn ->
+                 Nx.Defn.jit_apply(f, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
+               end) == 0
+
+        gpu =
+          Nx.Defn.jit_apply(f, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
+          |> Nx.backend_transfer(Nx.BinaryBackend)
+
+        host = Nx.Defn.jit_apply(f, [tf32(l, Nx.BinaryBackend)], compiler: Nx.Defn.Evaluator)
+
+        assert Nx.to_binary(gpu) == Nx.to_binary(host)
+        assert Nx.to_flat_list(gpu) == Nx.to_flat_list(Nx.tensor(expected, type: {:f, 32}))
+      end
+    end
+  end
+
   describe "known fallbacks — pinned so promoting one is noticed" do
+    @tag :host_fallback_expected
+    test "u8 reduce_max/reduce_min still fall back — Nx types those {:u, 8}" do
+      # sum of a u8 is {:u, 32} and reduce_axis_u8_to_u32 handles it. max/min
+      # keep the {:u, 8} output type, which would need a byte-PACKED writer
+      # rather than a word one. No workload has asked; the host path is right.
+      m = mask_of(VulkanoBackend)
+      assert Nx.type(Nx.reduce_max(m)) == {:u, 8}
+      assert Fallback.count_total(fn -> Nx.reduce_max(m) end) > 0
+      assert Fallback.count_total(fn -> Nx.reduce_min(m) end) > 0
+    end
+
+    @tag :host_fallback_expected
+    test "a MIDDLE-axis u8 sum still falls back" do
+      # The middle-axis case rotates kept axes to the front and reduces the
+      # trailing block — but that rotation is a transpose, and transpose_nd has
+      # no u8 path, so routing a mask through it would trade one fallback for
+      # another. Deliberately excluded; trailing/leading-axis u8 sums are native.
+      i = Nx.iota({2, 3, 4}, type: {:f, 32}, backend: VulkanoBackend)
+      m = Nx.greater(i, Nx.tensor(2.0, type: {:f, 32}, backend: VulkanoBackend))
+      assert Fallback.count_total(fn -> Nx.sum(m, axes: [1]) end) > 0
+    end
+
     test "OVERLAPPING pooling backward still falls back" do
       # One thread per input element is what avoids float atomics, and that
       # only holds when windows do not overlap. stride < window would need
@@ -672,4 +781,11 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.sort(x) end) > 0
     end
   end
+  defp tf32(l, backend), do: Nx.tensor(l, type: {:f, 32}, backend: backend)
+
+  defp mask_of(backend) do
+    x = tf32([[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], backend)
+    Nx.equal(x, Nx.reduce_max(x, axes: [1], keep_axes: true))
+  end
+
 end
