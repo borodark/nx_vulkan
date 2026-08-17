@@ -138,8 +138,10 @@ defmodule Nx.Vulkan.FallbackTest do
             {Nx.greater(x, zero), Nx.greater(xh, zh)}
           ] do
         d =
-          Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend) |> Nx.as_type({:f, 64}),
-            Nx.as_type(want, {:f, 64}))
+          Nx.subtract(
+            Nx.backend_copy(got, Nx.BinaryBackend) |> Nx.as_type({:f, 64}),
+            Nx.as_type(want, {:f, 64})
+          )
           |> Nx.abs()
           |> Nx.reduce_max()
           |> Nx.to_number()
@@ -223,11 +225,19 @@ defmodule Nx.Vulkan.FallbackTest do
     end
 
     test "middle-axis reduce matches BinaryBackend" do
-      for {shape, axes} <- [{{8, 4, 6, 6}, [0, 2, 3]}, {{4, 5, 6}, [0, 2]}, {{4, 5, 6, 7}, [1, 3]}] do
+      for {shape, axes} <- [
+            {{8, 4, 6, 6}, [0, 2, 3]},
+            {{4, 5, 6}, [0, 2]},
+            {{4, 5, 6, 7}, [1, 3]}
+          ] do
         v = t(shape, 2)
         h = Nx.backend_copy(v, Nx.BinaryBackend)
 
-        for {name, f} <- [sum: &Nx.sum/2, reduce_max: &Nx.reduce_max/2, reduce_min: &Nx.reduce_min/2] do
+        for {name, f} <- [
+              sum: &Nx.sum/2,
+              reduce_max: &Nx.reduce_max/2,
+              reduce_min: &Nx.reduce_min/2
+            ] do
           d =
             Nx.subtract(
               f.(v, axes: axes) |> Nx.backend_copy(Nx.BinaryBackend),
@@ -257,7 +267,9 @@ defmodule Nx.Vulkan.FallbackTest do
       # been blocked by an integer literal, so the test must use the untidy
       # value the real caller does.
       iv = Nx.tensor(0, backend: VulkanoBackend)
-      assert Fallback.count_total(fn -> Nx.window_scatter_max(x, src, iv, w, strides: st) end) == 0
+
+      assert Fallback.count_total(fn -> Nx.window_scatter_max(x, src, iv, w, strides: st) end) ==
+               0
 
       # Correctness is checked against the SOURCE, not against BinaryBackend.
       #
@@ -291,7 +303,10 @@ defmodule Nx.Vulkan.FallbackTest do
       # shader scans with `>=`. With `>` this passes on random data and is
       # wrong wherever values repeat — and a relu's output is full of exact
       # ties at zero.
-      for {shape, win, st} <- [{{2, 3, 6, 6}, {1, 1, 2, 2}, [1, 1, 2, 2]}, {{4, 6}, {2, 3}, [2, 3]}] do
+      for {shape, win, st} <- [
+            {{2, 3, 6, 6}, {1, 1, 2, 2}, [1, 1, 2, 2]},
+            {{4, 6}, {2, 3}, [2, 3]}
+          ] do
         h = Nx.iota(shape, type: {:f, 64}) |> Nx.remainder(3.0)
         wshape = Nx.shape(Nx.window_max(h, win, strides: st))
         src_t = Nx.iota(wshape, type: {:f, 64}) |> Nx.add(1.0)
@@ -360,7 +375,8 @@ defmodule Nx.Vulkan.FallbackTest do
       {_r, counts} =
         Fallback.count(fn -> Nx.Defn.jit_apply(grad, [w, x], compiler: Nx.Defn.Evaluator) end)
 
-      assert counts[{:dot, 7}] == nil, "the dense gradient went back to the host: #{inspect(counts)}"
+      assert counts[{:dot, 7}] == nil,
+             "the dense gradient went back to the host: #{inspect(counts)}"
     end
 
     test "rank-0 compare and select — the scalar support check" do
@@ -383,7 +399,11 @@ defmodule Nx.Vulkan.FallbackTest do
       # the shape a distribution's log_p is actually made of: `x > 0` guarding
       # a computation, with an out-of-support constant on the other branch
       assert Fallback.count_total(fn ->
-               Nx.select(Nx.greater(x, 0), Nx.multiply(x, 2.0), Nx.Constants.neg_infinity({:f, 64}))
+               Nx.select(
+                 Nx.greater(x, 0),
+                 Nx.multiply(x, 2.0),
+                 Nx.Constants.neg_infinity({:f, 64})
+               )
              end) == 0
 
       # f32 too, and a scalar predicate over vector branches
@@ -407,9 +427,13 @@ defmodule Nx.Vulkan.FallbackTest do
                  "#{op}(#{a}, #{b}) #{inspect(type)} diverged"
         end
 
-        got = Nx.select(Nx.greater(g.(a), g.(b)), g.(a), g.(b)) |> Nx.backend_copy(Nx.BinaryBackend)
+        got =
+          Nx.select(Nx.greater(g.(a), g.(b)), g.(a), g.(b)) |> Nx.backend_copy(Nx.BinaryBackend)
+
         want = Nx.select(Nx.greater(h.(a), h.(b)), h.(a), h.(b))
-        assert Nx.to_binary(got) == Nx.to_binary(want), "select(#{a}, #{b}) #{inspect(type)} diverged"
+
+        assert Nx.to_binary(got) == Nx.to_binary(want),
+               "select(#{a}, #{b}) #{inspect(type)} diverged"
       end
     end
 
@@ -437,7 +461,9 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{0, 0, 2}]) end) == 0
       assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{-1, -2, 0}]) end) == 0
       assert Fallback.count_total(fn -> Nx.pad(x, 0.0, [{2, 3, 1}]) end) == 0
-      assert Fallback.count_total(fn -> Nx.pad(t({2, 3}, 1), 0.0, [{1, 1, 0}, {0, 2, 1}]) end) == 0
+
+      assert Fallback.count_total(fn -> Nx.pad(t({2, 3}, 1), 0.0, [{1, 1, 0}, {0, 2, 1}]) end) ==
+               0
 
       assert Fallback.count_total(fn ->
                Nx.pad(t({2, 2, 3, 2}, 1), 0.0, [{0, 1, 0}, {1, 0, 1}, {0, 0, 2}, {1, 1, 0}])
@@ -560,7 +586,10 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Nx.to_binary(Nx.put_slice(v, [1, 1], s) |> Nx.backend_copy(Nx.BinaryBackend)) ==
                Nx.to_binary(Nx.put_slice(vh, [1, 1], sh))
 
-      assert Nx.to_binary(Nx.pad(v, 0.0, [{1, 1, 0}, {0, 2, 1}]) |> Nx.backend_copy(Nx.BinaryBackend)) ==
+      assert Nx.to_binary(
+               Nx.pad(v, 0.0, [{1, 1, 0}, {0, 2, 1}])
+               |> Nx.backend_copy(Nx.BinaryBackend)
+             ) ==
                Nx.to_binary(Nx.pad(vh, 0.0, [{1, 1, 0}, {0, 2, 1}]))
 
       assert Fallback.count_total(fn -> Nx.put_slice(v, [1, 1], s) end) == 0
@@ -614,7 +643,11 @@ defmodule Nx.Vulkan.FallbackTest do
       l = [[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]]
 
       for {label, f} <- [
-            {"multiply", fn b -> m = b |> mask_of() ; Nx.multiply(m, tf32(l, b)) end},
+            {"multiply",
+             fn b ->
+               m = b |> mask_of()
+               Nx.multiply(m, tf32(l, b))
+             end},
             {"sum", fn b -> Nx.sum(mask_of(b)) end},
             {"sum axis", fn b -> Nx.sum(mask_of(b), axes: [1]) end},
             {"as_type", fn b -> Nx.as_type(mask_of(b), {:f, 32}) end}
@@ -639,14 +672,18 @@ defmodule Nx.Vulkan.FallbackTest do
 
       for l <- [[[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], [[5.0, 5.0, 2.0], [3.0, 3.0, 3.0]]] do
         assert Fallback.count_total(fn ->
-                 Nx.Defn.jit_apply(grad_fn, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
+                 Nx.Defn.jit_apply(grad_fn, [tf32(l, VulkanoBackend)],
+                   compiler: Nx.Defn.Evaluator
+                 )
                end) == 0
 
         gpu =
           Nx.Defn.jit_apply(grad_fn, [tf32(l, VulkanoBackend)], compiler: Nx.Defn.Evaluator)
           |> Nx.backend_transfer(Nx.BinaryBackend)
 
-        host = Nx.Defn.jit_apply(grad_fn, [tf32(l, Nx.BinaryBackend)], compiler: Nx.Defn.Evaluator)
+        host =
+          Nx.Defn.jit_apply(grad_fn, [tf32(l, Nx.BinaryBackend)], compiler: Nx.Defn.Evaluator)
+
         assert Nx.to_binary(gpu) == Nx.to_binary(host)
       end
     end
@@ -739,38 +776,43 @@ defmodule Nx.Vulkan.FallbackTest do
     end
 
     @tag :host_fallback_expected
-    test "what an Nx.LinAlg call costs depends on the DEFAULT backend, not the tensor" do
-      # The lower-bound doctrine, demonstrated. nx composes SVD from ordinary
-      # ops. Where their intermediates land decides whether this backend ever
-      # sees them:
+    test "what an Nx.LinAlg call costs no longer depends on the DEFAULT backend" do
+      # This test used to assert the OPPOSITE, and was right to: nx composes SVD
+      # from ordinary ops, and where their intermediates landed decided whether
+      # this backend ever saw them.
       #
-      #   default BinaryBackend -> the composition runs on the host, unseen,
-      #                            and the census reports exactly 1
-      #   default VulkanoBackend -> intermediates come back here one at a time
-      #                            and the census reports hundreds
+      #   default BinaryBackend  -> composition ran on the host, census = 1
+      #   default VulkanoBackend -> intermediates came back here one at a time,
+      #                             census = several hundred
       #
-      # Same call, same input tensor, two orders of magnitude apart. A census
-      # is a statement about a process, not about an op — which is why the
-      # benchmarks in examples/ set the global default explicitly and say so.
+      # Same call, same input tensor, two orders of magnitude apart. W3 closed
+      # that gap: block/4 now wraps the body in with_binary_backend/1, because
+      # transferring the ARGS never governed where the defn body computed — the
+      # evaluator materialises constants and intermediates on the process
+      # default. So the composition stays on the host either way, and the census
+      # is the same number twice.
+      #
+      # This is not only tidier. It is why Nx.LinAlg.lu/1 stopped returning a
+      # wrong matrix for the identity: those hundreds of round trips were the
+      # bug's mechanism, not just its cost. See Nx.Vulkan.LinAlgTest.
       m = Nx.tensor([[4.0, 1.0], [1.0, 3.0]], type: {:f, 64}, backend: VulkanoBackend)
+      expected = %{{:block, Nx.Block.LinAlg.SVD} => 1}
 
       {_r, host_default} = Fallback.count(fn -> Nx.LinAlg.svd(m) end)
-      assert host_default == %{{:block, Nx.Block.LinAlg.SVD} => 1}
+      assert host_default == expected
 
       previous = Nx.default_backend(VulkanoBackend)
 
       try do
         {_r, gpu_default} = Fallback.count(fn -> Nx.LinAlg.svd(m) end)
 
-        assert gpu_default[{:block, Nx.Block.LinAlg.SVD}] == 1
-
-        assert Enum.sum(Map.values(gpu_default)) > 100,
-               "SVD recorded only #{Enum.sum(Map.values(gpu_default))} fallbacks with " <>
-                 "the GPU as default backend — if the composition got cheaper that is " <>
-                 "good news, but re-read it: #{inspect(gpu_default)}"
-
-        # Scholar's linear regression goes through this path.
-        assert gpu_default[{:block, Nx.Block.Take}] > 0
+        # Pinned at equality, not at "small". If this grows again, a block body
+        # has started leaking onto the GPU one intermediate at a time and the
+        # correctness bug W3 fixed is reachable once more.
+        assert gpu_default == expected,
+               "an Nx.LinAlg call recorded #{inspect(gpu_default)} with the GPU as " <>
+                 "default backend, but #{inspect(expected)} with the host as default. " <>
+                 "block/4 is leaking the default backend into the defn body again."
       after
         Nx.default_backend(previous)
       end
@@ -781,11 +823,11 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.sort(x) end) > 0
     end
   end
+
   defp tf32(l, backend), do: Nx.tensor(l, type: {:f, 32}, backend: backend)
 
   defp mask_of(backend) do
     x = tf32([[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], backend)
     Nx.equal(x, Nx.reduce_max(x, axes: [1], keep_axes: true))
   end
-
 end
