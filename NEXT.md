@@ -1,10 +1,11 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-16, against `main` @ `a930157`, after **W4 landed** on
+**Refreshed:** 2026-08-17, against `main` @ `73c57f0`, with **W4 merged** on
 top of W2/W1/W3. The ranking is unchanged; the super-io re-verification is
-closed, the leapfrog ownership question is settled, and W4's census surfaced a
-work item the ranking never had — a `concatenate` shader.
+closed, the leapfrog ownership question is settled *and fixed downstream*, and
+W4's census surfaced a work item the ranking never had — a `concatenate`
+shader, now the next item in flight.
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -28,15 +29,15 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `62b622e` | W2 + W1 + W3 |
-| `origin/main` | `62b622e` | **in sync** — nothing unpushed |
-| `upstream/main` | `6ab64ac` | **41 behind** |
+| `HEAD` / local `main` | `73c57f0` | W2 + W1 + W3 + W4 |
+| `origin/main` | `73c57f0` | **in sync** — nothing unpushed |
+| `upstream/main` | `6ab64ac` | **45 behind** |
 
 `../_exmc-things/exmc/mix.lock` still pins **`a25432f`**, i.e. the commit before
 any of this. That is the right default — see §4 — but it now means the consumer
-is four working commits behind, including a `block/4` fix that changes what an
-`Nx.LinAlg` call costs there. Bumping it is a deliberate act and should come
-with `bench/nuts_truth.exs` on both arms.
+is nine working commits behind (twelve counting doc refreshes), including a
+`block/4` fix that changes what an `Nx.LinAlg` call costs there. Bumping it is a
+deliberate act and should come with `bench/nuts_truth.exs` on both arms.
 
 ### `rm -rf _build/` — do it early, do not agonise
 
@@ -84,7 +85,7 @@ worked. **That gate is open, and it has now been used four times.**
 | **W2** — strict ratchet on `doctest Nx` | **done** `6f8d406` |
 | **W1** — word-generic remap family | **done** `912ce08` `578cf3a` |
 | **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
-| **W4** — decide the twelve `Nx.Block.*` | **done** — uncommitted; see below |
+| **W4** — decide the twelve `Nx.Block.*` | **done** `cc77b2a` `cae4dad` |
 | **W5** — integer kernels | the 369-doctest bucket; the big one |
 
 ```sh
