@@ -328,12 +328,22 @@ back" is currently an accident.
    shaders** — and two are probably cheap wins rather than decisions: `Take` /
    `TakeAlongAxis` are what the existing `gather` shader does, and `LogicalNot`
    is a compare against zero.
-3. **`Nx.LinAlg.solve/2` raises `ArithmeticError`.** Not a coverage gap — a
-   **bug**, on an op the allowlist says is *supported via the host*. Re-verified
-   today on this branch's parent: `Nx.LinAlg.solve(eye(2), [1.0, 2.0])` →
-   `** (ArithmeticError) bad argument in arithmetic expression`. It is
-   pre-existing on clean `main`, was found by T13, and is still unfiled. Scholar
-   goes through `solve`. This should be fixed or filed before anything in §3.1.
+3. ~~**`Nx.LinAlg.solve/2` raises `ArithmeticError`.**~~ **FIXED (W3), and it
+   was two bugs.** `encode_scalar/2` raised on the non-finite float ATOMS nx
+   uses (`Nx.Constants.neg_infinity()` → `:neg_infinity`), which nx's LU pivot
+   search emits. Fixing that exposed the second: `block/4` transferred its args
+   to `BinaryBackend` but not the process default backend, and every `fun` it
+   takes is a defn whose intermediates the evaluator materialises on that
+   default — so `Nx.LinAlg.lu(Nx.eye(2))` returned `U = 0` for the identity and
+   `solve` called it singular. Both fixed; `test/nx_vulkan/lin_alg_test.exs`
+   pins them.
+
+   **The lesson is worth more than the fix.** Bug 2 was reachable the whole
+   time and returned confident garbage; nobody found it because bug 1 crashed
+   first. An error path can hide a wrong-answer path indefinitely, and only
+   fixing the error reveals it. Side effect: an `Nx.LinAlg` call's fallback
+   census went from several hundred to **1**, identical whichever backend is
+   default — those round trips were the bug's mechanism, not just its cost.
 4. **`dot` outside rank-2 × rank-2.** The fast path requires both operands rank
    2, single contraction axes `[1]`/`[0]`, no batch axes
    (`vulkano_backend.ex:2186`); `dot_orient/6` rescues the other rank-2
@@ -510,7 +520,7 @@ preference. Re-litigating one requires new evidence, not a new opinion.
 |---|---|---|---|---|
 | ~~**W1**~~ | ~~**Word-generic `transpose_nd` / `reverse_nd` / `broadcast_nd`** (§3.1a)~~ **DONE** — 6 shader files collapsed to 3, **12 cells** flipped (transpose r2/r3, reverse, broadcast × s32/s64/u32), 145/145 bit-identical to BinaryBackend on mac-247. Residency **319 → 347 of 843 (37.8% → 41.2%)** | high | low | **the u8 claim in the original row was wrong** — every word-copy gate is `rem(element_bytes, 4) == 0`, which excludes 1- and 2-byte dtypes by construction. Middle-axis u8 `sum` still falls back; it needs W10's byte-packed writer |
 | ~~**W2**~~ | ~~**Turn the strict ratchet on `doctest Nx`** (§2.3)~~ **DONE** — `@moduletag` retired, `test/nx_doctest_register.exs` names the 524, `scripts/doctest_residency.sh` prints **319/843 (37.8%)** in CI and fails in both directions | high | low | **every other item is now measurable.** Run the script before and after your change; if the rate did not move, the op did not reach the device |
-| **W3** | **Fix or file `Nx.LinAlg.solve/2`'s `ArithmeticError`** (§3.3.3) | high | low | a shipped backend raises on a documented-as-supported op. Scholar goes through it. It has been known since T13 and unfiled |
+| ~~**W3**~~ | ~~**Fix or file `Nx.LinAlg.solve/2`'s `ArithmeticError`**~~ **DONE** — it was TWO bugs: `encode_scalar/2` raised on nx's non-finite float atoms, and behind that `block/4` leaked the default backend into the defn body, so `lu(eye(2))` returned a wrong matrix. Residency **347 → 355 (42.1%)**, SVD census **350+ → 1** | high | low | fixing the raise is what made the wrong answer reachable. A raise is a better failure than a plausible wrong matrix — see `test/nx_vulkan/lin_alg_test.exs` |
 | **W4** | **Decide the twelve `Nx.Block.*`** (§3.3.2) | high | low–medium | mostly allowlist lines with reasons; `Take`/`TakeAlongAxis` likely route to the existing `gather` shader and `LogicalNot` to a compare. Converts twelve accidents into decisions |
 | **W5** | **Integer elementwise / compare / select / reduce kernels** (§3.1b) | high | medium | the bulk of the 524 strict doctest failures. Mechanical against the f32 templates; exact bit-equality test. Do W7 first if it blocks |
 | **W6** | **Chain-shader `:nif_panicked` at `n_obs` 600** (§5) | medium–high | medium | owed to the trader, blocks its stated direction, and a NIF panic is not a defect you ship. Graceful refusal counts as done |

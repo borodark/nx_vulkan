@@ -16,7 +16,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **347 of 843 doctests (41.2%) run with host fallbacks refused.**
+  **355 of 843 doctests (42.1%) run with host fallbacks refused.**
 
   ## How it is enforced
 
@@ -24,7 +24,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 496 listed ones step aside so the remaining 347
+  `NXV_HOST_FALLBACK=raise` the 488 listed ones step aside so the remaining 355
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -54,19 +54,20 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 381 doctests. This is a float backend (MISSION §3.1): the integer
+  # 373 doctests. This is a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks have no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}. Nothing here is a gate
   # bug — the capability does not exist yet. **W5 retires this bucket wholesale**,
   # and it is the single largest reason the rate is 38% and not 80%; these same
-  # 381 ordinals are its acceptance test. W1 already took 28 out of it — the
+  # 373 ordinals are its acceptance test. W1 took 28 out of it and W3 another
+  # 8 (all `Nx.all_close/3`, whose block body stopped leaking onto the GPU) — the
   # index-remap family went word-generic, so transpose/reverse/broadcast and
   # everything composing from them (tile, fill, revectorize, iota, eye,
   # put_slice, slice_along_axis, broadcast_vectors) now run on integers.
   @integer_dtype [
     {"Nx.abs/1", [416]},
     {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
-    {"Nx.all_close/3", [452, 453, 454, 455, 456, 457, 458, 459, 460, 461, 462]},
+    {"Nx.all_close/3", [460, 461, 462]},
     {"Nx.any/2", [447, 448, 449, 450, 451]},
     {"Nx.argmax/2", [535, 536, 537, 538, 539, 540, 541, 542, 543, 544, 545]},
     {"Nx.argmin/2", [546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 556]},
@@ -254,7 +255,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   end
 
   @doc """
-  How many doctests the register excuses. 496 as measured; the number to watch.
+  How many doctests the register excuses. 488 as measured; the number to watch.
   """
   def count, do: all() |> Enum.map(fn {_, ordinals} -> length(ordinals) end) |> Enum.sum()
 end
