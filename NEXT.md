@@ -1,9 +1,10 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-16, against `main` @ `62b622e`, after **W2, W1 and W3
-landed**. The ranking is unchanged; three items are struck and the residency
-rate has moved for the first time since it existed.
+**Refreshed:** 2026-08-16, against `main` @ `a930157`, after **W4 landed** on
+top of W2/W1/W3. The ranking is unchanged; the super-io re-verification is
+closed, the leapfrog ownership question is settled, and W4's census surfaced a
+work item the ranking never had — a `concatenate` shader.
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -72,31 +73,31 @@ ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. W2, W1 and W3 are done. Next is W4
+## 1. W2, W1, W3 and W4 are done. Next is W5
 
 `MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
 sequencing note put W2 first, because W2 is what tells you whether W1 and W5
-worked. **That gate is open, and it has now been used three times.**
+worked. **That gate is open, and it has now been used four times.**
 
 | item | state |
 |---|---|
 | **W2** — strict ratchet on `doctest Nx` | **done** `6f8d406` |
 | **W1** — word-generic remap family | **done** `912ce08` `578cf3a` |
 | **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
-| **W4** — decide the twelve `Nx.Block.*` | **next** |
-| **W5** — integer kernels | the 373-doctest bucket; the big one |
+| **W4** — decide the twelve `Nx.Block.*` | **done** — uncommitted; see below |
+| **W5** — integer kernels | the 369-doctest bucket; the big one |
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 355 / 843 (42.1%) run with host fallbacks refused
+#=> doctest Nx residency: 385 / 843 (45.7%) run with host fallbacks refused
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 488 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 458 doctests that still leave the GPU,
 131 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
 fallbacks are being refused, so a normal `mix test` still runs and asserts all
-843. The strict suite went from 910 excluded to 591 at W2, and to 557 as W1 and
-W3 moved doctests onto the device. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
+843. The strict suite went from 910 excluded to 591 at W2, then 557 as W1 and
+W3 moved doctests onto the device, and 527 at W4. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
@@ -107,18 +108,26 @@ far is **llvmpipe**, where `Nx.sum` on `{:u, 8}` returns 0 and three doctests
 plus three `select` tests fail on value; if a run reports one extra fallback,
 check `device_name()` before touching the register.
 
-**W1 and W3 were the first things measured with it, and it worked twice.** The
-rate moved 319 → 347 → 355, and both times the ratchet failed the build on
-stale entries and named every one. That is the loop this project was missing.
+**W1, W3 and W4 were all measured with it, and it worked every time.** The
+rate moved 319 → 347 → 355 → 385, and every time the ratchet failed the build
+on stale entries and named every one. That is the loop this project was missing.
 
-**One caveat on all of it: W1 and W3 were verified on mac-247 only.** super-io's
-nvidia kernel module went version-mismatched against its userspace mid-session
-(580.173.02 loaded, 580.178.04 installed), so Vulkan there fell through to
-llvmpipe and every measurement moved to the Kepler. The register matched on both
-machines at all three points, so nothing is *suspected* — but re-run
-`mix test`, `sh scripts/strict_test.sh` and `sh scripts/doctest_residency.sh`
-on super-io once it is rebooted, because Ampere is what CI and the trader use.
-Expect `843 / 476 / 0`, `557 excluded`, and `355 / 843 (42.1%)`.
+**W1 and W3 were briefly verified on mac-247 only — that gap is now closed.**
+super-io's nvidia kernel module had gone version-mismatched against its userspace
+mid-session (580.173.02 loaded, 580.178.04 installed), so Vulkan there fell
+through to llvmpipe and every measurement moved to the Kepler. It has since been
+rebooted; both sides now read **580.178.04**, `device_name()` returns the 3060
+Ti, and all three commands were re-run there on 2026-08-16 at `a930157`:
+
+| command | super-io (Ampere) | expected from mac-247 |
+|---|---|---|
+| `mix test` | 843 / 476 / 0 | 843 / 476 / 0 |
+| `sh scripts/strict_test.sh` | 843 / 476 / 0, 557 excluded | same |
+| `sh scripts/doctest_residency.sh` | 355 / 843 (42.1%) | same |
+
+Exact on all three, and the script's pass B failed **488** — precisely the
+register's 488 entries, no extras. The register is now confirmed portable at W3
+on Ampere/Linux as well as Kepler/FreeBSD.
 
 **Use it as the acceptance test for everything that follows.** Run the script
 before and after; if the rate did not move, the op did not reach the device.
@@ -126,12 +135,70 @@ The buckets are scored as work items:
 
 | bucket | doctests | item |
 |---|---:|---|
-| `@integer_dtype` | 373 | **W5** — it empties this bucket wholesale. W1 took 28, W3 took 8 |
-| `@float_residency_gap` | 33 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
+| `@integer_dtype` | 369 | **W5** — it empties this bucket wholesale. W1 took 28, W3 took 8 |
+| `@float_residency_gap` | 32 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
 | `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
-| `@complex_and_fft` | 45 | not work under current dtype support |
+| `@complex_and_fft` | 20 | not work under current dtype support. W4 allowlisted the four FFT blocks, which took 25 doctests out of this bucket without moving them onto the device |
 
-### W4, concretely
+### W4 is done — and it went by routing, not by allowlisting
+
+All 21 `Nx.Block.*` structs in nx 0.13 are now decided. The twelve split
+**8 routed / 4 allowlisted**, which is the opposite balance to what §3.3.2
+anticipated, and the census is why.
+
+`VulkanoBackend.@device_blocks` evaluates a block's body **on this backend**
+instead of transferring wholesale. That is the right move exactly when the body
+composes ops this backend already has — the inverse of the `Nx.LinAlg` case,
+where a body composing into ~350 ops is why transferring once and noting once
+is better. Measured on super-io, every result checked element-wise against
+`Nx.BinaryBackend`:
+
+| op | after routing |
+|---|---|
+| `Nx.logical_not/1` f32 | **0 fallbacks — resident** |
+| `Nx.take/3` axis 0 | **0 fallbacks — resident** |
+| `Nx.cumulative_*/2` axis 0 | **0 fallbacks — resident** |
+| `Nx.logical_not/1` s32 | `equal/3` — W5's bucket |
+| `Nx.take/3` axis 1 | `gather/4` — GPU path wants leading-prefix axes |
+| `Nx.take_along_axis/3` | `concatenate/3` |
+| `Nx.cumulative_*/2` axis 1 | `concatenate/3` ×2 |
+| `Nx.top_k/2` | `argsort/3` — already an allowlisted decision |
+
+**Twelve opaque blocks became three named gaps.** That is the argument against
+the allowlist line: an entry saying "no scan shader" would have recorded a
+decision about `cumulative_sum` when the thing actually missing is
+`concatenate/3` — which four cumulative ops *and* `take_along_axis/3` all share.
+**A concatenate shader is now the single highest-leverage missing kernel**, and
+it did not appear anywhere in the W-ranking before this census.
+
+Only `FFT2`/`IFFT2`/`RFFT`/`IRFFT` got allowlist lines. Routing them would
+report `do_fft/4` — a rename of the same wall, since their bodies are
+complex-valued and the ISA is real.
+
+One trap worth knowing: routing must transfer args **up** to the device first.
+nx dispatches a multi-arg op to one backend, so a body called with the operand
+here and its indices on `BinaryBackend` resolves to `Nx.BinaryBackend.gather/3`
+and hands it a Vulkano tensor, which dies in `to_binary/1` with no clause.
+`Nx.take/3` reaches that state via `Nx.padding_with_index/2`. Ten doctests
+caught it.
+
+Acceptance, on super-io:
+
+```
+mix test                          # 843 / 476 / 0
+sh scripts/strict_test.sh         # 843 / 476 / 0, 527 excluded  (was 557)
+sh scripts/doctest_residency.sh   # 385 / 843 (45.7%)            (was 355 / 42.1%)
+```
+
+The ratchet earned its keep again: it failed the build on 30 stale register
+entries and named every one. **Read that 30 carefully** — only **5** doctests
+genuinely reached the device; the other **25 are FFT**, which stopped failing
+because they are now *permitted* rather than *refused*. Device-resident-only,
+W4 scores **360/843 (42.7%)**. The register's moduledoc carries the same
+warning, because this is the first time the headline number has moved for a
+reason other than work reaching the GPU.
+
+### W4 as originally scoped, for reference
 
 `MISSION.md` §3.3.2. `Nx.Vulkan.Fallback`'s allowlist carries **9**
 `{:block, Nx.Block.*}` entries (SVD, QR, LU, Eigh, Cholesky, Solve,
@@ -151,7 +218,7 @@ where a wrong *answer* hid, not just a slow path. Note also that
 Worth checking which other `Nx.LinAlg` entry points are in that position before
 assuming the family is covered.
 
-Then W5 (integer kernels — the 373-doctest bucket, and the only bucket that has
+Then W5 (integer kernels — the 369-doctest bucket, and the only bucket that has
 moved at all so far), and W8 (`dot` beyond rank-2 × rank-2, which
 `@float_residency_gap` scores at four doctests and which W3's own tests walked
 straight into at `dot/7`).
@@ -169,7 +236,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 | item | state | who can do it |
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` is at `62b622e`, nothing unpushed | |
-| **Re-verify on super-io** | pending its reboot; everything since W1 was measured on mac-247 only (§1) | anyone, once the box is back |
+| ~~Re-verify on super-io~~ | **done** — box rebooted, driver matched at 580.178.04, all three figures reproduce exactly on Ampere (§1) | |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 41 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 4 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -218,20 +285,60 @@ The consumer found a defect that lives at the boundary this repo owns:
 `../_exmc-things/exmc/docs/OPEN_VULKAN_OBSERVED_MODEL.md` — note that
 `_exmc-things/` is a **sibling** of this repo, not a directory inside it.
 
-It is not yet known which side of the NIF the fault is on, and the experiment
-that decides it is one this repo is better placed to run:
+**The experiment has been run, and it settles ownership: the fault is eXMC's,
+not this repo's.** Run on super-io 2026-08-16 against eXMC's own pinned
+`a25432f` — legitimate, because `native/`, `native_v.ex`, `shader_template.ex`
+and `synthesis.ex` are byte-identical between `a25432f` and `HEAD`, so no
+lockfile bump was needed to measure the current dispatch path.
 
-> Fix `q0`, `p0`, `eps`, `inv_mass`, `K = 32`. Dispatch
-> `leapfrog_chain_synth_f64`. Read back `q_chain`, `p_chain`, `grad_chain`,
-> `logp_chain`. Run the same K leapfrog steps on the host. Compare all four
-> element-wise.
+The four arrays diverge from **step 0**, not gradually:
 
-If they agree, the fault is in how eXMC consumes the arrays and this repo is
-clear. If they diverge, the step index at which they first diverge names the
-bug. **This is a half-day and it settles ownership** — worth doing before either
-side spends longer guessing. The strongest lead recorded so far is that the
-adapted step size is bit-identical across a change that alters every log-density
-in the trajectory, which points at the host side.
+| eps | first-step gpu grad | host grad | analytic |
+|---|---|---|---|
+| any | 31.495 | 10.495 | 10.495 |
+
+The ratio is exact, and the generated GLSL explains it. For a model with three
+*separate* scalar obs nodes, eXMC's emitter produces **one accumulator per
+observed RV** (`_gacc0_0/_1/_2`, `_lpacc0/1/2`) and then gives **each one a full
+loop over all `pc.n_obs` observations** — the identical body, three times, summed.
+So the likelihood is counted `n_obs` times over:
+
+```
+grad_gpu = prior_grad + 3 × Σ_j (obs_j − q)      # should be prior + Σ_j
+logp_gpu = prior_lp   + 3 × Σ_j log N(obs_j | q, 1)
+```
+
+Both predictions reproduce the measured GPU output to f32 constant precision
+(`logp_chain[0]`: predicted −63.9595, measured −63.95952955528024). **The GPU
+faithfully executes the shader it was handed; the shader is wrong before it
+arrives.** `Nx.Vulkan.ShaderTemplate` is not even on this path — eXMC's
+`MultiRvCustomSpec` renders its own GLSL.
+
+Defect site: `_exmc-things/exmc/lib/exmc/nuts/custom_synth/multi_rv_custom_spec.ex`
+— `transform_reduce_sum/2` (line ~696) expands *every* `/*REDUCE_SUM*/` marker
+into `for (j < pc.n_obs)`, but three distinct scalar observations should each
+read their own `obs_inv_mass[i]`, not re-sum the whole vector. This is why the
+**vector** arm of that test is correct and the **scalar** arm is not: the vector
+model emits exactly one marker and one loop.
+
+It also explains the freeze without needing the step-size lead. A likelihood
+counted 3× is a posterior ~√3 narrower with 3× steeper gradients, so ε = 1.139
+is far past stable and acceptance collapses to ~0.002. The "adapted ε identical
+to sixteen digits" observation is a symptom of a saturated adaptation, not a
+second bug.
+
+Two smaller things the same run exposed, both eXMC-side and neither able to
+explain the freeze: the obs buffer carries **f32-rounded** values on a nominally
+f64 path (`3.8` arrives as `3.799999952316284`), and the priors are f32 tensors.
+
+Harness: `../_exmc-things/exmc/bench/leapfrog_leaf_diff.exs` (~140 lines, left
+**uncommitted** in that repo). It dispatches via
+`Exmc.NUTS.Vulkan.Dispatch.chain/8`, references `Exmc.NUTS.Leapfrog.step/6`,
+and cross-checks against a hand-derived analytic gradient so host and GPU
+cannot both be wrong in the same direction. Run it with
+`mix run bench/leapfrog_leaf_diff.exs` from the eXMC repo. The eXMC write-up
+asks for this check to exist regardless of what it found; it is now the
+regression test for the fix.
 
 ---
 
@@ -260,15 +367,15 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite (mac-247, at 62b622e): 843 doctests, 476 tests, 0 failures
-# NOT re-run on super-io since its driver broke — see §1.
+# suite: 843 doctests, 476 tests, 0 failures.
+# Confirmed on BOTH mac-247 (at 62b622e) and super-io (at a930157) — see §1.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 843/476/0, 557 excluded
+sh scripts/strict_test.sh            # 843/476/0, 527 excluded
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 355 / 843 (42.1%)
+sh scripts/doctest_residency.sh      # 385 / 843 (45.7%)
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}

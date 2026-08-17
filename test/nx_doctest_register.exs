@@ -16,7 +16,28 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **355 of 843 doctests (42.1%) run with host fallbacks refused.**
+  **385 of 843 doctests (45.7%) run with host fallbacks refused** as of W4.
+
+  ## Read the W4 movement carefully — 30 entries left, but only 5 moved
+
+  W4 took this register from 488 entries to 458, and the two halves of that 30
+  are not the same kind of progress:
+
+    * **5 genuinely reached the device** — `Nx.take/3 (699)`,
+      `Nx.logical_not/1 (315)`, `Nx.pad_outer/3 (161)` and `Nx.top_k/2 (745,
+      747)`. Their blocks are routed on-device now and the work runs on
+      shaders.
+    * **25 are FFT** — `fft2`, `ifft2`, `rfft`, `irfft`. Those did not move an
+      inch. They are allowlisted in `Nx.Vulkan.Fallback` as a permanent complex
+      -dtype limitation, and an allowlisted fallback is *permitted* rather than
+      *refused*, so the doctest stops failing under `:raise` and leaves this
+      register by the script's rules.
+
+  That is the same convention `Nx.Block.Phase` and the seven `Nx.LinAlg` blocks
+  have always been under, so the number stays comparable across W2/W1/W3/W4 —
+  but it does mean this rate answers "how much is refused-clean", not "how much
+  runs on the GPU". **Device-resident-only, W4 scores 360/843 (42.7%).** Quote
+  whichever you mean, and say which.
 
   ## How it is enforced
 
@@ -24,7 +45,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 488 listed ones step aside so the remaining 355
+  `NXV_HOST_FALLBACK=raise` the 458 listed ones step aside so the remaining 385
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -54,7 +75,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 373 doctests. This is a float backend (MISSION §3.1): the integer
+  # 369 doctests. This is a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks have no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}. Nothing here is a gate
   # bug — the capability does not exist yet. **W5 retires this bucket wholesale**,
@@ -102,7 +123,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.less_equal/2", [332, 333, 334]},
     {"Nx.linspace/3", [812, 813, 814]},
     {"Nx.logical_and/2", [305, 306, 307]},
-    {"Nx.logical_not/1", [314, 315]},
+    {"Nx.logical_not/1", [314]},
     {"Nx.logical_or/2", [308, 309, 310]},
     {"Nx.logical_xor/2", [311, 312, 313]},
     {"Nx.logsumexp/2", [835, 836, 837, 838, 839, 840, 841, 842, 843]},
@@ -115,7 +136,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.negate/1", [411, 412, 414]},
     {"Nx.not_equal/2", [316, 317, 318, 319]},
     {"Nx.outer/2", [661, 662, 663, 664]},
-    {"Nx.pad_outer/3", [155, 156, 157, 158, 159, 160, 161, 162]},
+    {"Nx.pad_outer/3", [155, 156, 157, 158, 159, 160, 162]},
     {"Nx.population_count/1", [421, 422, 423, 424]},
     {"Nx.product/2", [509, 510, 512, 513, 514, 515, 516, 517]},
     {"Nx.put_diagonal/3", [46, 47, 48, 49, 50, 51]},
@@ -132,9 +153,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.stack/2", [733, 734, 735, 736, 737]},
     {"Nx.subtract/2", [229, 230, 232, 233]},
     {"Nx.sum/2", [463, 464, 466, 467, 468, 469, 470, 471]},
-    {"Nx.take/3", [699, 700, 701, 702, 703, 704, 705, 706, 707]},
+    {"Nx.take/3", [700, 701, 702, 703, 704, 705, 706, 707]},
     {"Nx.take_along_axis/3", [709, 710, 711, 712, 713]},
-    {"Nx.top_k/2", [745]},
     {"Nx.tri/3", [29, 30]},
     {"Nx.tril/2", [21, 22, 23]},
     {"Nx.triu/2", [25, 26, 27]},
@@ -176,7 +196,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.tan/1", [386, 404]}
   ]
 
-  # 45 doctests. Complex is not representable on a byte-addressed f64-REAL
+  # 20 doctests. Complex is not representable on a byte-addressed f64-REAL
   # backend, and the whole FFT family produces or consumes it. There is no FFT
   # shader either, so both halves of the reason hold independently. Related:
   # `complex/2`, `real/1`, `imag/1`, `conjugate/1`, `phase/1` are in
@@ -186,14 +206,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.as_type/2", [86, 88, 92]},
     {"Nx.conv/3", [681]},
     {"Nx.fft/2", [760, 761, 762, 763, 764, 765, 766, 767]},
-    {"Nx.fft2/2", [778, 779, 780, 781, 782, 783, 784]},
-    {"Nx.ifft/2", [769, 770, 771, 772, 773, 774, 775, 776]},
-    {"Nx.ifft2/2", [787, 788, 789, 790, 791, 792, 793]},
-    {"Nx.irfft/2", [804, 805, 806, 807, 808]},
-    {"Nx.rfft/2", [796, 797, 798, 799, 800, 801]}
+    {"Nx.ifft/2", [769, 770, 771, 772, 773, 774, 775, 776]}
   ]
 
-  # 33 doctests — the interesting bucket, and the one to read before picking up
+  # 32 doctests — the interesting bucket, and the one to read before picking up
   # W1 or W8. These are float ops on a float backend that still left the GPU,
   # i.e. gates narrower than the capability behind them. The patterns:
   #
@@ -230,7 +246,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},
     {"Nx.select/3", [343]},
-    {"Nx.top_k/2", [746, 747]},
+    {"Nx.top_k/2", [746]},
     {"Nx.window_max/3", [572]},
     {"Nx.window_mean/3", [566]},
     {"Nx.window_min/3", [577]},
@@ -255,7 +271,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   end
 
   @doc """
-  How many doctests the register excuses. 488 as measured; the number to watch.
+  How many doctests the register excuses. 458 as measured; the number to watch.
   """
   def count, do: all() |> Enum.map(fn {_, ordinals} -> length(ordinals) end) |> Enum.sum()
 end
