@@ -285,8 +285,11 @@ The consumer found a defect that lives at the boundary this repo owns:
 `../_exmc-things/exmc/docs/OPEN_VULKAN_OBSERVED_MODEL.md` — note that
 `_exmc-things/` is a **sibling** of this repo, not a directory inside it.
 
-**The experiment has been run, and it settles ownership: the fault is eXMC's,
-not this repo's.** Run on super-io 2026-08-16 against eXMC's own pinned
+**The experiment has been run, it settled ownership, and the fix has landed
+on the eXMC side** — `6c1589a` on `gate1/reconcile-core`, together with the
+harness. The posterior now reads mean 3.966 / sd 0.539 against an analytic
+3.99 / 0.577, with 469 of 500 draws distinct where there was 1. The fault was
+eXMC's, not this repo's. Run on super-io 2026-08-16 against eXMC's own pinned
 `a25432f` — legitimate, because `native/`, `native_v.ex`, `shader_template.ex`
 and `synthesis.ex` are byte-identical between `a25432f` and `HEAD`, so no
 lockfile bump was needed to measure the current dispatch path.
@@ -315,11 +318,21 @@ arrives.** `Nx.Vulkan.ShaderTemplate` is not even on this path — eXMC's
 `MultiRvCustomSpec` renders its own GLSL.
 
 Defect site: `_exmc-things/exmc/lib/exmc/nuts/custom_synth/multi_rv_custom_spec.ex`
-— `transform_reduce_sum/2` (line ~696) expands *every* `/*REDUCE_SUM*/` marker
-into `for (j < pc.n_obs)`, but three distinct scalar observations should each
-read their own `obs_inv_mass[i]`, not re-sum the whole vector. This is why the
-**vector** arm of that test is correct and the **scalar** arm is not: the vector
-model emits exactly one marker and one loop.
+— `compose_logp_defn/1` handed **every** observed node the whole `obs` vector
+(`mod.logpdf(obs, resolved) |> Nx.sum()`), and `transform_reduce_sum/2` then
+expanded each resulting marker into `for (j < pc.n_obs)`. Three distinct scalar
+observations should each read their own slice. This is why the **vector** arm of
+that test is correct and the **scalar** arm is not: the vector model emits
+exactly one marker and one loop. The fix gives each marker its own
+`{offset, count}` span.
+
+**Worth carrying across to anything similar here:** attribution of markers to
+nodes is positional, and the *gradient's* markers come out **mirrored** —
+reverse-mode AD walks the forward left fold backwards. With identical
+observations a mirrored assignment is bit-identical to the correct one, so the
+first version of that fix passed a differential built on `Normal(mu, 1)` ×3 and
+was still wrong. Distinct per-node sigmas are what caught it. A test whose
+inputs are symmetric cannot see a permutation bug.
 
 It also explains the freeze without needing the step-size lead. A likelihood
 counted 3× is a posterior ~√3 narrower with 3× steeper gradients, so ε = 1.139
