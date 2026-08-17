@@ -133,6 +133,10 @@ defmodule Nx.Vulkan.LinAlgTest do
       assert_matches(u, Nx.tensor([[1.0, 0.0], [0.0, 1.0]], backend: Nx.BinaryBackend))
     end
 
+    # `Nx.dot(a, x)` here is matrix·vector, which has no GPU path — the fast
+    # path wants rank-2 × rank-2 (MISSION §3.3.4, W8). Incidental to what this
+    # test asserts, but real, so it is tagged rather than worked around.
+    @tag :host_fallback_expected
     test "solve/2 reconstructs: a . solve(a, b) == b" do
       {a_g, _a_h} = pair(@spd)
       {b_g, _b_h} = pair([1.0, 2.0, 3.0])
@@ -167,6 +171,12 @@ defmodule Nx.Vulkan.LinAlgTest do
       )
     end
 
+    # `Nx.LinAlg.invert/1` is NOT an `Nx.Block.*` — it composes at the Nx level
+    # from solve and an identity, so with_binary_backend/1 never sees it and its
+    # intermediates land here one at a time. `indexed_put/5` is the one that
+    # refuses. Pre-existing and unrelated to W3; recorded here because this is
+    # the test that walks into it.
+    @tag :host_fallback_expected
     test "invert/1 matches BinaryBackend" do
       {a_g, a_h} = pair(@spd)
       assert_matches(Nx.LinAlg.invert(a_g), on_host(fn -> Nx.LinAlg.invert(a_h) end), 1.0e-5)
