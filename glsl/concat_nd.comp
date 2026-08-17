@@ -1,0 +1,72 @@
+#version 450
+
+// concatenate along any axis, as a member of the index-remap family
+// (transpose_nd / reverse_nd / broadcast_nd — SKILL.md §5). Same skeleton:
+// decompose a linear index into coordinates, map, copy.
+//
+// The difference is the direction. Those three run one thread per OUTPUT
+// element because they have one input. Concat has k inputs, and k varies per
+// call, so it cannot bind them all. Instead it runs ONE DISPATCH PER INPUT with
+// one thread per INPUT element, computing where that element lands in the
+// output. Each input owns [offset, offset + IN[axis]) on the concat axis, so
+// the regions successive dispatches write are disjoint: the output buffer
+// accumulates across dispatches with no races and no read-modify-write, and
+// total traffic is O(output) rather than the O(k * output) that layering k
+// put_slice overlays would cost.
+//
+// Type-generic u32-word copy: `ews` = element_bytes / 4, so one shader serves
+// any 4/8-byte dtype (f32/f64/s32/s64/u32/u64). 1/2-byte types host-fall-back,
+// as they do for slice/pad/put_slice. rank <= 4 (pad4 on the host).
+//
+// axis 0 does NOT come here — a row-major axis-0 concat is a pure byte append,
+// which `concat_buffers` already does without any index arithmetic.
+//
+// Params: [rank, ews, axis, offset, IN[4], OUT[4]] as i32
+//   IN     = this input tensor's dims
+//   OUT    = the concatenated output's dims
+//   axis   = the concat axis
+//   offset = this input's start coordinate along `axis` in the output
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly  buffer In  { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; };
+layout(std430, binding = 2) readonly  buffer P   { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;     // element count of THIS input, not of the output
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    int axis = prm[2];
+    int off = prm[3];
+    int IN[4];
+    int OUT[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        IN[i] = prm[4 + i];
+        OUT[i] = prm[8 + i];
+    }
+
+    // Decompose gid over IN (row-major), shift the concat axis by `off`, and
+    // recompose over OUT. `ostride` is the product of OUT dims strictly after
+    // d, which is why it is multiplied AFTER being used.
+    uint idx = gid;
+    uint oidx = 0u;
+    uint ostride = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        int coord = int(idx % uint(IN[d]));
+        idx = idx / uint(IN[d]);
+
+        if (d == axis) coord += off;
+
+        oidx += uint(coord) * ostride;
+        ostride *= uint(OUT[d]);
+    }
+
+    for (uint w = 0u; w < ews; ++w) o[oidx * ews + w] = inp[gid * ews + w];
+}

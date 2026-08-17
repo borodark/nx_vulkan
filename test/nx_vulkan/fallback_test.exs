@@ -765,12 +765,14 @@ defmodule Nx.Vulkan.FallbackTest do
       # W4 decided all twelve remaining blocks, and decided most of them by
       # ROUTING rather than allowlisting: their bodies now run on this backend,
       # so no `{:block, _}` is recorded at all and the constituent op reports
-      # instead. That is a strictly better census — `cumulative_sum` is not
-      # missing a "scan shader", it is missing `concatenate/3`, which four
-      # cumulative ops and `take_along_axis/3` all share.
+      # instead. That census is what paid off — it said `cumulative_sum` was not
+      # missing a "scan shader" but `concatenate/3`, shared with three sibling
+      # cumulative ops and `take_along_axis/3`. `glsl/concat_nd.comp` closed it,
+      # and this is now fully resident: an allowlist entry for the block would
+      # have recorded a decision and left five ops on the host.
       {_r, counts} = Fallback.count(fn -> Nx.cumulative_sum(x) end)
       assert counts[{:block, Nx.Block.CumulativeSum}] == nil
-      assert counts == %{{:concatenate, 3} => 1}
+      assert counts == %{}
 
       # top_k's only host component is the sort, which IS a standing decision.
       # Routing makes it inherit that entry honestly instead of restating it,

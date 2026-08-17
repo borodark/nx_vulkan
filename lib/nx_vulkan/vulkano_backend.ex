@@ -1751,6 +1751,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
       axis == 0 and all_vulkano?(tensors) and Enum.all?(tensors, &(&1.type == out.type)) ->
         concat_vulkano(out, tensors)
 
+      # W4's census made this the highest-leverage gap in the backend: an
+      # axis > 0 concatenate was the ONLY thing keeping `Nx.take_along_axis/3`
+      # and all four `Nx.cumulative_*/2` off the GPU, and `associative_scan`
+      # calls it log2(n) times per reduction — each one previously round-tripping
+      # the whole tensor through the host.
+      #
+      # Same type gate as axis 0 and for the same reason (a raw copy cannot
+      # cast). 4/8-byte dtypes only, because the shader copies u32 words;
+      # 1/2-byte types fall back as they do for slice/pad/put_slice. rank <= 4
+      # is pad4's ceiling.
+      concat_nd_eligible?(out, tensors, axis) ->
+        concat_nd_vulkano(out, tensors, axis)
+
       true ->
         bins = Enum.map(tensors, &Nx.backend_transfer(ensure_on_backend(&1), Nx.BinaryBackend))
         result = with_binary_backend(fn -> Nx.concatenate(bins, axis: axis) end)
@@ -1769,6 +1782,68 @@ defmodule Nx.Vulkan.VulkanoBackend do
     refs = Enum.map(tensors, fn %T{data: %__MODULE__{ref: r}} -> r end)
     {:ok, ref} = Nx.Vulkan.NativeV.concat_buffers(refs)
     put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: out.type})
+  end
+
+  @concat_nd_spv Path.expand("../../priv/shaders/concat_nd.spv", __DIR__)
+
+  # `all_vulkano?`, deliberately, and the deliberation is worth recording because
+  # the looser gate was tried and reverted.
+  #
+  # Requiring only ONE resident operand — upload the rest, keep the result here —
+  # looks like the SKILL §1b move: the shader can plainly compute it, so why
+  # refuse. It made four `Nx.mode/2` doctests crash. Promoting the operands makes
+  # the RESULT resident, and `Nx.take_along_axis/3` then hands that resident
+  # index tensor to `Nx.gather/3` alongside a host operand; nx resolves a
+  # multi-arg op to ONE backend, picks `Nx.BinaryBackend.gather/3`, and it dies
+  # in `to_binary/1` with no clause.
+  #
+  # So the looser gate did not remove a mixed-backend pair, it moved one
+  # downstream where this backend cannot fix it. §1b says gate on what the
+  # kernel cannot do — the kernel can, but the *caller* cannot, and that is
+  # still a real constraint. Uniformity at the boundary is what W4's `to_device`
+  # buys and what this preserves.
+  #
+  # This costs nothing where residency is actually measured: under a
+  # VulkanoBackend default — production, and `nx_doctest_test.exs`'s `setup` —
+  # `take_along_axis`'s `Nx.iota/2` and `reshape` are resident too, so every
+  # operand is, and the fast path runs.
+  defp concat_nd_eligible?(%T{shape: out_shape, type: type}, tensors, axis) do
+    rank = tuple_size(out_shape)
+
+    axis > 0 and axis < rank and rank <= 4 and
+      rem(element_bytes(type), 4) == 0 and all_vulkano?(tensors) and
+      Enum.all?(tensors, &(&1.type == type)) and
+      Enum.all?(tensors, &(tuple_size(&1.shape) == rank))
+  end
+
+  # One dispatch per input, each writing its own disjoint slab of the output.
+  # Offsets accumulate along the concat axis in input order, which is exactly
+  # what Nx.concatenate/2 means.
+  defp concat_nd_vulkano(%T{shape: out_shape, type: type} = out, tensors, axis) do
+    rank = tuple_size(out_shape)
+    eb = element_bytes(type)
+    out_dims = pad4(Tuple.to_list(out_shape))
+
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(byte_size_of(out_shape) * eb)
+
+    Enum.reduce(tensors, 0, fn %T{shape: in_shape, data: %__MODULE__{ref: a_ref}}, offset ->
+      n = byte_size_of(in_shape)
+
+      params =
+        for v <-
+              [rank, div(eb, 4), axis, offset] ++
+                pad4(Tuple.to_list(in_shape)) ++ out_dims,
+            into: <<>>,
+            do: <<v::signed-32-little>>
+
+      {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
+
+      :ok = Nx.Vulkan.NativeV.concat_nd(out_ref, a_ref, params_ref, n, rank, @concat_nd_spv)
+
+      offset + elem(in_shape, axis)
+    end)
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end
 
   # stack: combine N tensors along a NEW axis. Nx allocates the

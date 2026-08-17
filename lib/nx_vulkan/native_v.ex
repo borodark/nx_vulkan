@@ -256,6 +256,25 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Concatenate ONE input tensor into a slab of an already-allocated output,
+  rank <= 4. Call once per input; the caller allocates the output and computes
+  the per-input offsets.
+
+  `n` is the element count of **this input**, not of the output. Each call
+  writes only `[offset, offset + in[axis])` along the concat axis, and those
+  regions are disjoint across the inputs of one concatenate, so the output
+  accumulates across calls with no races.
+
+  Buffers: a, out, params — an int32 buffer laid out as
+  `[rank, ews, axis, offset, in[4], out[4]]`, where `ews = element_bytes / 4`.
+
+  Axis-0 concatenation does not need this: it is a byte append, which
+  `concat_buffers/1` does directly.
+  """
+  def concat_nd(_out, _a, _params, _n, _rank, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Windowed max/min, rank <= 4. `op_code`: 0=max, 1=min.
 
   Buffers: a, out, params — an int32 buffer laid out as

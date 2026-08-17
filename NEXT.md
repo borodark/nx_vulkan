@@ -169,8 +169,11 @@ is better. Measured on super-io, every result checked element-wise against
 the allowlist line: an entry saying "no scan shader" would have recorded a
 decision about `cumulative_sum` when the thing actually missing is
 `concatenate/3` — which four cumulative ops *and* `take_along_axis/3` all share.
-**A concatenate shader is now the single highest-leverage missing kernel**, and
-it did not appear anywhere in the W-ranking before this census.
+**A concatenate shader was therefore the single highest-leverage missing
+kernel**, and it did not appear anywhere in the W-ranking before this census.
+**It is now written** — `glsl/concat_nd.comp`, axis > 0, and it moved all five
+ops at once. Residency 385 -> 398 (45.7% -> 47.2%), and unlike W4's own 30 this
+13 needs no asterisk: every one is genuinely device-resident. See §1.1.
 
 Only `FFT2`/`IFFT2`/`RFFT`/`IRFFT` got allowlist lines. Routing them would
 report `do_fft/4` — a rename of the same wall, since their bodies are

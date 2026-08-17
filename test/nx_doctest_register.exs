@@ -16,7 +16,30 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **385 of 843 doctests (45.7%) run with host fallbacks refused** as of W4.
+  **398 of 843 doctests (47.2%) run with host fallbacks refused** as of the
+  `concat_nd` shader. Only the super-io figure is re-measured at this point;
+  the Kepler has not been re-run since W4.
+
+  ## The concat_nd fold — 13 entries left, and all 13 moved
+
+  Unlike W4 below, this one needs no asterisk. The axis > 0 concatenate shader
+  took the register from 458 to 445, and every one of those 13 doctests now
+  runs on the device rather than merely being permitted to leave it:
+
+    * `Nx.concatenate/2 (728, 730, 731)` — the shader itself;
+    * `Nx.take_along_axis/3 (709-713)` and `Nx.take/3 (706, 707)` — they
+      compose through concatenate;
+    * `Nx.gather/3 (721, 722)` — the off-prefix axes W4's census named;
+    * `Nx.top_k/2 (746)`.
+
+  `Nx.take/3 (705)` is deliberately still listed. It went resident mid-session
+  and then back to falling back while the take path was being edited; it is the
+  one entry in this neighbourhood that is not settled. Re-measure it before
+  assuming either way.
+
+  W4 predicted exactly this set from its census, which is the census earning
+  its keep: twelve opaque blocks became three named gaps, and closing one of
+  the three moved all five ops that shared it.
 
   ## Read the W4 movement carefully — 30 entries left, but only 5 moved
 
@@ -37,7 +60,9 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   have always been under, so the number stays comparable across W2/W1/W3/W4 —
   but it does mean this rate answers "how much is refused-clean", not "how much
   runs on the GPU". **Device-resident-only, W4 scores 360/843 (42.7%).** Quote
-  whichever you mean, and say which.
+  whichever you mean, and say which. After the concat_nd fold above — all 13 of
+  which are genuinely resident — the two readings are 398/843 (47.2%)
+  refused-clean and 373/843 (44.2%) device-resident.
 
   ## How it is enforced
 
@@ -45,7 +70,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 458 listed ones step aside so the remaining 385
+  `NXV_HOST_FALLBACK=raise` the 445 listed ones step aside so the remaining 398
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -75,16 +100,22 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 369 doctests. This is a float backend (MISSION §3.1): the integer
+  # 357 doctests. This is a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks have no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}. Nothing here is a gate
   # bug — the capability does not exist yet. **W5 retires this bucket wholesale**,
-  # and it is the single largest reason the rate is 38% and not 80%; these same
-  # 373 ordinals are its acceptance test. W1 took 28 out of it and W3 another
+  # and it is the single largest reason the rate is 47% and not 80%; these same
+  # 357 ordinals are its acceptance test. W1 took 28 out of it and W3 another
   # 8 (all `Nx.all_close/3`, whose block body stopped leaking onto the GPU) — the
   # index-remap family went word-generic, so transpose/reverse/broadcast and
   # everything composing from them (tile, fill, revectorize, iota, eye,
   # put_slice, slice_along_axis, broadcast_vectors) now run on integers.
+  #
+  # The concat_nd shader then took 12 more: all three `Nx.concatenate/2`, the
+  # two off-prefix `Nx.gather/3`, two `Nx.take/3` and every
+  # `Nx.take_along_axis/3`. Those were integer-dtype doctests only incidentally
+  # — what actually gated them was the axis > 0 concatenate, not the dtype, so
+  # they left this bucket without W5 touching it.
   @integer_dtype [
     {"Nx.abs/1", [416]},
     {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
@@ -99,7 +130,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.bitwise_or/2", [283, 284, 285, 286]},
     {"Nx.bitwise_xor/2", [288, 289, 290, 291]},
     {"Nx.clip/3", [682]},
-    {"Nx.concatenate/2", [728, 730, 731]},
     {"Nx.count_leading_zeros/1", [426, 427, 428, 429, 430, 431, 432, 433]},
     {"Nx.cumulative_max/2", [603, 604, 605, 606, 607, 608]},
     {"Nx.cumulative_min/2", [597, 598, 599, 600, 601, 602]},
@@ -111,7 +141,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/6", [650, 651, 652, 653, 654]},
     {"Nx.equal/2", [301, 302, 303]},
     {"Nx.fill/3", [831]},
-    {"Nx.gather/3", [719, 720, 721, 722]},
+    {"Nx.gather/3", [719, 720]},
     {"Nx.greater/2", [320, 321, 322]},
     {"Nx.greater_equal/2", [328, 329, 330]},
     {"Nx.indexed_add/4", [347, 348, 351, 352]},
@@ -153,8 +183,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.stack/2", [733, 734, 735, 736, 737]},
     {"Nx.subtract/2", [229, 230, 232, 233]},
     {"Nx.sum/2", [463, 464, 466, 467, 468, 469, 470, 471]},
-    {"Nx.take/3", [700, 701, 702, 703, 704, 705, 706, 707]},
-    {"Nx.take_along_axis/3", [709, 710, 711, 712, 713]},
+    {"Nx.take/3", [700, 701, 702, 703, 704, 705]},
     {"Nx.tri/3", [29, 30]},
     {"Nx.tril/2", [21, 22, 23]},
     {"Nx.triu/2", [25, 26, 27]},
@@ -209,7 +238,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.ifft/2", [769, 770, 771, 772, 773, 774, 775, 776]}
   ]
 
-  # 32 doctests — the interesting bucket, and the one to read before picking up
+  # 31 doctests — the interesting bucket, and the one to read before picking up
   # W1 or W8. These are float ops on a float backend that still left the GPU,
   # i.e. gates narrower than the capability behind them. The patterns:
   #
@@ -246,7 +275,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},
     {"Nx.select/3", [343]},
-    {"Nx.top_k/2", [746]},
     {"Nx.window_max/3", [572]},
     {"Nx.window_mean/3", [566]},
     {"Nx.window_min/3", [577]},
@@ -271,7 +299,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   end
 
   @doc """
-  How many doctests the register excuses. 458 as measured; the number to watch.
+  How many doctests the register excuses. 445 as measured; the number to watch.
   """
   def count, do: all() |> Enum.map(fn {_, ordinals} -> length(ordinals) end) |> Enum.sum()
 end
