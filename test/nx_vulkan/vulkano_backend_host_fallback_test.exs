@@ -193,11 +193,16 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
     # `axis: axis`, producing `Nx.take(t, idx, axis: [axis: 0])` which
     # Nx rejects with "given axis ([axis: 0]) invalid for shape with rank 2".
 
-    test "take along axis 0 (2D source)" do
+    # W4: no longer a host fallback. `Nx.Block.Take` is routed on-device, and
+    # at axis 0 the body's `gather/4` meets its GPU path (indexed axes are a
+    # leading prefix), so the result never leaves the device. The BinaryBackend
+    # indices are transferred up rather than dragging the operand down.
+    test "take along axis 0 (2D source) stays on the GPU" do
       a = v(f32([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
       idx = Nx.tensor([0, 2], type: :s64, backend: Nx.BinaryBackend)
       r = Nx.take(a, idx, axis: 0)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
+      assert Nx.Vulkan.Fallback.count_total(fn -> Nx.take(a, idx, axis: 0) end) == 0
       assert Nx.to_flat_list(r) == [1.0, 2.0, 5.0, 6.0]
       assert Nx.shape(r) == {2, 2}
     end

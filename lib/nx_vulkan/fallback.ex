@@ -277,9 +277,11 @@ defmodule Nx.Vulkan.Fallback do
     # `cumulative_sum` shader and `Nx.all_close` together. Per struct, each
     # carries its own reason and each can be deleted on its own.
     #
-    # Only the *decided* ones are here. The genuine gaps — CumulativeSum/
-    # Product/Min/Max, TopK, Take, TakeAlongAxis, LogicalNot, FFT2/IFFT2/
-    # RFFT/IRFFT — are deliberately absent so `:raise` still reports them.
+    # Only the *decided* ones are here. As of W4 all 21 `Nx.Block.*` structs in
+    # nx 0.13 are decided: 13 allowlisted below, the other 8 routed on-device by
+    # `VulkanoBackend.@device_blocks` so their constituent ops report for
+    # themselves. A new `Nx.Block.*` still lands here undecided and still
+    # raises, which is the intended default.
     {{:block, Nx.Block.LinAlg.SVD}, :always,
      "dense GPU SVD is iterative, convergence-sensitive, and awkward to make " <>
        "bit-reproducible across the fleet, which is a documented property here. " <>
@@ -308,7 +310,32 @@ defmodule Nx.Vulkan.Fallback do
        "raising on it would make strict mode unusable in the tests that need it"},
     {{:block, Nx.Block.Phase}, :always,
      "complex-only, and the shader ISA is real-valued. LIMITATIONS.md lists it " <>
-       "as a permanent skip: there is nothing to implement, not merely nothing done"}
+       "as a permanent skip: there is nothing to implement, not merely nothing done"},
+
+    # --- W4: the four that had nothing to route to ------------------------
+    #
+    # The other eight undecided blocks are NOT here, and that is the decision
+    # rather than an omission: `VulkanoBackend.@device_blocks` evaluates their
+    # bodies on this backend, so `Nx.take/3` at axis 0 and float
+    # `Nx.logical_not/1` are fully resident, and the rest report the op that is
+    # actually missing (`concatenate/3`, `gather/4` off-prefix, integer
+    # `equal/3`) instead of an opaque block. `Nx.top_k/2` reports `argsort/3`,
+    # already allowlisted above — routing is what makes it inherit that
+    # decision honestly rather than restate it.
+    #
+    # These four cannot do that. Their bodies are complex-valued throughout, so
+    # routing would report `do_fft/4` — a rename of the same wall, not a gap
+    # anyone can close while the ISA is real-valued.
+    {{:block, Nx.Block.FFT2}, :always,
+     "complex-valued, like Phase above; the shader ISA is real and the f64 " <>
+       "FFT shaders here serve the real-input path only"},
+    {{:block, Nx.Block.IFFT2}, :always,
+     "the inverse of FFT2 and blocked on exactly the same thing"},
+    {{:block, Nx.Block.RFFT}, :always,
+     "real input, but complex output and a complex-valued body; blocked on " <>
+       "complex dtype support, not on a kernel"},
+    {{:block, Nx.Block.IRFFT}, :always,
+     "complex input; the mirror of RFFT and blocked on the same dtype gap"}
   ]
 
   @doc """

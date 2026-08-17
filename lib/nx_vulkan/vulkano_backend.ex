@@ -1267,8 +1267,79 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # only the names lied, and the first thing to read them (T13's attribution,
   # below) keyed the census off the output template and reported every block
   # in the API as `Nx.Tensor`.
+  # W4 — blocks evaluated ON THIS BACKEND rather than transferred wholesale.
+  #
+  # The nine `{:block, _}` allowlist entries in `Nx.Vulkan.Fallback` are blocks
+  # whose bodies genuinely belong on the host: `Nx.LinAlg.SVD`'s composes into
+  # ~350 separate ops, so transferring once and noting once is both faster and a
+  # far more legible census than 350 lines of shrapnel.
+  #
+  # These are the opposite case. Their bodies compose ops this backend already
+  # has shaders for, so evaluating the body here does real GPU work — and where
+  # a constituent op has no GPU path, IT reports, naming the actual gap instead
+  # of hiding it behind "a block fell back". `Nx.logical_not/1` is a compare
+  # against zero; `Nx.take/3` and `Nx.take_along_axis/3` are `gather/4`, which
+  # has had a shader all along.
+  #
+  # Deliberately NOT noted as a fallback: nothing has left the device at this
+  # point. The constituent ops are individually gated and individually
+  # attributed, which is the whole reason routing beats an allowlist line.
+  # Measured on super-io (RTX 3060 Ti), every result checked element-wise
+  # against `Nx.BinaryBackend`. What each decomposes into once routed:
+  #
+  #   Nx.logical_not/1 f32      0 fallbacks — resident
+  #   Nx.logical_not/1 s32      equal/3        (W5's integer bucket)
+  #   Nx.take/3 axis 0          0 fallbacks — resident
+  #   Nx.take/3 axis 1          gather/4       (GPU path wants leading-prefix axes)
+  #   Nx.take_along_axis/3      concatenate/3
+  #   Nx.top_k/2                argsort/3      (already an allowlisted decision)
+  #   Nx.cumulative_*/2 axis 0  0 fallbacks — resident
+  #   Nx.cumulative_*/2 axis 1  concatenate/3 ×2
+  #
+  # Twelve opaque `{:block, _}` fallbacks become three named gaps —
+  # `concatenate/3`, `gather/4` off-prefix, and integer `equal`/`add`. That is
+  # the argument for routing over an allowlist line: an allowlist entry would
+  # have recorded a decision about `cumulative_sum` when the thing actually
+  # missing is a concatenate shader, which five of these ops share.
+  @device_blocks [
+    Nx.Block.LogicalNot,
+    Nx.Block.Take,
+    Nx.Block.TakeAlongAxis,
+    Nx.Block.TopK,
+    Nx.Block.CumulativeSum,
+    Nx.Block.CumulativeProduct,
+    Nx.Block.CumulativeMin,
+    Nx.Block.CumulativeMax
+  ]
+
+  @doc false
+  @spec device_blocks() :: [module()]
+  def device_blocks, do: @device_blocks
+
   @impl true
-  def block(block_struct, output, args, fun) do
+  def block(block_struct, output, args, fun) when is_list(args) do
+    if block_kind(block_struct) in @device_blocks do
+      # Every tensor arg must be on THIS backend before the body runs — the
+      # exact mirror of what `host_block/4` does downward, and for the same
+      # reason. nx dispatches a multi-arg op to ONE backend, so a body called
+      # with `tensor` here and `indices` on BinaryBackend resolves to
+      # `Nx.BinaryBackend.gather/3` and hands it a Vulkano tensor, which dies in
+      # `to_binary/1` with no clause. `Nx.take/3` reaches that state through
+      # `Nx.padding_with_index/2`, whose index tensor is built on the default
+      # backend while the operand arrived from elsewhere.
+      apply(fun, [block_struct | Enum.map(args, &to_device/1)])
+    else
+      host_block(block_struct, output, args, fun)
+    end
+  end
+
+  def block(block_struct, output, args, fun),
+    do: host_block(block_struct, output, args, fun)
+
+  defp to_device(%T{} = t), do: ensure_on_backend(t)
+  defp to_device(other), do: other
+
+  defp host_block(block_struct, output, args, fun) do
     transfer_to_bin = fn t ->
       if is_struct(t, Nx.Tensor) and match?(%__MODULE__{}, t.data) do
         Nx.backend_transfer(t, Nx.BinaryBackend)

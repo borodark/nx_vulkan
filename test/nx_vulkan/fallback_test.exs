@@ -762,14 +762,27 @@ defmodule Nx.Vulkan.FallbackTest do
       # fallbacks" meant "zero recorded".
       x = t({4}, 1)
 
+      # W4 decided all twelve remaining blocks, and decided most of them by
+      # ROUTING rather than allowlisting: their bodies now run on this backend,
+      # so no `{:block, _}` is recorded at all and the constituent op reports
+      # instead. That is a strictly better census — `cumulative_sum` is not
+      # missing a "scan shader", it is missing `concatenate/3`, which four
+      # cumulative ops and `take_along_axis/3` all share.
       {_r, counts} = Fallback.count(fn -> Nx.cumulative_sum(x) end)
-      assert counts[{:block, Nx.Block.CumulativeSum}] == 1
+      assert counts[{:block, Nx.Block.CumulativeSum}] == nil
+      assert counts == %{{:concatenate, 3} => 1}
 
-      {_r, counts} = Fallback.count(fn -> Nx.top_k(x, k: 2) end)
-      assert counts[{:block, Nx.Block.TopK}] == 1
+      # top_k's only host component is the sort, which IS a standing decision.
+      # Routing makes it inherit that entry honestly instead of restating it,
+      # and the values/indices come back GPU-resident.
+      {r, counts} = Fallback.count(fn -> Nx.top_k(x, k: 2) end)
+      assert counts[{:block, Nx.Block.TopK}] == nil
+      assert counts == %{{:argsort, 3} => 1}
+      assert elem(r, 0).data.__struct__ == VulkanoBackend
 
-      # Two different blocks are two different keys — the property that lets a
-      # missing scan shader be refused while all_close stays permitted.
+      # Blocks that ARE still transferred stay attributed per struct — the
+      # property that lets a genuine gap be refused while all_close, this
+      # suite's own assertion helper, stays permitted.
       {_r, counts} = Fallback.count(fn -> Nx.all_close(x, x) end)
       assert counts[{:block, Nx.Block.AllClose}] == 1
       assert counts[{:block, Nx.Block.CumulativeSum}] == nil
