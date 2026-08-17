@@ -1,8 +1,9 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-16, against `main` @ `a25432f` — state tables only; the
-ranking and the reasoning are unchanged.
+**Refreshed:** 2026-08-16, against `main` @ `62b622e`, after **W2, W1 and W3
+landed**. The ranking is unchanged; three items are struck and the residency
+rate has moved for the first time since it existed.
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -26,13 +27,15 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `a25432f` | |
-| `origin/main` | `a25432f` | **in sync** — nothing unpushed |
-| `upstream/main` | `6ab64ac` | **33 behind** |
+| `HEAD` / local `main` | `62b622e` | W2 + W1 + W3 |
+| `origin/main` | `62b622e` | **in sync** — nothing unpushed |
+| `upstream/main` | `6ab64ac` | **41 behind** |
 
-The consumer pin has since been bumped to match: `../_exmc-things/exmc/mix.lock`
-pins `a25432f`. It is not known whether that bump came with the
-`bench/nuts_truth.exs` run on both arms that §4 asks for — assume it did not.
+`../_exmc-things/exmc/mix.lock` still pins **`a25432f`**, i.e. the commit before
+any of this. That is the right default — see §4 — but it now means the consumer
+is four working commits behind, including a `block/4` fix that changes what an
+`Nx.LinAlg` call costs there. Bumping it is a deliberate act and should come
+with `bench/nuts_truth.exs` on both arms.
 
 ### `rm -rf _build/` — do it early, do not agonise
 
@@ -73,7 +76,15 @@ ever reports `orphan (kept)`, look there before anything else.
 
 `MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
 sequencing note put W2 first, because W2 is what tells you whether W1 and W5
-worked. **That gate is open.**
+worked. **That gate is open, and it has now been used three times.**
+
+| item | state |
+|---|---|
+| **W2** — strict ratchet on `doctest Nx` | **done** `6f8d406` |
+| **W1** — word-generic remap family | **done** `912ce08` `578cf3a` |
+| **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
+| **W4** — decide the twelve `Nx.Block.*` | **next** |
+| **W5** — integer kernels | the 373-doctest bucket; the big one |
 
 ```sh
 sh scripts/doctest_residency.sh
@@ -84,8 +95,8 @@ sh scripts/doctest_residency.sh
 `test/nx_doctest_register.exs` names the 488 doctests that still leave the GPU,
 131 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
 fallbacks are being refused, so a normal `mix test` still runs and asserts all
-843. The strict suite went from 910 excluded to 591 at W2. CI runs the script as
-its own step. See `MISSION.md` §2.3 for what was built and the one departure
+843. The strict suite went from 910 excluded to 591 at W2, and to 557 as W1 and
+W3 moved doctests onto the device. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
@@ -100,6 +111,15 @@ check `device_name()` before touching the register.
 rate moved 319 → 347 → 355, and both times the ratchet failed the build on
 stale entries and named every one. That is the loop this project was missing.
 
+**One caveat on all of it: W1 and W3 were verified on mac-247 only.** super-io's
+nvidia kernel module went version-mismatched against its userspace mid-session
+(580.173.02 loaded, 580.178.04 installed), so Vulkan there fell through to
+llvmpipe and every measurement moved to the Kepler. The register matched on both
+machines at all three points, so nothing is *suspected* — but re-run
+`mix test`, `sh scripts/strict_test.sh` and `sh scripts/doctest_residency.sh`
+on super-io once it is rebooted, because Ampere is what CI and the trader use.
+Expect `843 / 476 / 0`, `557 excluded`, and `355 / 843 (42.1%)`.
+
 **Use it as the acceptance test for everything that follows.** Run the script
 before and after; if the rate did not move, the op did not reach the device.
 The buckets are scored as work items:
@@ -111,9 +131,30 @@ The buckets are scored as work items:
 | `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
 | `@complex_and_fft` | 45 | not work under current dtype support |
 
-Then W4 (decide the twelve `Nx.Block.*`), W5 (integer kernels — the 373-doctest
-bucket), W8 (`dot` beyond rank-2 × rank-2, which `@float_residency_gap` scores
-at four doctests and which W3's own tests walked into at `dot/7`).
+### W4, concretely
+
+`MISSION.md` §3.3.2. `Nx.Vulkan.Fallback`'s allowlist carries **9**
+`{:block, Nx.Block.*}` entries (SVD, QR, LU, Eigh, Cholesky, Solve,
+Determinant, AllClose, Phase); the twelve *undecided* ones are the rest of the
+family — `Take`, `TakeAlongAxis`, `TopK`, `LogicalNot`, `CumulativeSum/Product/
+Min/Max`, `FFT2`, `IFFT2`, `RFFT`, `IRFFT`. Each needs one of two outcomes, and
+both are cheap:
+
+* **an allowlist line with a reason** — it is a decision, not an accident; or
+* **a route to a shader that already exists**. §7 flags `Take` /
+  `TakeAlongAxis` as likely `gather`, and `LogicalNot` as a compare.
+
+W3 already showed why this is worth doing rather than deferring: `block/4` was
+where a wrong *answer* hid, not just a slow path. Note also that
+`Nx.LinAlg.invert/1` is **not** a block at all — it composes at the Nx level, so
+`with_binary_backend/1` never sees it and it falls back at `indexed_put/5`.
+Worth checking which other `Nx.LinAlg` entry points are in that position before
+assuming the family is covered.
+
+Then W5 (integer kernels — the 373-doctest bucket, and the only bucket that has
+moved at all so far), and W8 (`dot` beyond rank-2 × rank-2, which
+`@float_residency_gap` scores at four doctests and which W3's own tests walked
+straight into at `dot/7`).
 
 ---
 
@@ -127,9 +168,11 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 
 | item | state | who can do it |
 |---|---|---|
-| ~~Push `40d3137` to `origin`~~ | **done** — `origin/main` is at `a25432f` | |
+| ~~Push to `origin`~~ | **done** — `origin/main` is at `62b622e`, nothing unpushed | |
+| **Re-verify on super-io** | pending its reboot; everything since W1 was measured on mac-247 only (§1) | anyone, once the box is back |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
-| **`upstream/main` is 33 commits behind** | unpublished | **operator** — publishing decision |
+| **`upstream/main` is 41 commits behind** | unpublished | **operator** — publishing decision |
+| **Consumer pin is 4 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
 
 The retirement command, for when someone has the password:
 
@@ -217,16 +260,20 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite (super-io, re-run at W2): 843 doctests, 456 tests, 0 failures
+# suite (mac-247, at 62b622e): 843 doctests, 476 tests, 0 failures
+# NOT re-run on super-io since its driver broke — see §1.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 843/456/0, 591 excluded
+sh scripts/strict_test.sh            # 843/476/0, 557 excluded
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 319 / 843 (37.8%)
+sh scripts/doctest_residency.sh      # 355 / 843 (42.1%)
 
-# confirm the real GPU, not llvmpipe, before believing any perf figure
+# confirm the real GPU, not llvmpipe, before believing ANY figure — not just
+# perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
+# returns 0, which fails three doctests and three select tests. A red suite on
+# super-io is worth a device check before it is worth debugging.
 Nx.Vulkan.NativeV.device_name()      #=> {:ok, "NVIDIA GeForce RTX 3060 Ti", "DiscreteGpu"}
 ```
 
