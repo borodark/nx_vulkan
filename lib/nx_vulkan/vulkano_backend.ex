@@ -1302,7 +1302,22 @@ defmodule Nx.Vulkan.VulkanoBackend do
     # recorded" and a green strict run said nothing about any of it.
     Nx.Vulkan.Fallback.note({:block, block_kind(block_struct)}, block_meta(output))
 
-    result = Nx.BinaryBackend.block(block_struct, output, args_bin, fun)
+    # W3: `with_binary_backend/1` is load-bearing, not tidiness. Transferring
+    # the ARGS is not enough — every `fun` here is a defn, and
+    # `Nx.Defn.Evaluator` materialises its constants and intermediates on the
+    # process DEFAULT backend, which is this one. So `Nx.LinAlg.LU.lu/1` ran its
+    # pivot search through VulkanoBackend on tensors nobody transferred, and
+    # `Nx.LinAlg.lu(Nx.eye(2))` returned P = [[0,1],[1,0]], L = [[1,0],[1,1]]
+    # and U = all zeros — for the identity matrix. `Nx.LinAlg.solve/2` then
+    # raised `can't solve for singular matrix` on a non-singular input.
+    #
+    # This was invisible for as long as it existed because the same call raised
+    # `ArithmeticError` in `encode_scalar/2` first (nx composes solve's pivot
+    # search through `Nx.Constants.neg_infinity`, an ATOM). Fixing the encoder
+    # is what made the wrong answer reachable. A raise is a much better failure
+    # than a plausible wrong matrix, which is the only reason this was ever
+    # found.
+    result = with_binary_backend(fn -> Nx.BinaryBackend.block(block_struct, output, args_bin, fun) end)
 
     # Per Tier 1 of SHAPE_C_PLAN.md: result is already on BinaryBackend,
     # leave it there. Nx supports mixed-backend tensors flowing through
@@ -2300,6 +2315,35 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp element_bytes({:bf, 16}), do: 2
   defp element_bytes({:c, 64}), do: 8
   defp element_bytes({:c, 128}), do: 16
+
+  # Non-finite floats arrive as ATOMS. `Nx.Constants.infinity/1`,
+  # `neg_infinity/1` and `nan/1` return `:infinity | :neg_infinity | :nan`, and
+  # every numeric clause below raises `ArithmeticError` on one — `s / 1.0` and
+  # `trunc(s)` alike. That is W3: `Nx.LinAlg.solve(Nx.eye(2), [1.0, 2.0])`
+  # raised on a shipped backend, for an op the allowlist documents as supported
+  # via the host, because nx composes solve's pivot search through
+  # `Nx.Constants.neg_infinity` and the resulting constant landed here.
+  #
+  # The bit patterns are IEEE-754 and match `Nx.BinaryBackend` byte for byte
+  # (checked, not assumed). Writing them as integers with `-native` keeps the
+  # byte order correct on either endianness, which `<<0x7F800000::32>>` would
+  # not; there is no float literal for these, which is the whole reason nx uses
+  # atoms in the first place.
+  defp encode_scalar(:infinity, {:f, 16}), do: <<0x7C00::unsigned-16-native>>
+  defp encode_scalar(:infinity, {:f, 32}), do: <<0x7F800000::unsigned-32-native>>
+  defp encode_scalar(:infinity, {:f, 64}), do: <<0x7FF0000000000000::unsigned-64-native>>
+  defp encode_scalar(:neg_infinity, {:f, 16}), do: <<0xFC00::unsigned-16-native>>
+  defp encode_scalar(:neg_infinity, {:f, 32}), do: <<0xFF800000::unsigned-32-native>>
+  defp encode_scalar(:neg_infinity, {:f, 64}), do: <<0xFFF0000000000000::unsigned-64-native>>
+  defp encode_scalar(:nan, {:f, 16}), do: <<0x7E00::unsigned-16-native>>
+  defp encode_scalar(:nan, {:f, 32}), do: <<0x7FC00000::unsigned-32-native>>
+  defp encode_scalar(:nan, {:f, 64}), do: <<0x7FF8000000000000::unsigned-64-native>>
+
+  # A non-finite atom at any OTHER dtype (integer storage, bf16/f8/complex) has
+  # no encoding here. Signal fallback rather than guessing: constant/3 then
+  # rebuilds it on BinaryBackend, which is the reference this backend is
+  # required to match — including when the reference itself refuses.
+  defp encode_scalar(s, _type) when s in [:infinity, :neg_infinity, :nan], do: :error
 
   defp encode_scalar(s, {:f, 16}), do: <<s / 1.0::float-16-native>>
   defp encode_scalar(s, {:f, 32}), do: <<s / 1.0::float-32-native>>
