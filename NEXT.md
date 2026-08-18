@@ -5,7 +5,8 @@
 `concat_nd` shader both landed** on top of W2/W1/W3. The ranking is unchanged;
 the super-io re-verification is closed, the leapfrog ownership question is
 settled *and fixed downstream*, and the work item W4's census surfaced — an
-axis > 0 `concatenate` shader — is **written and green**. Next is W5.
+axis > 0 `concatenate` shader — is **written and green**. Next is W5, and it is
+now scoped and priced: **§1.2**.
 
 **The reboot happened, and both worries came to nothing.** The driver came back
 matched at **580.178.04** on both sides, `device_name()` is the 3060 Ti, and all
@@ -107,7 +108,7 @@ worked. **That gate is open, and it has now been used four times.**
 | **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
 | **W4** — decide the twelve `Nx.Block.*` | **done** `cc77b2a` `cae4dad` |
 | **`concat_nd`** — axis > 0 concatenate | **done** `c9b1a31` — not a W item; W4's census found it |
-| **W5** — integer kernels | the 357-doctest bucket; the big one, and now the clear next |
+| **W5** — integer kernels | the 357-doctest bucket; the big one, and now the clear next. **Scoped in §1.2** — worth 47.2% → 76.0% |
 
 ```sh
 sh scripts/doctest_residency.sh
@@ -157,7 +158,7 @@ The buckets are scored as work items:
 
 | bucket | doctests | item |
 |---|---:|---|
-| `@integer_dtype` | 357 | **W5** — it empties this bucket wholesale. W1 took 28, W3 took 8 |
+| `@integer_dtype` | 357 | **W5** — but it does *not* empty this bucket wholesale; §1.2 has the census that says so, and the simulation that prices it at 47.2% → 76.0%. W1 took 28, W3 took 8 |
 | `@float_residency_gap` | 32 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
 | `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
 | `@complex_and_fft` | 20 | not work under current dtype support. W4 allowlisted the four FFT blocks, which took 25 doctests out of this bucket without moving them onto the device |
@@ -206,6 +207,156 @@ in `test/nx_vulkan/concat_test.exs` pins that fallback so nobody "fixes" it agai
 **Not done:** axis 0 still requires all operands resident too, and was left
 alone rather than made consistent — it is the `stack/3` NUTS trace-building
 shape and deserves its own measurement before being touched.
+
+### 1.2 W5, scoped — the census, and what it is actually worth
+
+Measured on super-io at `1c57eb7`, 2026-08-17, by the same method W4 used: run
+the 843 `doctest Nx` under `NXV_HOST_FALLBACK=raise` with the register off, and
+read the op and dtype out of every `Nx.Vulkan.HostFallbackError`. All 445
+failures parse; the 357 in `@integer_dtype` partition exactly.
+
+**The headline first, because it is the argument for doing W5 at all.** The
+allowlist can be used as a simulator: excuse a family of callbacks and re-run,
+and the residency you get back is the residency that family's shaders would
+buy. Excusing every op W5 would write:
+
+| tier | what is excused | residency |
+|---|---|---:|
+| — | today | 398 / 843 (47.2%) |
+| **T1** | integer elementwise binary + unary + compare + select | **535 / 843 (63.5%)** |
+| **T2** | T1 + integer axis-reduce and window-reduce | **624 / 843 (74.0%)** |
+| **T3** | T2 + integer `dot` | **641 / 843 (76.0%)** |
+
+**+243 doctests, 47.2% → 76.0%.** Nothing else on the board is within an order
+of magnitude of that. The figure errs in both directions and roughly cancels:
+it over-counts by ~14, because excusing `window_sum/4` excuses its f32
+instances too and those belong to `@float_residency_gap`; and it under-counts,
+because an *allowlisted* op still computes on the host and returns a host
+tensor, so every residency-gated op downstream of one still reports. That
+second effect is visible and large — see the residual below.
+
+#### The 357 is three different gaps, not one
+
+`MISSION.md` §7 scopes W5 as "integer elementwise / compare / select / reduce
+kernels" and the register scores it at 357. **Those are not the same number.**
+Classified by what is actually in the way:
+
+| class | doctests | what it is |
+|---|---:|---|
+| **A — dtype-gated** | **195** | a shader exists for f32/f64 and the selector returns `nil` for integers. `binary_spv/1`, `unary_spv/1`, `compare_spv/1`, `select_spv/1`, `reduce_spv/2`, `window_reduce_spv/1` — six functions, each ending in `defp …(_), do: nil`. This is W5 as written |
+| **B — no path at any dtype** | **138** | the callback is in `@host_fallback_unary_ops` / `@host_fallback_binary_ops`, or transfers unconditionally. f32 falls back here too. Writing an integer shader does *not* close these; each also needs an op code and a route |
+| **C — shape/residency-gated** | **24** | dtype is not the gate. `gather/4` off-prefix axes, `concatenate/3` with a host operand, int→int `as_type/2`. They sit in `@integer_dtype` only because Nx's doctests are `{:s, 32}` |
+
+Class B splits again, and the split is the plan. **67 of the 138 ride the same
+shaders as class A** — `quotient`, `remainder`, the three bitwise binaries, both
+shifts, the three logicals, `bitwise_not`, `population_count`,
+`count_leading_zeros`, `is_nan`, `is_infinity`, `product` — they need an op code
+in a kernel W5 is writing anyway, plus deletion from the host-fallback list. The
+other **71** are separate work items and W5 should not claim them:
+`indexed_put/5` (20) and `indexed_add/5` (4) have no scatter shader for any
+dtype, `argmax`/`argmin` (22) no shader at all, `reduce/5` (10) takes an
+arbitrary fun, `all`/`any` (10) are u8 boolean reductions, `stack/3` (5)
+transfers unconditionally and could simply route to `concatenate/3`.
+
+#### It is a 32-bit job
+
+Of the 195 class-A doctests: **168 are `{:s, 32}`**, 23 are `{:u, 8}` *outputs*
+of comparisons whose *inputs* are `s32` — the compare shader already writes
+packed u8, so those need an `int` input variant and nothing more — and **4 are
+`{:s, 8}`**. Across the whole 445 there are five `{:s, 64}` rows, four
+`{:u, 32}`, two `{:s, 16}`.
+
+So `int`/`uint` in core GLSL 450 covers 191 of the 195. **No `Int64`
+capability, no `GL_EXT_shader_8bit_storage`, no `16bit_storage`** — nothing that
+would need checking against the Kepler fleet. The four s8 rows are a documented
+tail, not a scope item.
+
+**And no Rust.** Every dispatch entry point already takes the SPIR-V path as a
+parameter — `apply_binary(out, a, b, n, op_code, spv_path)`,
+`apply_unary/5`, `apply_compare/7`, `apply_select/8`, `reduce_axis/7`,
+`window_reduce/7`, `matmul32/7`. W5 is `.comp` files, `glslangValidator`, and
+one clause per selector. The `native/` tree does not move.
+
+Seven new shaders, taking the invariant from 57 ↔ 57 to 64 ↔ 64:
+`elementwise_binary_s32`, `elementwise_binary_bcast_s32`,
+`elementwise_unary_s32`, `compare_s32`, `select_s32`, `reduce_axis_s32`,
+`window_reduce_s32` — plus `matmul_s32` for T3.
+
+#### Six semantics traps, each measured against `Nx.BinaryBackend`
+
+The correctness test for W5 is bit-equality against `BinaryBackend` on integers,
+which is *exact* — there is no tolerance to hide in. These are the places where
+the obvious GLSL gives a different answer. All six were run on the host at
+`1c57eb7`:
+
+| what | `BinaryBackend` says | the trap |
+|---|---|---|
+| `sum` of `{:s, 32}` overflowing | `2e9 + 2e9 → -294967296` | it **wraps**. The f32 reduce shader accumulates in `double` to match; an s32 reduce must **not** widen, or it disagrees exactly where it matters |
+| `sum` of `{:s, 8}` | type `{:s, 32}` | reductions **widen**, like the existing `{:u, 8} → {:u, 32}` entry. `reduce_spv/2` is keyed on the (in, out) pair for precisely this reason — keep it that way |
+| `multiply` on `{:s, 8}` | `100 * 100 → 16` | elementwise ops wrap **at the element width**, not at 32 bits |
+| `remainder` | `-7 rem 3 → -1`, `7 rem -3 → 1` | sign of the **dividend**. GLSL's `%` is *undefined* for negative operands — write `x - (x/y)*y`, do not use `%` |
+| `quotient` | `-7 / 3 → -2` | truncates toward zero. Same GLSL caveat |
+| `count_leading_zeros` | `0 → 32`, `1 → 31`, `-1 → 0` | `findMSB` returns `-1` for zero; the zero case needs its own branch |
+
+One thing that is *not* a trap: `Nx.divide` on two integers returns `{:f, 32}`,
+so the integer binary shader needs no divide op code at all.
+
+#### Read the demand histogram, not just the first-fallback count
+
+Under `:raise` each doctest reports once — its *first* fallback. Under
+`:warn` all 843 run to completion and report **759** fallbacks. The two
+orderings disagree sharply, and the second is the one that predicts how much
+GPU work W5 keeps resident:
+
+| op | first-fallback | all fallbacks |
+|---|---:|---:|
+| `max/3` | 13 | **89** |
+| `add/3` | 15 | **70** |
+| `concatenate/3` | 8 | **57** |
+| `subtract/3` | 23 | 47 |
+| `sum/3` | 24 | 31 |
+
+Integer `max` is the single most-called missing kernel in the whole API, and it
+ranks thirteenth by the first-fallback count. `Nx.clip/3`, `Nx.mode/2` and the
+`cumulative_*` family all lean on it.
+
+#### What is left at 76%, and why some of it is an artifact
+
+The residual after the full simulation is 202 doctests. The honest reading:
+
+```
+34  concatenate/3   s32     ← artifact: see below
+22  indexed_put/5           no scatter shader, any dtype
+16  do_fft/4        c64     decided (complex)
+12  as_type/2               int→int and f16/bf16 casts
+11  gather/4        s32     off-prefix axes
+11  argmax/3        s32     no shader
+11  argmin/3        s32     no shader
+11  reduce/5        s32     arbitrary-fun reduce
+40  f64 transcendentals     decided (GLSL.std.450)
+```
+
+**`concatenate/3` going 7 → 34 is the simulation lying, not a real gap.** An
+allowlisted op still computes on the host, so its result comes back on
+`BinaryBackend`, and `concat_nd`'s `all_vulkano?` gate — the one §1.1 explains
+at length and pins a test on — then refuses. With real integer shaders those
+operands stay resident and most of the 34 close for free. The same applies to
+`gather/4` (11) and `stack/3` (5). Do not plan work against those rows.
+
+**`indexed_put/5` at 22 is the real find.** It is an unconditional host
+fallback for *every* dtype, it is the largest single non-decided residual after
+W5, and `MISSION.md` §3.3 already noted that `Nx.LinAlg.invert/1` dies there.
+It deserves a W-number of its own; a scatter shader is the natural sibling of
+`gather.comp`, which has existed all along.
+
+#### Suggested order
+
+T1 first, and stop to measure. It is 137 doctests on its own, it is the tier
+whose shaders every later tier reuses, and it is where all six semantics traps
+live — get wrapping and sign conventions bit-exact against `BinaryBackend` on
+30 lines of GLSL before there are 200. Then T2, then T3. Run
+`sh scripts/doctest_residency.sh` before and after each; if the rate does not
+move, the op did not reach the device.
 
 ### W4 is done — and it went by routing, not by allowlisting
 
