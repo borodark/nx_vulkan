@@ -7,10 +7,10 @@ the super-io re-verification is closed, the leapfrog ownership question is
 settled *and fixed downstream*, and the work item W4's census surfaced — an
 axis > 0 `concatenate` shader — is **written and green**. Next is W5.
 
-**Written down before a reboot of super-io.** Nothing is in flight and the tree
-is clean, but **five commits are unpushed** (§0) and the box's nvidia driver is
-the one thing here that a reboot has broken before — see §0 and §5 before
-trusting any number measured after it comes back.
+**The reboot happened, and both worries came to nothing.** The driver came back
+matched at **580.178.04** on both sides, `device_name()` is the 3060 Ti, and all
+three figures reproduce exactly (§5). The five commits are **pushed** —
+`origin/main` is at `9167899`, level with `HEAD` (§0).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -34,14 +34,15 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `c9b1a31` | W2 + W1 + W3 + W4 + `concat_nd` |
-| `origin/main` | `a930157` | **5 behind — UNPUSHED WORK** |
-| `upstream/main` | `6ab64ac` | **47 behind** |
+| `HEAD` / local `main` | `9167899` | W2 + W1 + W3 + W4 + `concat_nd` |
+| `origin/main` | `9167899` | **level — the W4/concat work is pushed** |
+| `upstream/main` | `6ab64ac` | **48 behind** |
 
-**The five unpushed commits are the first thing to deal with after the reboot**,
-because they are the only copy of W4 and the concat shader:
+The five commits that were the only copy of W4 and the concat shader are on the
+private server as of 2026-08-17. Nothing here is unbacked any more:
 
 ```
+9167899  docs(NEXT): refresh against c9b1a31, before the super-io reboot
 c9b1a31  concat_nd: an axis > 0 concatenate shader, and it moves five ops at once
 70117d5  docs(NEXT): the §0/§1 ledger, refreshed against the merge
 73c57f0  docs(NEXT): the leapfrog defect is fixed upstream, and why it nearly wasn't
@@ -49,8 +50,8 @@ cae4dad  W4: fold the 30 doctests it moved, and mark it done
 cc77b2a  W4: route eight Nx.Block.* on-device, allowlist the four FFT ones
 ```
 
-`git push origin main` — **not** `upstream`, which is the public release remote
-and is deliberately 47 behind.
+Push with `git push origin main` — **not** `upstream`, which is the public
+release remote and is deliberately 48 behind.
 
 `../_exmc-things/exmc/mix.lock` still pins **`a25432f`**, i.e. the commit before
 any of this. That is the right default — see §4 — but it now means the consumer
@@ -304,8 +305,8 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 
 | item | state | who can do it |
 |---|---|---|
-| **Push to `origin`** | **REOPENED — 5 commits unpushed** (W4 ×2, concat_nd, 2 doc). `git push origin main`. See §0 | anyone, first thing after the reboot |
-| ~~Re-verify on super-io~~ | **done** — driver matched at 580.178.04, all three figures reproduce on Ampere (§1). **Re-check after the 2026-08-17 reboot** (§5) | |
+| ~~Push to `origin`~~ | **done** — `origin/main` at `9167899`, level with `HEAD` | |
+| ~~Re-verify on super-io~~ | **done twice** — once at `a930157`, again after the 2026-08-17 reboot at `9167899`: driver matched 580.178.04 both sides, `device_name()` the 3060 Ti, all three figures exact (§5) | |
 | **Re-verify on mac-247** | not run since W4; W4 and `concat_nd` are super-io-only measurements | anyone with the Kepler |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 47 commits behind** | unpublished | **operator** — publishing decision |
@@ -451,8 +452,8 @@ time.
 
 ```sh
 # suite: 843 doctests, 526 tests, 0 failures.
-# Last measured on super-io at c9b1a31. mac-247 has NOT been re-run since W4 —
-# see §1 and the reboot note below.
+# Last measured on super-io at 9167899, after the reboot. mac-247 has NOT been
+# re-run since W4 — see §1 and the reboot note below.
 mix test
 
 # strict — did the work stay on the GPU?
@@ -468,7 +469,7 @@ sh scripts/doctest_residency.sh      # 398 / 843 (47.2%), exits 0
 Nx.Vulkan.NativeV.device_name()      #=> {:ok, "NVIDIA GeForce RTX 3060 Ti", "DiscreteGpu"}
 ```
 
-**After the 2026-08-17 reboot, check the driver before anything else.** This box
+**Check the driver before anything else after any reboot.** This box
 has already lost a session to it once: the nvidia kernel module went
 version-mismatched against its userspace mid-session (580.173.02 loaded against
 580.178.04 installed), Vulkan silently fell through to llvmpipe, and every
@@ -480,8 +481,9 @@ cat /proc/driver/nvidia/version                        # loaded
 ls /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*     # installed
 ```
 
-The two must match. They both read **580.178.04** at `c9b1a31`, which is the
-state every figure in this file was measured under.
+The two must match. They both read **580.178.04** at `c9b1a31` and still do
+after the 2026-08-17 reboot at `9167899`, which is the state every figure in
+this file was measured under.
 
 **Residency is not correctness, and a value assertion cannot see the
 difference** — the host fallback *is* `Nx.BinaryBackend`, the reference every
