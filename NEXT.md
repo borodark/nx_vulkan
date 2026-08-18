@@ -1,11 +1,16 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-17, against `main` @ `73c57f0`, with **W4 merged** on
-top of W2/W1/W3. The ranking is unchanged; the super-io re-verification is
-closed, the leapfrog ownership question is settled *and fixed downstream*, and
-W4's census surfaced a work item the ranking never had — a `concatenate`
-shader, now the next item in flight.
+**Refreshed:** 2026-08-17, against `main` @ `c9b1a31`, with **W4 and the
+`concat_nd` shader both landed** on top of W2/W1/W3. The ranking is unchanged;
+the super-io re-verification is closed, the leapfrog ownership question is
+settled *and fixed downstream*, and the work item W4's census surfaced — an
+axis > 0 `concatenate` shader — is **written and green**. Next is W5.
+
+**Written down before a reboot of super-io.** Nothing is in flight and the tree
+is clean, but **five commits are unpushed** (§0) and the box's nvidia driver is
+the one thing here that a reboot has broken before — see §0 and §5 before
+trusting any number measured after it comes back.
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -29,13 +34,27 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `73c57f0` | W2 + W1 + W3 + W4 |
-| `origin/main` | `73c57f0` | **in sync** — nothing unpushed |
-| `upstream/main` | `6ab64ac` | **45 behind** |
+| `HEAD` / local `main` | `c9b1a31` | W2 + W1 + W3 + W4 + `concat_nd` |
+| `origin/main` | `a930157` | **5 behind — UNPUSHED WORK** |
+| `upstream/main` | `6ab64ac` | **47 behind** |
+
+**The five unpushed commits are the first thing to deal with after the reboot**,
+because they are the only copy of W4 and the concat shader:
+
+```
+c9b1a31  concat_nd: an axis > 0 concatenate shader, and it moves five ops at once
+70117d5  docs(NEXT): the §0/§1 ledger, refreshed against the merge
+73c57f0  docs(NEXT): the leapfrog defect is fixed upstream, and why it nearly wasn't
+cae4dad  W4: fold the 30 doctests it moved, and mark it done
+cc77b2a  W4: route eight Nx.Block.* on-device, allowlist the four FFT ones
+```
+
+`git push origin main` — **not** `upstream`, which is the public release remote
+and is deliberately 47 behind.
 
 `../_exmc-things/exmc/mix.lock` still pins **`a25432f`**, i.e. the commit before
 any of this. That is the right default — see §4 — but it now means the consumer
-is nine working commits behind (twelve counting doc refreshes), including a
+is ten working commits behind (fourteen counting doc refreshes), including a
 `block/4` fix that changes what an `Nx.LinAlg` call costs there. Bumping it is a
 deliberate act and should come with `bench/nuts_truth.exs` on both arms.
 
@@ -65,7 +84,7 @@ gitignored and safe to delete. And `~/.exmc/gpu_node/spv/` caches synthesised
 shaders **keyed by a hash of the generated GLSL**, so it invalidates itself
 correctly — but delete it if you suspect otherwise.
 
-**The shader invariant: 59 `.comp` ↔ 59 `.spv`, every blob regenerable.**
+**The shader invariant: 57 `.comp` ↔ 57 `.spv`, every blob regenerable.**
 Established in `ac509d2`, checked by the skill on every run, and holding as of
 `a25432f`. Until then,
 seven `.spv` had no source in the tree and the only copies lived in
@@ -74,7 +93,7 @@ ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. W2, W1, W3 and W4 are done. Next is W5
+## 1. W2, W1, W3, W4 and `concat_nd` are done. Next is W5
 
 `MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
 sequencing note put W2 first, because W2 is what tells you whether W1 and W5
@@ -86,19 +105,20 @@ worked. **That gate is open, and it has now been used four times.**
 | **W1** — word-generic remap family | **done** `912ce08` `578cf3a` |
 | **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
 | **W4** — decide the twelve `Nx.Block.*` | **done** `cc77b2a` `cae4dad` |
-| **W5** — integer kernels | the 369-doctest bucket; the big one |
+| **`concat_nd`** — axis > 0 concatenate | **done** `c9b1a31` — not a W item; W4's census found it |
+| **W5** — integer kernels | the 357-doctest bucket; the big one, and now the clear next |
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 385 / 843 (45.7%) run with host fallbacks refused
+#=> doctest Nx residency: 398 / 843 (47.2%) run with host fallbacks refused
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 458 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 445 doctests that still leave the GPU,
 131 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
 fallbacks are being refused, so a normal `mix test` still runs and asserts all
 843. The strict suite went from 910 excluded to 591 at W2, then 557 as W1 and
-W3 moved doctests onto the device, and 527 at W4. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
+W3 moved doctests onto the device, 527 at W4 and 518 after `concat_nd`. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
@@ -110,8 +130,8 @@ plus three `select` tests fail on value; if a run reports one extra fallback,
 check `device_name()` before touching the register.
 
 **W1, W3 and W4 were all measured with it, and it worked every time.** The
-rate moved 319 → 347 → 355 → 385, and every time the ratchet failed the build
-on stale entries and named every one. That is the loop this project was missing.
+rate moved 319 → 347 → 355 → 385 → 398, and every time the ratchet failed the
+build on stale entries and named every one. That is the loop this project was missing.
 
 **W1 and W3 were briefly verified on mac-247 only — that gap is now closed.**
 super-io's nvidia kernel module had gone version-mismatched against its userspace
@@ -136,10 +156,55 @@ The buckets are scored as work items:
 
 | bucket | doctests | item |
 |---|---:|---|
-| `@integer_dtype` | 369 | **W5** — it empties this bucket wholesale. W1 took 28, W3 took 8 |
+| `@integer_dtype` | 357 | **W5** — it empties this bucket wholesale. W1 took 28, W3 took 8 |
 | `@float_residency_gap` | 32 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
 | `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
 | `@complex_and_fft` | 20 | not work under current dtype support. W4 allowlisted the four FFT blocks, which took 25 doctests out of this bucket without moving them onto the device |
+
+### 1.1 `concat_nd` — the census cashed in
+
+`glsl/concat_nd.comp` (`c9b1a31`). W4's census named three gaps; this closed one
+of them and **all five ops that shared it went resident at once** — all four
+`Nx.cumulative_*/2` and `Nx.take_along_axis/3`, zero fallbacks. Residency
+385 → 398 (45.7% → 47.2%), strict 527 → 518 excluded, register 458 → 445.
+
+**Unlike W4's own 30, this 13 needs no asterisk.** Every one is genuinely
+device-resident, not merely permitted to leave. Refused-clean and
+device-resident readings are now 398/843 (47.2%) and 373/843 (44.2%).
+
+Axis 0 was never the problem — a row-major axis-0 concat is a byte append and
+`concat_buffers/1` already did it. Axis > 0 is the kernel. It belongs to the
+index-remap family but **inverts its direction**: `transpose_nd` / `reverse_nd`
+/ `broadcast_nd` run one thread per *output* element because they have one
+input, whereas concat has k inputs and k varies per call, so it cannot bind them
+all. Instead it runs **one dispatch per input, one thread per input element**.
+Each input owns `[offset, offset + in[axis])` on the concat axis, so the regions
+are disjoint: the output accumulates with no races and no read-modify-write, and
+traffic is O(output) rather than the O(k·output) that layering k `put_slice`
+overlays would have cost.
+
+**Two things worth knowing before touching it.**
+
+*The skill says not to write this kernel.* `vulkan-nx-compute` §1 lists `concat`
+under do-NOT-write-a-kernel. That advice is about compute cost, and concat has
+none — it is pure data movement, i.e. the skill's own bandwidth-bound category
+where the round trip costs more than the work, and the census showed it is not
+rarely-hit either. **That line in the skill should be revised**; it has not been.
+
+*The all-operands-resident gate looks too narrow and is not.* Requiring only one
+resident operand and uploading the rest is the obvious §1b move, and it broke
+four `Nx.mode/2` doctests. Promoting the operands makes the *result* resident,
+and `Nx.take_along_axis/3` then hands that resident index tensor to `Nx.gather/3`
+beside a host operand; nx resolves a multi-arg op to ONE backend, picks
+`Nx.BinaryBackend.gather/3`, and it dies in `to_binary/1` with no clause. The
+looser gate does not remove a mixed-backend pair, it moves one downstream where
+this backend cannot fix it. §1b says gate on what the *kernel* cannot do — here
+the kernel can and the *caller* cannot, which is still a real constraint. A test
+in `test/nx_vulkan/concat_test.exs` pins that fallback so nobody "fixes" it again.
+
+**Not done:** axis 0 still requires all operands resident too, and was left
+alone rather than made consistent — it is the `stack/3` NUTS trace-building
+shape and deserves its own measurement before being touched.
 
 ### W4 is done — and it went by routing, not by allowlisting
 
@@ -222,7 +287,7 @@ where a wrong *answer* hid, not just a slow path. Note also that
 Worth checking which other `Nx.LinAlg` entry points are in that position before
 assuming the family is covered.
 
-Then W5 (integer kernels — the 369-doctest bucket, and the only bucket that has
+Then W5 (integer kernels — the 357-doctest bucket, and the only bucket that has
 moved at all so far), and W8 (`dot` beyond rank-2 × rank-2, which
 `@float_residency_gap` scores at four doctests and which W3's own tests walked
 straight into at `dot/7`).
@@ -239,11 +304,12 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 
 | item | state | who can do it |
 |---|---|---|
-| ~~Push to `origin`~~ | **done** — `origin/main` is at `62b622e`, nothing unpushed | |
-| ~~Re-verify on super-io~~ | **done** — box rebooted, driver matched at 580.178.04, all three figures reproduce exactly on Ampere (§1) | |
+| **Push to `origin`** | **REOPENED — 5 commits unpushed** (W4 ×2, concat_nd, 2 doc). `git push origin main`. See §0 | anyone, first thing after the reboot |
+| ~~Re-verify on super-io~~ | **done** — driver matched at 580.178.04, all three figures reproduce on Ampere (§1). **Re-check after the 2026-08-17 reboot** (§5) | |
+| **Re-verify on mac-247** | not run since W4; W4 and `concat_nd` are super-io-only measurements | anyone with the Kepler |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
-| **`upstream/main` is 41 commits behind** | unpublished | **operator** — publishing decision |
-| **Consumer pin is 4 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
+| **`upstream/main` is 47 commits behind** | unpublished | **operator** — publishing decision |
+| **Consumer pin is 10 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
 
 The retirement command, for when someone has the password:
 
@@ -384,15 +450,16 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite: 843 doctests, 476 tests, 0 failures.
-# Confirmed on BOTH mac-247 (at 62b622e) and super-io (at a930157) — see §1.
+# suite: 843 doctests, 526 tests, 0 failures.
+# Last measured on super-io at c9b1a31. mac-247 has NOT been re-run since W4 —
+# see §1 and the reboot note below.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 843/476/0, 527 excluded
+sh scripts/strict_test.sh            # 843/526/0, 518 excluded
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 385 / 843 (45.7%)
+sh scripts/doctest_residency.sh      # 398 / 843 (47.2%), exits 0
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
@@ -400,6 +467,21 @@ sh scripts/doctest_residency.sh      # 385 / 843 (45.7%)
 # super-io is worth a device check before it is worth debugging.
 Nx.Vulkan.NativeV.device_name()      #=> {:ok, "NVIDIA GeForce RTX 3060 Ti", "DiscreteGpu"}
 ```
+
+**After the 2026-08-17 reboot, check the driver before anything else.** This box
+has already lost a session to it once: the nvidia kernel module went
+version-mismatched against its userspace mid-session (580.173.02 loaded against
+580.178.04 installed), Vulkan silently fell through to llvmpipe, and every
+measurement had to move to the Kepler. A reboot is exactly when a pending driver
+update lands, so it is exactly when this recurs.
+
+```sh
+cat /proc/driver/nvidia/version                        # loaded
+ls /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*     # installed
+```
+
+The two must match. They both read **580.178.04** at `c9b1a31`, which is the
+state every figure in this file was measured under.
 
 **Residency is not correctness, and a value assertion cannot see the
 difference** — the host fallback *is* `Nx.BinaryBackend`, the reference every
