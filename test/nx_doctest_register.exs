@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **532 of 843 doctests (63.1%) run with host fallbacks refused** as of W5's
-  first tier. Only the super-io figure is re-measured at this point; the Kepler
+  **529 of 843 doctests (62.8%) run with host fallbacks refused** as of W5's
+  first tier and the `pow` allowlist correction. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
 
   ## W5 T1 — 134 entries left, and all 134 moved
@@ -87,7 +87,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 311 listed ones step aside so the remaining 532
+  `NXV_HOST_FALLBACK=raise` the 314 listed ones step aside so the remaining 529
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -117,7 +117,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 223 doctests, down from 357 at W5 T1. This WAS a float backend (MISSION §3.1): the integer
+  # 226 doctests, down from 357 at W5 T1 (223, plus the three integer `pow`
+  # doctests that the narrowed allowlist entry stopped excusing). This WAS a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks had no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}.
   #
@@ -168,6 +169,12 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.negate/1", [414]},
     {"Nx.pad_outer/3", [156, 158, 160, 162]},
     {"Nx.population_count/1", [424]},
+    # Integer pow. NOT the f64-transcendental reason that allowlists `{:pow, 3}`
+    # for floats — `Nx.pow(2, 4)` is s32 in, s32 out and has nothing to do with
+    # GLSL.std.450 lacking an f64 `pow`. It is here because W5 T1's integer
+    # shader has no op code 4: integer exponentiation is a repeated-squaring
+    # loop, not a builtin, and it was out of T1's scope. Cheap to close.
+    {"Nx.pow/2", [241, 242, 244]},
     {"Nx.product/2", [509, 510, 512, 513, 514, 515, 516, 517]},
     {"Nx.put_diagonal/3", [46, 47, 48, 49, 50, 51]},
     {"Nx.quotient/2", [260, 261]},

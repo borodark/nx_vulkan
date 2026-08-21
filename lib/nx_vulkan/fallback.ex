@@ -247,11 +247,14 @@ defmodule Nx.Vulkan.Fallback do
   # Conditions:
   #   :always              — this callback has no GPU path at all
   #   {:rank_at_least, n}  — permitted only from rank n up; below that it is a bug
+  #   :float_output        — permitted only when the OUTPUT is a float type; an
+  #                          integer result means the reason does not apply
   @allowlist [
-    {{:pow, 3}, :always,
+    {{:pow, 3}, :float_output,
      "broadcasting/scalar-exponent pow has no shader: elementwise_binary_bcast_* " <>
        "omits op code 4 because GLSL.std.450 has no f64 pow. Equal-shape f32/f64 " <>
-       "pow does run on the GPU; only the broadcasting form lands here."},
+       "pow does run on the GPU; only the broadcasting form lands here. " <>
+       "INTEGER pow is deliberately NOT covered — see the note below."},
     {{:window_scatter_max, 6}, :always,
      "OVERLAPPING pooling backward only. One thread per input element is what " <>
        "avoids float atomics, and that only holds for non-overlapping windows; " <>
@@ -363,6 +366,19 @@ defmodule Nx.Vulkan.Fallback do
     do: tuple_size(shape) >= n
 
   defp condition_met?({:rank_at_least, _n}, _meta), do: false
+
+  # The reason attached to an entry has to actually apply to the case it
+  # excuses. `pow` is the one entry here whose reason was written about floats
+  # ("GLSL.std.450 has no f64 pow") while its condition matched every dtype, so
+  # `Nx.pow(2, 4)` — s32 in, s32 out, nothing to do with fp64 — was permitted by
+  # an argument that says nothing about it.
+  #
+  # That made integer pow invisible to BOTH censuses rather than merely
+  # unimplemented: `enforce/3` short-circuits on an allowlisted op before it
+  # logs, so pow reported zero hits under `:raise` AND zero under `:warn`. An
+  # op nobody can see is an op nobody will fix.
+  defp condition_met?(:float_output, %Nx.Tensor{type: {f, _}}) when f in [:f, :bf], do: true
+  defp condition_met?(:float_output, _meta), do: false
 
   defp enforce(mode, op, meta) do
     if allowed?(op, meta) do
