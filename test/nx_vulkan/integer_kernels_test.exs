@@ -68,8 +68,17 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
   # Run `fun` on both backends and assert the results are byte-identical and the
   # dtypes agree. `fun` takes the tensor constructor so the same expression is
   # built twice, once per backend.
+  # `:allow` is deliberate and load-bearing. This helper asserts VALUE parity and
+  # makes no residency claim, so it must work for the cases that are supposed to
+  # fall back — s8/s64/u32 arithmetic, `exp` on an integer input. Under
+  # `sh scripts/strict_test.sh` the whole suite runs with fallbacks refused, and
+  # without this scope those tests would raise on precisely the behaviour they
+  # exist to pin. Residency is asserted separately, and strictly, below.
   defp assert_parity(fun) do
-    got = fun.(&gpu/2) |> Nx.backend_transfer(Nx.BinaryBackend)
+    got =
+      Fallback.strict(:allow, fn -> fun.(&gpu/2) end)
+      |> Nx.backend_transfer(Nx.BinaryBackend)
+
     expected = fun.(&host/2)
 
     assert Nx.type(got) == Nx.type(expected)
@@ -91,7 +100,10 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       # If a future reduce/accumulate shader widens to double "for safety", this
       # is the test that catches it.
       assert_parity_and_residency(fn t ->
-        Nx.add(t.([2_000_000_000, -2_000_000_000], {:s, 32}), t.([2_000_000_000, -2_000_000_000], {:s, 32}))
+        Nx.add(
+          t.([2_000_000_000, -2_000_000_000], {:s, 32}),
+          t.([2_000_000_000, -2_000_000_000], {:s, 32})
+        )
       end)
 
       assert_parity_and_residency(fn t ->
@@ -108,7 +120,11 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       # so that widening the gate to any 4-byte-divisible dtype fails here
       # rather than silently computing 100 * 100 = 10000 in 32-bit registers.
       assert_parity(fn t -> Nx.multiply(t.([100], {:s, 8}), t.([100], {:s, 8})) end)
-      assert Nx.to_flat_list(Nx.multiply(gpu([100], {:s, 8}), gpu([100], {:s, 8}))) == [16]
+
+      got =
+        Fallback.strict(:allow, fn -> Nx.multiply(gpu([100], {:s, 8}), gpu([100], {:s, 8})) end)
+
+      assert Nx.to_flat_list(got) == [16]
     end
 
     test "3. remainder takes the sign of the DIVIDEND, in all four combinations" do
@@ -209,8 +225,22 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       # Nx runs these through Nx.Type.to_floating/1, so the output template is
       # f32 and the integer shader never sees code 0/1/2. Asserting the type
       # documents why elementwise_unary_s32.comp has no exp case.
-      assert Nx.type(Nx.exp(gpu([1, 2], {:s, 32}))) == {:f, 32}
+      assert Nx.type(Fallback.strict(:allow, fn -> Nx.exp(gpu([1, 2], {:s, 32})) end)) ==
+               {:f, 32}
+
       assert_parity(fn t -> Nx.exp(t.([1, 2], {:s, 32})) end)
+
+      # And it FALLS BACK, which is a narrow gate rather than a missing kernel:
+      # the unary path requires `a_v.type == out.type` and never coerces, though
+      # cast_s32_to_f32.spv exists and the binary path already coerces via
+      # coerce_to/2. Surfaced by T2 — logsumexp's 9 doctests used to fail
+      # earlier, at `sum`. Pinned at an exact count so closing it fails here
+      # and gets noticed, rather than a `> 0` that a fix would silently satisfy.
+      # `count_total/1` only turns on recording — it does not relax the ambient
+      # mode, so under strict_test.sh it would raise before it could count.
+      assert Fallback.strict(:allow, fn ->
+               Fallback.count_total(fn -> Nx.exp(gpu([1, 2], {:s, 32})) end)
+             end) == 1
     end
   end
 
@@ -279,6 +309,112 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     test "select broadcasts its branches" do
       assert_parity_and_residency(fn t ->
         Nx.select(Nx.greater(t.([1, 5], {:s, 32}), 3), t.([10, 20], {:s, 32}), 0)
+      end)
+    end
+  end
+
+  describe "T2 — axis reductions" do
+    test "sum, product, reduce_max and reduce_min on s32" do
+      for op <- [:sum, :product, :reduce_max, :reduce_min] do
+        assert_parity_and_residency(fn t -> apply(Nx, op, [t.([3, -9, 7, 2], {:s, 32})]) end)
+      end
+    end
+
+    test "trap 1 again, in the accumulator: sum and product WRAP" do
+      # The single most important assertion in T2. reduce_axis_f32.comp
+      # accumulates in `double` because BinaryBackend sums floats in f64; the
+      # s32 shader must NOT, because BinaryBackend computes integers mod 2^32.
+      # A `double acc` here would return 4000000000 and 6000000000 — nicer, and
+      # not what the reference says.
+      assert_parity_and_residency(fn t ->
+        Nx.sum(t.([2_000_000_000, 2_000_000_000], {:s, 32}))
+      end)
+
+      assert_parity_and_residency(fn t -> Nx.product(t.([2_000_000_000, 3], {:s, 32})) end)
+
+      assert Nx.to_number(Nx.sum(gpu([2_000_000_000, 2_000_000_000], {:s, 32}))) ==
+               -294_967_296
+
+      assert Nx.to_number(Nx.product(gpu([2_000_000_000, 3], {:s, 32}))) == 1_705_032_704
+    end
+
+    test "reducing one axis of a rank-2 tensor" do
+      for axes <- [[0], [1]] do
+        assert_parity_and_residency(fn t ->
+          Nx.sum(Nx.reshape(t.([1, 2, 3, 4, 5, 6], {:s, 32}), {2, 3}), axes: axes)
+        end)
+      end
+    end
+
+    test "f32 product needs a WIDE accumulator, unlike the integer one" do
+      # 1e20 * 1e20 overflows f32 to `inf` on the first multiply, but
+      # BinaryBackend returns 1.00000002e20 — so the intermediate is f64 even
+      # though inputs and result are f32. The mirror image of the trap above:
+      # same rule (match the reference), opposite implementation.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.product(t.([1.0e20, 1.0e20, 1.0e-20], {:f, 32}))
+        end)
+
+      refute Nx.to_number(got) == :infinity
+    end
+
+    test "product on a u8 mask widens to u32" do
+      # This arm used to be `min`'s by fallthrough, so Nx.product on a u8 tensor
+      # answered the minimum. Nx's own doctest caught it.
+      assert_parity_and_residency(fn t -> Nx.product(t.([[10, 20], [30, 40]], {:u, 8})) end)
+      assert Nx.to_number(Nx.product(gpu([[10, 20], [30, 40]], {:u, 8}))) == 240_000
+    end
+  end
+
+  describe "T2 — window reductions" do
+    test "window_sum, window_product, window_max and window_min on s32" do
+      for op <- [:window_sum, :window_product, :window_max, :window_min] do
+        assert_parity_and_residency(fn t -> apply(Nx, op, [t.([1, 5, 3, 4], {:s, 32}), {2}]) end)
+      end
+    end
+
+    test "window_sum wraps too, and does NOT widen narrow integers" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_sum(t.([2_000_000_000, 2_000_000_000], {:s, 32}), {2})
+      end)
+
+      # Nx widens `sum` on {:s, 8} to {:s, 32} but leaves `window_sum` at
+      # {:s, 8}. A per-OP rule, not a per-dtype one — which is why reduce_spv/2
+      # is keyed on the (in, out) pair rather than on the input type.
+      assert Nx.type(Fallback.strict(:allow, fn -> Nx.sum(gpu([1, 2, 3], {:s, 8})) end)) ==
+               {:s, 32}
+
+      assert Nx.type(
+               Fallback.strict(:allow, fn -> Nx.window_sum(gpu([1, 2, 3], {:s, 8}), {2}) end)
+             ) ==
+               {:s, 8}
+    end
+
+    test "window_sum and window_product on f32 now run on the GPU too" do
+      # Neither had a shader at ANY dtype before T2, so these were never
+      # integer gaps despite living in the register's @integer_dtype bucket.
+      for op <- [:window_sum, :window_product] do
+        assert_parity_and_residency(fn t ->
+          apply(Nx, op, [t.([1.0, 5.0, 3.0, 4.0], {:f, 32}), {2}])
+        end)
+      end
+    end
+
+    test "a rank-2 window" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_sum(Nx.reshape(t.([1, 2, 3, 4, 5, 6, 7, 8, 9], {:s, 32}), {3, 3}), {2, 2})
+      end)
+    end
+
+    test "padded and dilated windows still fall back" do
+      # window_reduce_op/6's gate refuses both; the shader indexes straight into
+      # the source and has no notion of an out-of-bounds element. 23 doctests,
+      # and NOT a dtype problem — the f32 ones fall back identically.
+      assert_parity(fn t -> Nx.window_sum(t.([1, 2, 3], {:s, 32}), {2}, padding: [{1, 1}]) end)
+
+      assert_parity(fn t ->
+        Nx.window_sum(t.([1, 2, 3, 4], {:s, 32}), {2}, window_dilations: [2])
       end)
     end
   end

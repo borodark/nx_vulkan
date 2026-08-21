@@ -1,0 +1,67 @@
+#version 450
+
+// s32 axis reduction. Collapses the middle `reduce_size` axis of an
+// (outer, reduce_size, inner) view; one invocation per output slot. Op codes
+// match the float shaders' push-constant convention and add product:
+//   0=sum 1=max 2=min 3=product
+//
+// THE ACCUMULATOR IS `int`, AND THAT IS THE WHOLE POINT.
+//
+// reduce_axis_f32.comp accumulates in `double` because Nx.BinaryBackend sums
+// floats in f64 and a naive f32 accumulator diverges from it. The rule is
+// "match the reference", not "accumulate as widely as possible" — and on
+// integers the reference WRAPS. BinaryBackend gives
+// sum([2e9, 2e9]) = -294967296 and product([2e9, 3]) = 1705032704, both modulo
+// 2^32. A double accumulator here would produce 4000000000 and 6000000000,
+// which are the mathematically nicer answers and the wrong ones.
+//
+// Same principle as the f32 shader, opposite conclusion. Do not "fix" this.
+//
+// Seeding: sum starts at 0 and product at 1; max/min seed from the first
+// element rather than an INT_MIN/INT_MAX literal, which keeps this identical in
+// shape to the float shaders and avoids depending on a sentinel.
+//
+// This shader is TYPE-PRESERVING, s32 -> s32 only. The widening cases are not
+// expressible here and are deliberately left to the host: Nx widens `sum` and
+// `product` on narrow ints ({:s, 8} -> {:s, 32}) but does NOT widen `window_sum`,
+// `reduce_max` or `reduce_min`. That is a per-op rule, not a per-dtype one,
+// which is exactly why reduce_spv/2 is keyed on the (in, out) PAIR.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} pc;
+
+layout(std430, binding = 0) readonly buffer In { int a[]; };
+layout(std430, binding = 1) writeonly buffer Out { int c[]; };
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint n_slots = pc.outer * pc.inner;
+    if (slot >= n_slots) return;
+
+    uint o = slot / pc.inner;
+    uint i = slot % pc.inner;
+    uint base = o * pc.reduce_size * pc.inner + i;
+
+    int acc;
+    if (pc.op == 0u) acc = 0;
+    else if (pc.op == 3u) acc = 1;
+    else acc = a[base];
+
+    uint start = (pc.op == 0u || pc.op == 3u) ? 0u : 1u;
+
+    for (uint k = start; k < pc.reduce_size; ++k) {
+        int v = a[base + k * pc.inner];
+        if (pc.op == 0u)      acc += v;
+        else if (pc.op == 1u) acc = max(acc, v);
+        else if (pc.op == 2u) acc = min(acc, v);
+        else                  acc *= v;
+    }
+
+    c[slot] = acc;
+}

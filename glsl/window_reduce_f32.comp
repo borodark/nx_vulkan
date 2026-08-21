@@ -1,6 +1,10 @@
 #version 450
 
-// Windowed max/min for rank <= 4, f32. Spec constant 0 selects: 0=max, 1=min.
+// Windowed reduction for rank <= 4, f32. Spec constant 0 selects:
+//   0=max 1=min 2=sum 3=product
+// sum and product accumulate in double, as reduce_axis_f32.comp does and for
+// the same reason: BinaryBackend's intermediate is f64 even when the inputs
+// and the result are f32.
 //
 // This is pooling's forward pass. It was a host fallback, which cost more than
 // its own time: it left the result on Nx.BinaryBackend, so the rest of the
@@ -65,6 +69,7 @@ void main() {
     for (uint d = 0u; d < p.rank; ++d) total *= win[d];
 
     float best = 0.0;
+    double acc = (OP == 3) ? double(1.0) : double(0.0);
     for (uint w = 0u; w < total; ++w) {
         uint rem = w;
         uint in_off = 0u;
@@ -75,12 +80,16 @@ void main() {
         }
 
         float v = a[in_off];
-        if (w == 0u) {
+        if (OP == 2) {
+            acc += double(v);
+        } else if (OP == 3) {
+            acc *= double(v);
+        } else if (w == 0u) {
             best = v;
         } else {
             best = (OP == 0) ? max(best, v) : min(best, v);
         }
     }
 
-    o[gid] = best;
+    o[gid] = (OP >= 2) ? float(acc) : best;
 }

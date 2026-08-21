@@ -2,7 +2,8 @@
 
 // u8 axis reduction to a 32-bit integer slot. Same (outer, reduce_size, inner)
 // virtual shape and the same (outer, reduce_size, inner, op) push layout as
-// reduce_axis_f32/f64; one invocation per output slot. op: 0=sum, 1=max, 2=min.
+// reduce_axis_f32/f64; one invocation per output slot.
+// op: 0=sum, 1=max, 2=min, 3=product.
 //
 // T12, second half. Casting u8 -> f32 unstuck `multiply` and `as_type` on a
 // comparison mask, but not `sum`: Nx types the sum of a {:u, 8} tensor as
@@ -62,10 +63,25 @@ void main() {
             acc = max(acc, byte_at(base + r * p.inner));
         }
         o[gid] = acc;
-    } else {
+    } else if (p.op == 2u) {
         uint acc = byte_at(base);
         for (uint r = 1u; r < p.reduce_size; ++r) {
             acc = min(acc, byte_at(base + r * p.inner));
+        }
+        o[gid] = acc;
+    } else {
+        // Product (W5 T2). Unlike sum above this CAN overflow the 32-bit slot —
+        // 0..255 factors reach 2^32 in five terms — and that is correct:
+        // BinaryBackend's u32 product wraps mod 2^32 too, and `uint` here wraps
+        // identically.
+        //
+        // This arm used to be `min`'s. It caught op 3 by falling through and
+        // returned the minimum, so `Nx.product` on a u8 tensor answered 10
+        // where it should have answered 240000. Every branch is now named
+        // rather than relying on a default.
+        uint acc = 1u;
+        for (uint r = 0u; r < p.reduce_size; ++r) {
+            acc *= byte_at(base + r * p.inner);
         }
         o[gid] = acc;
     }

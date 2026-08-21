@@ -1,8 +1,16 @@
 #version 450
-#extension GL_ARB_gpu_shader_fp64 : require
 
-// Windowed reduction for rank <= 4, f64. Spec constant 0 selects:
+// Windowed reduction for rank <= 4, s32. Spec constant 0 selects:
 //   0=max 1=min 2=sum 3=product
+//
+// The accumulator is `int` and WRAPS, unlike the f32 twin's `double`. Same
+// reason as reduce_axis_s32.comp: BinaryBackend computes s32 modulo 2^32, so
+// window_sum([2e9, 2e9]) over a width-2 window is -294967296. Widening the
+// accumulator would give the mathematically nicer answer and the wrong one.
+//
+// Type-preserving, s32 -> s32. Note that `window_sum` does NOT widen narrow
+// integers the way `sum` does — Nx keeps {:s, 8} window_sum at {:s, 8} while
+// widening {:s, 8} sum to {:s, 32}. Per-op rule, not per-dtype.
 //
 // This is pooling's forward pass. It was a host fallback, which cost more than
 // its own time: it left the result on Nx.BinaryBackend, so the rest of the
@@ -24,8 +32,8 @@
 layout(local_size_x = 256) in;
 layout(constant_id = 0) const int OP = 0;
 
-layout(std430, binding = 0) readonly  buffer A { double a[]; };
-layout(std430, binding = 1) writeonly buffer O { double o[]; };
+layout(std430, binding = 0) readonly  buffer A { int a[]; };
+layout(std430, binding = 1) writeonly buffer O { int o[]; };
 layout(std430, binding = 2) readonly  buffer P { int prm[]; };
 
 layout(push_constant) uniform Push {
@@ -66,8 +74,8 @@ void main() {
     uint total = 1u;
     for (uint d = 0u; d < p.rank; ++d) total *= win[d];
 
-    double best = 0.0;
-    double acc = (OP == 3) ? double(1.0) : double(0.0);
+    int best = 0;
+    int acc = (OP == 3) ? 1 : 0;
     for (uint w = 0u; w < total; ++w) {
         uint rem = w;
         uint in_off = 0u;
@@ -77,11 +85,11 @@ void main() {
             in_off += (oc[d] * str[d] + wc) * istride[d];
         }
 
-        double v = a[in_off];
+        int v = a[in_off];
         if (OP == 2) {
-            acc += double(v);
+            acc += v;
         } else if (OP == 3) {
-            acc *= double(v);
+            acc *= v;
         } else if (w == 0u) {
             best = v;
         } else {
@@ -89,5 +97,5 @@ void main() {
         }
     }
 
-    o[gid] = (OP >= 2) ? double(acc) : best;
+    o[gid] = (OP >= 2) ? acc : best;
 }

@@ -60,9 +60,25 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # road: its `ddof` divisor is an s32 scalar against an f32 scalar, a pair that
   # missed the flat apply_binary path (types differ) and was then refused by the
   # broadcast path's `rank >= 1` check. With rank 0 allowed it divides on the
-  # GPU, and the GPU's f32 divide is 1 ULP off a correctly-rounded one
+  # GPU, and its f32 divide lands 1 ULP away from BinaryBackend's
   # (1.6666667 vs 1.6666666) — measurably so on every f32 divide this backend
   # has ever run, flat path included, not something rank 0 introduced.
+  #
+  # CORRECTION (W5 T2): this comment used to say the GPU was "1 ULP off a
+  # correctly-rounded one". It is the other way round. For 10/6 the GPU returns
+  # 0x3FD55556 and BinaryBackend 0x3FD55555, and against the true 5/3 those sit
+  # 3.97e-8 and 1.59e-7 away — the GPU's is the correctly-rounded f32 and the
+  # host's is 1 ULP low. The doctests still have to be excepted, because they
+  # assert BinaryBackend's inspect string and that is the contract this suite
+  # checks; but "moving an op onto the GPU costs the last digit" is the wrong
+  # way to describe it. It costs the last digit of AGREEMENT, and here it buys
+  # accuracy. Worth knowing before anyone treats this bucket as a list of
+  # GPU imprecisions.
+  #
+  # weighted_mean/3 joined at W5 T2 for exactly this reason: its `sum` was an
+  # integer reduction that used to fall back, taking the whole expression to the
+  # host with it. With an s32 reduce shader the sums stay resident, so the final
+  # divide happens on the GPU and lands on the other side of that 1 ULP.
   @rounding [
     exp: 1,
     tanh: 1,
@@ -72,7 +88,8 @@ defmodule Nx.Vulkan.NxDoctestTest do
     add: 2,
     standard_deviation: 2,
     covariance: 3,
-    variance: 2
+    variance: 2,
+    weighted_mean: 3
   ]
 
   # Dtypes the f64-real, byte-addressed backend does not represent: complex

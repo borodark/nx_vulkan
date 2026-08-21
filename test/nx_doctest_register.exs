@@ -16,9 +16,35 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **529 of 843 doctests (62.8%) run with host fallbacks refused** as of W5's
-  first tier and the `pow` allowlist correction. Only the super-io figure is re-measured at this point; the Kepler
+  **570 of 835 doctests (68.3%) run with host fallbacks refused** as of W5 T2.
+  Note the denominator: 835, not 843 — `weighted_mean/3`'s eight doctests joined
+  `@rounding` in `nx_doctest_test.exs` when T2 made its sums resident, so they
+  no longer execute at all. **Every ordinal below was renumbered by that**, which
+  is the fragility the moduledoc warns about, happening for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## W5 T2 — integer reductions, and the bucket names stop meaning much
+
+  529/843 -> 570/835. `reduce_axis_s32` and `window_reduce_s32` landed, and
+  `product`/`window_sum`/`window_product` — unconditional host fallbacks at
+  EVERY dtype, f32 included — became op codes on the shared reduce and window
+  paths rather than separate transfers.
+
+  Two things this tier exposed that are worth more than its count:
+
+    * `@integer_dtype` is now badly named. What is left in it is mostly not
+      dtype-gated at all — `window_reduce_op/6` refusing PADDED and DILATED
+      windows (23), `indexed_put/5` with no scatter shader at any dtype (22),
+      `argmax`/`argmin` (22), `reduce/5`'s arbitrary fun (11). These sit here
+      because Nx's doctests for them are s32, not because s32 is the problem.
+    * **`exp/2` at f32 appeared from nowhere (9 doctests) and is not a
+      regression.** Those are `logsumexp`, which used to fail earlier at `sum`;
+      with `sum` resident they get further and stop at `exp` of an INTEGER
+      input. The unary gate requires `a_v.type == out.type`, and Nx types
+      `exp(s32)` as f32, so the operand is never coerced — even though
+      `cast_s32_to_f32.spv` has existed all along and the binary path already
+      does exactly this coercion via `coerce_to/2`. A narrow gate (skill §1b),
+      not a missing kernel.
 
   ## W5 T1 — 134 entries left, and all 134 moved
 
@@ -87,7 +113,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 314 listed ones step aside so the remaining 529
+  `NXV_HOST_FALLBACK=raise` the 265 listed ones step aside so the remaining 570
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -117,8 +143,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 226 doctests, down from 357 at W5 T1 (223, plus the three integer `pow`
-  # doctests that the narrowed allowlist entry stopped excusing). This WAS a float backend (MISSION §3.1): the integer
+  # 169 doctests, down from 357 before W5 (226 after T1 + the pow correction).
+  # The name no longer fits: most of what is left is shape- or capability-gated
+  # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
+  # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
   # elementwise, compare, select and reduce callbacks had no shader, and Nx's
   # own doctests are written almost entirely in {:s, 32}.
   #
@@ -143,61 +171,51 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
     {"Nx.all_close/3", [460]},
     {"Nx.any/2", [447, 448, 449, 450, 451]},
-    {"Nx.argmax/2", [535, 536, 537, 538, 539, 540, 541, 542, 543, 544, 545]},
-    {"Nx.argmin/2", [546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 556]},
+    {"Nx.argmax/2", [527, 528, 529, 530, 531, 532, 533, 534, 535, 536, 537]},
+    {"Nx.argmin/2", [538, 539, 540, 541, 542, 543, 544, 545, 546, 547, 548]},
     {"Nx.as_type/2", [87, 90, 91]},
     {"Nx.bitcast/2", [95]},
     {"Nx.bitwise_not/1", [418, 419]},
     {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},
-    {"Nx.dot/2", [634, 637, 640, 641, 643, 644]},
-    {"Nx.dot/4", [647, 649]},
-    {"Nx.dot/6", [650, 651, 652, 653, 654]},
-    {"Nx.fill/3", [831]},
-    {"Nx.gather/3", [719, 720]},
+    {"Nx.dot/2", [626, 629, 632, 633, 635, 636]},
+    {"Nx.dot/4", [639, 641]},
+    {"Nx.dot/6", [642, 643, 644, 645, 646]},
+    {"Nx.fill/3", [823]},
+    {"Nx.gather/3", [711, 712]},
     {"Nx.indexed_add/4", [347, 348, 351, 352]},
     {"Nx.indexed_put/4", [356, 357, 358, 359, 360, 361, 364, 365]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
-    {"Nx.linspace/3", [812, 813, 814]},
-    {"Nx.logsumexp/2", [835, 836, 837, 838, 839, 840, 841, 842, 843]},
+    {"Nx.linspace/3", [804, 805, 806]},
     {"Nx.make_diagonal/2", [39, 40, 41, 42, 43, 44]},
     {"Nx.max/2", [270]},
-    {"Nx.mean/2", [473, 474, 475, 477, 478, 479, 480, 481]},
     {"Nx.min/2", [276]},
-    {"Nx.mode/2", [502, 503, 504, 505, 507, 508]},
+    {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
     {"Nx.multiply/2", [239]},
     {"Nx.negate/1", [414]},
     {"Nx.pad_outer/3", [156, 158, 160, 162]},
     {"Nx.population_count/1", [424]},
-    # Integer pow. NOT the f64-transcendental reason that allowlists `{:pow, 3}`
-    # for floats — `Nx.pow(2, 4)` is s32 in, s32 out and has nothing to do with
-    # GLSL.std.450 lacking an f64 `pow`. It is here because W5 T1's integer
-    # shader has no op code 4: integer exponentiation is a repeated-squaring
-    # loop, not a builtin, and it was out of T1's scope. Cheap to close.
     {"Nx.pow/2", [241, 242, 244]},
-    {"Nx.product/2", [509, 510, 512, 513, 514, 515, 516, 517]},
+    {"Nx.product/2", [505]},
     {"Nx.put_diagonal/3", [46, 47, 48, 49, 50, 51]},
     {"Nx.quotient/2", [260, 261]},
-    {"Nx.reduce/4", [615, 616, 618, 619, 620, 621, 622, 623, 624, 625]},
-    {"Nx.reduce_max/2", [519, 521, 522, 523, 524, 525, 526]},
-    {"Nx.reduce_min/2", [527, 529, 530, 531, 532, 533, 534]},
-    {"Nx.reflect/2", [822]},
+    {"Nx.reduce/4", [607, 608, 610, 611, 612, 613, 614, 615, 616, 617]},
+    {"Nx.reflect/2", [814]},
     {"Nx.remainder/2", [249]},
     {"Nx.select/3", [336, 337, 338, 339, 344, 345, 346]},
-    {"Nx.slice_along_axis/4", [691]},
-    {"Nx.stack/2", [733, 734, 735, 736, 737]},
+    {"Nx.slice_along_axis/4", [683]},
+    {"Nx.stack/2", [725, 726, 727, 728, 729]},
     {"Nx.subtract/2", [233]},
-    {"Nx.sum/2", [463, 464, 466, 467, 468, 469, 470, 471]},
-    {"Nx.take/3", [700, 701, 702, 703, 704, 705]},
+    {"Nx.sum/2", [466, 467]},
+    {"Nx.take/3", [692, 693, 694, 695, 696, 697]},
     {"Nx.tril/2", [23]},
     {"Nx.triu/2", [27]},
-    {"Nx.weighted_mean/3", [482, 483, 484, 485, 486, 487, 488, 489]},
-    {"Nx.window_max/3", [570, 571, 573, 574]},
-    {"Nx.window_mean/3", [564, 565, 567, 568, 569]},
-    {"Nx.window_min/3", [575, 576, 578, 579]},
-    {"Nx.window_product/3", [580, 581, 583, 584]},
-    {"Nx.window_reduce/5", [626, 627, 628, 629, 630]},
-    {"Nx.window_sum/3", [557, 558, 560, 561, 562, 563]}
+    {"Nx.window_max/3", [563, 565, 566]},
+    {"Nx.window_mean/3", [557, 559, 560, 561]},
+    {"Nx.window_min/3", [568, 570, 571]},
+    {"Nx.window_product/3", [573, 575, 576]},
+    {"Nx.window_reduce/5", [618, 619, 620, 621, 622]},
+    {"Nx.window_sum/3", [550, 552, 553, 554, 555]}
   ]
 
   # 37 doctests. GLSL.std.450 defines its transcendentals for 32-bit floats
@@ -235,10 +253,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   # @unsupported above — excepted outright, because they cannot even produce a
   # value here. These can: they fall back and are correct.
   @complex_and_fft [
-    {"Nx.as_type/2", [86, 88, 92]},
-    {"Nx.conv/3", [681]},
-    {"Nx.fft/2", [760, 761, 762, 763, 764, 765, 766, 767]},
-    {"Nx.ifft/2", [769, 770, 771, 772, 773, 774, 775, 776]}
+    {"Nx.as_type/2", [88]},
+    {"Nx.conv/3", [673]},
+    {"Nx.fft/2", [752, 753, 754, 755, 756, 757, 758, 759]},
+    {"Nx.ifft/2", [761, 762, 763, 764, 765, 766, 767, 768]}
   ]
 
   # 31 doctests — the interesting bucket, and the one to read before picking up
@@ -261,28 +279,28 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   #
   # Every line here is a candidate W1 item with a reproducer already written.
   @float_residency_gap [
-    {"Nx.as_type/2", [89]},
+    {"Nx.as_type/2", [86, 89, 92]},
     {"Nx.atan2/2", [262, 263, 264]},
     {"Nx.bitcast/2", [94]},
-    {"Nx.concatenate/2", [727]},
+    {"Nx.concatenate/2", [719]},
     {"Nx.divide/2", [254]},
-    {"Nx.dot/2", [635, 636, 642]},
-    {"Nx.dot/4", [648]},
+    {"Nx.dot/2", [627, 628, 634]},
+    {"Nx.dot/4", [640]},
     {"Nx.indexed_add/4", [349, 350]},
     {"Nx.indexed_put/4", [362, 363]},
-    {"Nx.log/2", [827, 828]},
-    {"Nx.log10/1", [825, 826]},
-    {"Nx.log2/1", [823, 824]},
-    {"Nx.product/2", [511]},
-    {"Nx.reduce/4", [617]},
+    {"Nx.log/2", [819, 820]},
+    {"Nx.log10/1", [817, 818]},
+    {"Nx.log2/1", [815, 816]},
+    {"Nx.logsumexp/2", [827, 828, 829, 830, 831, 832, 833, 834, 835]},
+    {"Nx.reduce/4", [609]},
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},
     {"Nx.select/3", [343]},
-    {"Nx.window_max/3", [572]},
-    {"Nx.window_mean/3", [566]},
-    {"Nx.window_min/3", [577]},
-    {"Nx.window_product/3", [582]},
-    {"Nx.window_sum/3", [559]}
+    {"Nx.window_max/3", [564]},
+    {"Nx.window_mean/3", [558]},
+    {"Nx.window_min/3", [569]},
+    {"Nx.window_product/3", [574]},
+    {"Nx.window_sum/3", [551]}
   ]
 
   @doc """

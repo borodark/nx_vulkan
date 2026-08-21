@@ -812,9 +812,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # the tensor on the host and took softmax's whole backward pass with it.
   @reduce_axis_u8_to_u32_spv Path.expand("../../priv/shaders/reduce_axis_u8_to_u32.spv", __DIR__)
 
+  @reduce_axis_s32_spv Path.expand("../../priv/shaders/reduce_axis_s32.spv", __DIR__)
+
   defp reduce_spv({:f, 64}, {:f, 64}), do: @reduce_axis_f64_spv
   defp reduce_spv({:f, 32}, {:f, 32}), do: @reduce_axis_f32_spv
   defp reduce_spv({:u, 8}, {:u, 32}), do: @reduce_axis_u8_to_u32_spv
+
+  # W5 T2. Type-PRESERVING only, which is why it reads {:s, 32} twice rather
+  # than matching any integer input. Nx widens `sum` and `product` on narrow
+  # integers ({:s, 8} -> {:s, 32}) but leaves `reduce_max`/`reduce_min` alone,
+  # so {:s, 8} arrives here as either an (s8, s32) or an (s8, s8) pair depending
+  # on the OP, not the dtype. Neither has a shader; both keep falling back. The
+  # (in, out) keying is what makes that expressible at all — see the u8 note
+  # above, which exists for the identical reason.
+  defp reduce_spv({:s, 32}, {:s, 32}), do: @reduce_axis_s32_spv
+
   defp reduce_spv(_from, _to), do: nil
 
   @impl true
@@ -918,6 +930,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
         0 -> :sum
         1 -> :reduce_max
         2 -> :reduce_min
+        3 -> :product
       end
 
     result = apply(Nx, op, [bin_in, opts])
@@ -2073,13 +2086,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # longer Nx.Backend callbacks — Nx routes them through block/4 or composes
   # them from primitives, so they need no explicit clause here.)
 
-  # product: multiplicative reduction. Same shape as sum but with *.
+  # product: multiplicative reduction. Same shape as sum but with *, and now the
+  # same code path — op code 3, added to all three reduce shaders at W5 T2. It
+  # was an unconditional host fallback at EVERY dtype before that, f32 included,
+  # which is why it did not appear in W5's dtype-gated census bucket.
   @impl true
-  def product(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.product(t_bin, opts)
-    host_result(out, result)
-  end
+  def product(out, t, opts), do: do_reduce(out, t, opts, 3)
 
   # reverse: reverse along given axes. Composes from slice in some
   # cases but a direct callback handles general patterns.
@@ -2176,25 +2188,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # --- Round 2: window family (7 callbacks) ---
   # All delegate to BinaryBackend's window ops via Nx.<op>.
 
+  # Both were unconditional host fallbacks at every dtype until W5 T2 — not
+  # integer gaps at all, despite sitting in the register's @integer_dtype bucket
+  # because Nx's doctests for them happen to be s32. Op codes 2 and 3, added to
+  # all three window shaders, and they now share window_reduce_op/6's gate with
+  # window_max/window_min: rank <= 4, no padding, no dilation.
   @impl true
   def window_sum(out, tensor, dimensions, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.window_sum(t_bin, dimensions, opts)
-    host_result(out, result)
+    window_reduce_op(out, tensor, dimensions, opts, 2, &Nx.window_sum/3)
   end
 
   @impl true
   def window_product(out, tensor, dimensions, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.window_product(t_bin, dimensions, opts)
-    host_result(out, result)
+    window_reduce_op(out, tensor, dimensions, opts, 3, &Nx.window_product/3)
   end
 
   @window_reduce_f64_spv Path.expand("../../priv/shaders/window_reduce_f64.spv", __DIR__)
   @window_reduce_f32_spv Path.expand("../../priv/shaders/window_reduce_f32.spv", __DIR__)
 
+  @window_reduce_s32_spv Path.expand("../../priv/shaders/window_reduce_s32.spv", __DIR__)
+
   defp window_reduce_spv({:f, 64}), do: @window_reduce_f64_spv
   defp window_reduce_spv({:f, 32}), do: @window_reduce_f32_spv
+  defp window_reduce_spv({:s, 32}), do: @window_reduce_s32_spv
   defp window_reduce_spv(_), do: nil
 
   @impl true
