@@ -177,7 +177,20 @@ defmodule Nx.Vulkan.VulkanoBackend do
     divide: 3,
     pow: 4,
     max: 5,
-    min: 6
+    min: 6,
+    # Integer-only, and absent from every float shader. Nx types all seven as
+    # integer-out by contract (`quotient` "always returns an integer tensor",
+    # the bitwise ops and shifts raise on floats), so a float shader can never
+    # be handed one of these codes — but `binary_spv/2` refuses the pairing
+    # explicitly anyway, because the float shaders' `default:` arm returns 0.0
+    # and a silent zero is the worst failure this backend has.
+    quotient: 7,
+    remainder: 8,
+    bitwise_and: 9,
+    bitwise_or: 10,
+    bitwise_xor: 11,
+    left_shift: 12,
+    right_shift: 13
   ]
 
   @elementwise_binary_f64_spv Path.expand(
@@ -189,25 +202,52 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                 __DIR__
                               )
 
-  defp binary_spv({:f, 64}), do: @elementwise_binary_f64_spv
-  defp binary_spv({:f, 32}), do: @elementwise_binary_f32_spv
-  defp binary_spv(_), do: nil
+  @elementwise_binary_s32_spv Path.expand(
+                                "../../priv/shaders/elementwise_binary_s32.spv",
+                                __DIR__
+                              )
+
+  # Keyed on the (type, op code) PAIR, not the type alone. Codes 0-6 exist in
+  # all three shaders; 7-13 only in the integer one. Pairing a float shader with
+  # an integer-only code would fall into its `default:` arm and write zeros —
+  # correct-looking, silently wrong, and invisible to a value assertion because
+  # the host fallback returns the same shape. Refusing the pair sends it to the
+  # host instead, which is always right.
+  defp binary_spv({:f, 64}, code) when code <= 6, do: @elementwise_binary_f64_spv
+  defp binary_spv({:f, 32}, code) when code <= 6, do: @elementwise_binary_f32_spv
+
+  # 3 (divide) and 4 (pow) are the two codes the INTEGER shader lacks, and both
+  # have to be named here rather than assumed unreachable. `Nx.divide` on two
+  # integers really does return {:f, 32}, so 3 never arrives — but `Nx.pow(2, 4)`
+  # is s32 in, s32 out, and it does. The first cut of this clause matched every
+  # code, sent pow to a shader with no case 4, and the `default:` arm returned
+  # `s32 0` instead of 16. That is the exact silent-zero the float clauses above
+  # are guarded against; the integer side needs the same guard.
+  defp binary_spv({:s, 32}, code) when code != 3 and code != 4,
+    do: @elementwise_binary_s32_spv
+
+  defp binary_spv(_type, _code), do: nil
 
   # Broadcasting elementwise binary (rank <= 4) — keeps bias-add / scaling /
   # relu-via-max on the GPU instead of host-falling-back.
   @bcast_binary_f64_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f64.spv", __DIR__)
   @bcast_binary_f32_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_f32.spv", __DIR__)
 
-  defp bcast_binary_spv({:f, 64}), do: @bcast_binary_f64_spv
-  defp bcast_binary_spv({:f, 32}), do: @bcast_binary_f32_spv
-  defp bcast_binary_spv(_), do: nil
+  @bcast_binary_s32_spv Path.expand("../../priv/shaders/elementwise_binary_bcast_s32.spv", __DIR__)
+
+  # Same (type, code) pairing as binary_spv/2, and the same reason.
+  defp bcast_binary_spv({:f, 64}, code) when code <= 6, do: @bcast_binary_f64_spv
+  defp bcast_binary_spv({:f, 32}, code) when code <= 6, do: @bcast_binary_f32_spv
+  defp bcast_binary_spv({:s, 32}, code) when code != 3 and code != 4,
+    do: @bcast_binary_s32_spv
+  defp bcast_binary_spv(_type, _code), do: nil
 
   for {op, code} <- @binary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a, b) do
       a_v = ensure_on_backend(a)
       b_v = ensure_on_backend(b)
-      spv = binary_spv(type)
+      spv = binary_spv(type, unquote(code))
 
       shape_match =
         a_v.shape == b_v.shape and a_v.shape == shape and a_v.type == b_v.type and
@@ -225,7 +265,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
         put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
       else
-        bspv = bcast_binary_spv(type)
+        bspv = bcast_binary_spv(type, unquote(code))
 
         if bspv != nil and unquote(code) != 4 and bcast_shape_ok?(a_v, b_v, out) do
           # coerce mismatched-dtype operands (e.g. f32 scalar with f64 tensor)
@@ -303,7 +343,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
     tanh: 6,
     floor: 9,
     ceil: 8,
-    sign: 10
+    sign: 10,
+    # Integer-only, absent from both float shaders. See unary_spv/2.
+    bitwise_not: 13,
+    population_count: 14,
+    count_leading_zeros: 15
   ]
 
   @elementwise_unary_f64_spv Path.expand(
@@ -315,15 +359,33 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                __DIR__
                              )
 
-  defp unary_spv({:f, 64}), do: @elementwise_unary_f64_spv
-  defp unary_spv({:f, 32}), do: @elementwise_unary_f32_spv
-  defp unary_spv(_), do: nil
+  @elementwise_unary_s32_spv Path.expand(
+                               "../../priv/shaders/elementwise_unary_s32.spv",
+                               __DIR__
+                             )
+
+  # Keyed on (type, op code), as binary_spv/2 is, and additionally narrow on the
+  # integer side: the s32 shader implements 3/4/7/8/9/10/12 plus 13-15, and NOT
+  # the transcendentals. Those cannot arrive anyway — Nx runs exp/log/sqrt/
+  # sigmoid/tanh/reciprocal through `Nx.Type.to_floating/1`, so an s32 input
+  # produces a float output template and the `a_v.type == type` guard below
+  # sends it to the float shader — but listing the codes it really has keeps the
+  # gate honest rather than relying on that argument holding forever.
+  @s32_unary_codes [3, 4, 7, 8, 9, 10, 12, 13, 14, 15]
+
+  defp unary_spv({:f, 64}, code) when code <= 12, do: @elementwise_unary_f64_spv
+  defp unary_spv({:f, 32}, code) when code <= 12, do: @elementwise_unary_f32_spv
+
+  defp unary_spv({:s, 32}, code) when code in @s32_unary_codes,
+    do: @elementwise_unary_s32_spv
+
+  defp unary_spv(_type, _code), do: nil
 
   for {op, code} <- @unary_ops do
     @impl true
     def unquote(op)(%T{shape: shape, type: type} = out, a) do
       a_v = ensure_on_backend(a)
-      spv = unary_spv(type)
+      spv = unary_spv(type, unquote(code))
 
       if spv != nil and a_v.type == type do
         %T{data: %__MODULE__{ref: a_ref}} = a_v
@@ -354,12 +416,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
     # trig
     :acos, :acosh, :asin, :asinh, :atan, :atanh,
     :cos, :cosh, :sin, :sinh, :tan,
-    # type / check
-    :is_infinity, :is_nan, :round,
+    # type / check — is_nan and is_infinity moved to @predicate_unary_ops (W5)
+    :round,
     # special
     :erf_inv,
-    # bitwise unary
-    :bitwise_not, :count_leading_zeros, :population_count,
     # complex
     :conjugate, :real, :imag
   ]
@@ -372,17 +432,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   # Binary ops without GPU shader support — host fallback only.
-  @host_fallback_binary_ops [
-    # bitwise
-    :bitwise_and, :bitwise_or, :bitwise_xor,
-    :left_shift, :right_shift,
-    # integer
-    :quotient, :remainder,
-    # logical
-    :logical_and, :logical_or, :logical_xor,
-    # trig
-    :atan2
-  ]
+  # W5 emptied this list of everything but `atan2`. The bitwise, shift, integer
+  # and logical families all have shaders now — the first three in @binary_ops
+  # and @unary_ops above, the logicals in @compare_ops below, because Nx types
+  # THEIR output as a u8 mask rather than as the operand type. `atan2` stays: it
+  # is a genuine two-argument transcendental and GLSL.std.450 has no f64 form.
+  @host_fallback_binary_ops [:atan2]
 
   for op <- @host_fallback_binary_ops do
     @impl true
@@ -1113,12 +1168,40 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Comparison ops — GPU broadcast -> u8 (packed as u32 words in the shader) when
   # both operands share an f32/f64 type; host fallback otherwise. Same-type
   # f32 comparisons (e.g. x > 0.0) keep the relu-grad mask on the GPU.
-  @compare_ops [equal: 0, not_equal: 1, less: 2, less_equal: 3, greater: 4, greater_equal: 5]
+  # The logical three sit HERE, with the comparisons, and not with the
+  # elementwise binaries where their name suggests they belong. Nx builds their
+  # output as `%{left | type: {:u, 8}}` (`Nx.element_wise_pred_op/3`) — a packed
+  # mask, which is exactly what the compare shaders already write and what
+  # nothing in the elementwise family writes. Filing them by output shape rather
+  # than by name also closes their f32/f64 instances, which an integer-only fix
+  # would have left on the host.
+  @compare_ops [
+    equal: 0,
+    not_equal: 1,
+    less: 2,
+    less_equal: 3,
+    greater: 4,
+    greater_equal: 5,
+    logical_and: 6,
+    logical_or: 7,
+    logical_xor: 8
+  ]
+
+  # is_nan/is_infinity are the unary members of the same family: one operand, a
+  # u8 mask out. They reuse `gpu_compare/5` with the operand bound to BOTH
+  # inputs, so the shader's `y` is simply the same value as `x` and is ignored.
+  # That is why they need no dispatch helper and no NIF of their own.
+  @predicate_unary_ops [is_nan: 9, is_infinity: 10]
+
   @compare_f32_spv Path.expand("../../priv/shaders/compare_f32.spv", __DIR__)
   @compare_f64_spv Path.expand("../../priv/shaders/compare_f64.spv", __DIR__)
+  @compare_s32_spv Path.expand("../../priv/shaders/compare_s32.spv", __DIR__)
 
+  # No op-code guard here, unlike binary_spv/2 and unary_spv/2: all three
+  # shaders implement the full 0-10, so every pairing is real.
   defp compare_spv({:f, 32}), do: @compare_f32_spv
   defp compare_spv({:f, 64}), do: @compare_f64_spv
+  defp compare_spv({:s, 32}), do: @compare_s32_spv
   defp compare_spv(_), do: nil
 
   for {op, code} <- @compare_ops do
@@ -1148,6 +1231,23 @@ defmodule Nx.Vulkan.VulkanoBackend do
           a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
           b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
           host_result(out, apply(Nx, unquote(op), [a_bin, b_bin]))
+      end
+    end
+  end
+
+  for {op, code} <- @predicate_unary_ops do
+    @impl true
+    def unquote(op)(out, a) do
+      a_v = ensure_on_backend(a)
+      spv = compare_spv(a_v.type)
+
+      if spv != nil and match?(%__MODULE__{}, a_v.data) and tuple_size(out.shape) <= 4 do
+        # Same tensor on both inputs. Two readonly descriptors aliasing one
+        # buffer is legal, and it keeps these on the shared compare path instead
+        # of growing a second one-operand kernel.
+        gpu_compare(out, a_v, a_v, unquote(code), spv)
+      else
+        unary_op_host_fallback(unquote(op), out, a_v)
       end
     end
   end
@@ -1188,8 +1288,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @select_f32_spv Path.expand("../../priv/shaders/select_f32.spv", __DIR__)
   @select_f64_spv Path.expand("../../priv/shaders/select_f64.spv", __DIR__)
 
+  @select_s32_spv Path.expand("../../priv/shaders/select_s32.spv", __DIR__)
+
   defp select_spv({:f, 32}), do: @select_f32_spv
   defp select_spv({:f, 64}), do: @select_f64_spv
+  defp select_spv({:s, 32}), do: @select_s32_spv
   defp select_spv(_), do: nil
 
   @impl true
@@ -2162,10 +2265,27 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   @impl true
+  # `with_binary_backend/1` is load-bearing here, and only became so at W5.
+  #
+  # `fun` is USER code: Nx.BinaryBackend calls it with scalar tensors built on
+  # the DEFAULT backend, which in this suite is this one. Before integer
+  # elementwise had shaders, `Nx.max/2` on two s32 scalars fell back and handed
+  # back a BinaryBackend tensor, so the reduction worked by accident. Now it
+  # stays resident, and BinaryBackend's next `to_binary/1` gets a Vulkano
+  # tensor and dies with no clause.
+  #
+  # Same shape as the `Nx.mode/2` breakage in NEXT.md §1.1: making an op
+  # resident does not remove a mixed-backend pair, it moves one somewhere this
+  # backend cannot fix it. Pinning the default for the duration of the callback
+  # is the fix, and every other fallback that evaluates composed ops already
+  # does it.
   def window_reduce(out, tensor, acc, dimensions, opts, fun) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     acc_bin = Nx.backend_transfer(ensure_on_backend(acc), Nx.BinaryBackend)
-    result = Nx.window_reduce(t_bin, acc_bin, dimensions, opts, fun)
+
+    result =
+      with_binary_backend(fn -> Nx.window_reduce(t_bin, acc_bin, dimensions, opts, fun) end)
+
     host_result(out, result)
   end
 
@@ -2267,10 +2387,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # --- Round 2: generic reduce (1 callback) ---
   # User-supplied function runs on BinaryBackend tensors.
   @impl true
+  # Same user-`fun` hazard as window_reduce/6 above — see the note there. This
+  # one has not fired yet only because `reduce/5`'s own doctests fall back
+  # before the fun runs; the pin closes it rather than waiting for T2 to
+  # surface it.
   def reduce(out, tensor, acc, opts, fun) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     acc_bin = Nx.backend_transfer(ensure_on_backend(acc), Nx.BinaryBackend)
-    result = Nx.reduce(t_bin, acc_bin, opts, fun)
+    result = with_binary_backend(fn -> Nx.reduce(t_bin, acc_bin, opts, fun) end)
     host_result(out, result)
   end
 

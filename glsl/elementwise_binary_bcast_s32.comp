@@ -1,0 +1,81 @@
+#version 450
+
+// Broadcasting s32 elementwise binary op (rank <= 4). The integer twin of
+// elementwise_binary_bcast_f32.comp: identical index arithmetic, identical
+// params layout [rank, out[4], a[4], b[4]], and the same spec-constant op codes
+// as elementwise_binary_s32.comp — see that file for why 3 and 4 are absent and
+// why wrapping is the correct contract.
+//
+// This is the arm that carries `Nx.add(tensor, 1)`. Nx materialises literals as
+// {:s, 32}, so a scalar integer against an s32 tensor arrives here as a rank-0
+// operand broadcast against a rank-n one; before this shader existed the whole
+// tensor went to the host to meet a four-byte constant.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { int a[]; };
+layout(std430, binding = 1) readonly buffer B { int b[]; };
+layout(std430, binding = 2) writeonly buffer O { int o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+int trunc_div(int x, int y) {
+    uint ux = uint(abs(x));
+    uint uy = uint(abs(y));
+    int q = int(ux / uy);
+    return ((x < 0) != (y < 0)) ? -q : q;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint idx = gid;
+    uint a_idx = 0u;
+    uint b_idx = 0u;
+    uint a_stride = 1u;
+    uint b_stride = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = outd[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        a_idx += ((ad[d] == 1u) ? 0u : coord) * a_stride;
+        b_idx += ((bd[d] == 1u) ? 0u : coord) * b_stride;
+        a_stride *= ad[d];
+        b_stride *= bd[d];
+    }
+
+    int x = a[a_idx];
+    int y = b[b_idx];
+    int r;
+    switch (OP) {
+        case 0:  r = x + y; break;
+        case 1:  r = x * y; break;
+        case 2:  r = x - y; break;
+        case 5:  r = max(x, y); break;
+        case 6:  r = min(x, y); break;
+        case 7:  r = trunc_div(x, y); break;
+        case 8:  r = x - trunc_div(x, y) * y; break;
+        case 9:  r = x & y; break;
+        case 10: r = x | y; break;
+        case 11: r = x ^ y; break;
+        case 12: r = (y >= 32) ? 0 : x << y; break;
+        case 13: r = (y >= 32) ? ((x < 0) ? -1 : 0) : x >> y; break;
+        default: r = 0;
+    }
+    o[gid] = r;
+}

@@ -4,7 +4,8 @@
 // a==b, …) on the GPU. Output is u8 but written as packed u32 words (4 results
 // per word), so no 8-bit-storage extension is needed. Each thread writes one
 // word; the output buffer is padded to a 4-byte multiple by the caller.
-// Spec constant 0: 0=eq 1=ne 2=lt 3=le 4=gt 5=ge. Params: [rank, out[4],a[4],b[4]].
+// Spec constant 0: 0=eq 1=ne 2=lt 3=le 4=gt 5=ge, 6=logical_and
+// 7=logical_or 8=logical_xor 9=is_nan 10=is_infinity. Params: [rank, out[4],a[4],b[4]].
 
 layout(local_size_x = 256) in;
 layout(constant_id = 0) const int OP = 0;
@@ -28,6 +29,15 @@ uint cmp(float x, float y) {
         case 3: r = (x <= y); break;
         case 4: r = (x > y); break;
         case 5: r = (x >= y); break;
+        // 6-10 share this shader because Nx types their output as a u8 mask
+        // (`element_wise_pred_op` -> `%{left | type: {:u, 8}}`), which is what
+        // this shader already writes. 9 and 10 are unary: the backend binds the
+        // operand to BOTH inputs, so `y` is the same value as `x`, unused.
+        case 6:  r = (x != 0.0) && (y != 0.0); break;
+        case 7:  r = (x != 0.0) || (y != 0.0); break;
+        case 8:  r = (x != 0.0) != (y != 0.0); break;
+        case 9:  r = isnan(x); break;
+        case 10: r = isinf(x); break;
         default: r = false;
     }
     return r ? 1u : 0u;

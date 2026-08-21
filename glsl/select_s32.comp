@@ -1,0 +1,57 @@
+#version 450
+
+// Broadcasting select over s32 branches: out = pred ? on_true : on_false
+// (rank <= 4). The integer twin of select_f32.comp — identical index
+// arithmetic, identical params layout [rank, out[4], pred[4], t[4], f[4]], and
+// the same u32-word-packed `pred`.
+//
+// `pred` stays u8-packed regardless of the branch dtype, because that is what
+// the compare shaders emit: a mask is a mask. Only the branches change type,
+// which is why this is a `float`->`int` edit of the binding block and nothing
+// else. The tail word of `pred` may over-read, which the enabled
+// robust_buffer_access returns as 0 — harmless, only the valid byte is used.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Pred { uint pred[]; };
+layout(std430, binding = 1) readonly buffer T { int t[]; };
+layout(std430, binding = 2) readonly buffer F { int f[]; };
+layout(std430, binding = 3) writeonly buffer O { int o[]; };
+layout(std430, binding = 4) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint outd[4];
+    uint pd[4];
+    uint td[4];
+    uint fd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        pd[i] = uint(prm[5 + i]);
+        td[i] = uint(prm[9 + i]);
+        fd[i] = uint(prm[13 + i]);
+    }
+
+    uint idx = gid;
+    uint pidx = 0u, tidx = 0u, fidx = 0u;
+    uint ps = 1u, ts = 1u, fs = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = outd[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        pidx += ((pd[d] == 1u) ? 0u : coord) * ps; ps *= pd[d];
+        tidx += ((td[d] == 1u) ? 0u : coord) * ts; ts *= td[d];
+        fidx += ((fd[d] == 1u) ? 0u : coord) * fs; fs *= fd[d];
+    }
+
+    uint word = pred[pidx >> 2];
+    uint b = (word >> ((pidx & 3u) * 8u)) & 0xFFu;
+    o[gid] = (b != 0u) ? t[tidx] : f[fidx];
+}

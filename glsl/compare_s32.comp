@@ -1,0 +1,87 @@
+#version 450
+
+// Broadcasting s32 comparison -> u8 (rank <= 4). The integer twin of
+// compare_f32.comp: identical index arithmetic, identical params layout
+// [rank, out[4], a[4], b[4]], and the same u32-word-packed output (4 results per
+// word, so no 8-bit-storage extension is needed).
+//
+// Spec constant 0: 0=eq 1=ne 2=lt 3=le 4=gt 5=ge
+//                  6=logical_and 7=logical_or 8=logical_xor
+//                  9=is_nan 10=is_infinity
+//
+// Codes 6-10 live in the COMPARE family rather than the elementwise ones
+// because that is the shape Nx gives them. `Nx.element_wise_pred_op/3` builds
+// its output as `%{left | type: {:u, 8}}`, and `Nx.is_nan/1` does the same — a
+// packed mask, exactly what this shader already writes. Putting them in
+// elementwise_binary_s32 would have meant a second, differently-typed output
+// path for no reason.
+//
+// 9 and 10 are unary: the backend dispatches them with the operand bound to
+// BOTH inputs, so `y` is simply the same value as `x` and is ignored. On an
+// integer type neither NaN nor infinity is representable, so both are constant
+// false — that is a real answer, not a stub, and it is why they are here rather
+// than left to fall back.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { int a[]; };
+layout(std430, binding = 1) readonly buffer B { int b[]; };
+layout(std430, binding = 2) writeonly buffer O { uint o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+uint cmp(int x, int y) {
+    bool r;
+    switch (OP) {
+        case 0:  r = (x == y); break;
+        case 1:  r = (x != y); break;
+        case 2:  r = (x < y); break;
+        case 3:  r = (x <= y); break;
+        case 4:  r = (x > y); break;
+        case 5:  r = (x >= y); break;
+        case 6:  r = (x != 0) && (y != 0); break;
+        case 7:  r = (x != 0) || (y != 0); break;
+        case 8:  r = (x != 0) != (y != 0); break;
+        case 9:  r = false; break;
+        case 10: r = false; break;
+        default: r = false;
+    }
+    return r ? 1u : 0u;
+}
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    uint nwords = (p.n + 3u) / 4u;
+    if (word >= nwords) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint packed = 0u;
+    for (uint j = 0u; j < 4u; ++j) {
+        uint gid = word * 4u + j;
+        if (gid >= p.n) break;
+
+        uint idx = gid, aidx = 0u, bidx = 0u, as = 1u, bs = 1u;
+        for (int d = int(p.rank) - 1; d >= 0; --d) {
+            uint od = outd[d];
+            uint coord = idx % od;
+            idx = idx / od;
+            aidx += ((ad[d] == 1u) ? 0u : coord) * as; as *= ad[d];
+            bidx += ((bd[d] == 1u) ? 0u : coord) * bs; bs *= bd[d];
+        }
+        packed |= cmp(a[aidx], b[bidx]) << (j * 8u);
+    }
+    o[word] = packed;
+}
