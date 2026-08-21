@@ -321,6 +321,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp pad_left(list, rank), do: List.duplicate(1, rank - length(list)) ++ list
   defp pad4(list), do: (list ++ [1, 1, 1, 1]) |> Enum.take(4)
 
+  # pad4/1's sibling for arrays whose neutral filler is 0, not 1.
+  defp pad0(list), do: (list ++ [0, 0, 0, 0]) |> Enum.take(4)
+
   defp binary_op_host_fallback(op, out, a, b) do
     a_bin = Nx.backend_transfer(a, Nx.BinaryBackend)
     b_bin = Nx.backend_transfer(b, Nx.BinaryBackend)
@@ -387,17 +390,33 @@ defmodule Nx.Vulkan.VulkanoBackend do
       a_v = ensure_on_backend(a)
       spv = unary_spv(type, unquote(code))
 
-      if spv != nil and a_v.type == type do
-        %T{data: %__MODULE__{ref: a_ref}} = a_v
-        n = byte_size_of(shape)
-        n_bytes = n * element_bytes(type)
-        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
+      # `a_v.type == type` was the gate, and for the transcendentals it is never
+      # true on an integer input: Nx routes exp/log/sqrt/sigmoid/tanh through
+      # `Nx.Type.to_floating/1`, so `Nx.exp(s32_tensor)` has an f32 OUTPUT
+      # template against an s32 operand and the whole thing went to the host —
+      # even though `cast_s32_to_f32.spv` has existed since T11 and the binary
+      # path has coerced its operands via `coerce_to/2` all along.
+      #
+      # Textbook narrow gate (skill §1b): the kernel could always do this, only
+      # the `if` said otherwise. Found by W5 T2, which made `sum` resident and
+      # let logsumexp's doctests get far enough to fail HERE instead.
+      #
+      # coerce_to/2 returns nil when no cast shader covers the pair, so an
+      # uncastable operand still falls back rather than being forced.
+      coerced = if spv != nil, do: coerce_to(a_v, type)
 
-        :ok = Nx.Vulkan.NativeV.apply_unary(out_ref, a_ref, n, unquote(code), spv)
+      case coerced do
+        %T{data: %__MODULE__{ref: a_ref}} ->
+          n = byte_size_of(shape)
+          n_bytes = n * element_bytes(type)
+          {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_bytes)
 
-        put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
-      else
-        unary_op_host_fallback(unquote(op), out, a_v)
+          :ok = Nx.Vulkan.NativeV.apply_unary(out_ref, a_ref, n, unquote(code), spv)
+
+          put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+
+        _ ->
+          unary_op_host_fallback(unquote(op), out, a_v)
       end
     end
   end
@@ -2234,26 +2253,62 @@ defmodule Nx.Vulkan.VulkanoBackend do
     strides = Keyword.get(opts, :strides) || List.duplicate(1, rank)
     padding = Keyword.get(opts, :padding) || :valid
     dilations = Keyword.get(opts, :window_dilations) || List.duplicate(1, rank)
+    pad_lo = pad_lo(padding, rank)
 
+    # `no_padding?` and an all-ones dilation check used to be part of this gate,
+    # and they were the largest single residual after W5 T2 at 23 doctests —
+    # none of them a dtype problem, since the f32 cases were refused identically.
+    # The shader handles both now; what is left to refuse is NEGATIVE padding,
+    # which Nx allows as a form of cropping and which the skip-out-of-bounds
+    # trick cannot express (a negative pad removes real elements rather than
+    # adding implicit ones).
     if spv != nil and rank >= 1 and rank <= 4 and match?(%__MODULE__{}, t.data) and
-         t.type == type and no_padding?(padding) and Enum.all?(dilations, &(&1 == 1)) do
-      gpu_window_reduce(out, t, dimensions, strides, op_code, spv)
+         t.type == type and pad_lo != nil and Enum.all?(dilations, &(&1 >= 1)) do
+      gpu_window_reduce(out, t, dimensions, strides, pad_lo, dilations, op_code, spv)
     else
       t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
       host_result(out, host_fun.(t_bin, dimensions, opts))
     end
   end
 
+  # The low pad per axis, or nil if this padding config is one the shader cannot
+  # express. Nx.Shape.pool resolves :valid/:same into a {lo, hi} list before the
+  # backend ever sees it, but :valid is still accepted here because the callback
+  # is public and other callers exist.
+  #
+  # Only `lo` is needed: `hi` affects the OUTPUT SHAPE, which Nx has already
+  # computed and handed us, and the shader derives everything else from that.
+  defp pad_lo(:valid, rank), do: List.duplicate(0, rank)
+
+  defp pad_lo(list, rank) when is_list(list) and length(list) == rank do
+    if Enum.all?(list, fn {lo, hi} -> lo >= 0 and hi >= 0 end) do
+      Enum.map(list, fn {lo, _hi} -> lo end)
+    end
+  end
+
+  defp pad_lo(_, _rank), do: nil
+
+  # Still used by window_scatter_max/6, whose shader is a different design — one
+  # thread per INPUT element, which is what lets it avoid float atomics — and
+  # genuinely cannot take padding. Kept for that caller alone; window_reduce_op
+  # stopped needing it when the reduce shaders learned to skip out-of-bounds.
   defp no_padding?(:valid), do: true
   defp no_padding?(list) when is_list(list), do: Enum.all?(list, &(&1 == {0, 0}))
   defp no_padding?(_), do: false
 
   # params: [rank, in[4], out[4], win[4], strides[4]]
+  # params: [rank, in[4], out[4], win[4], strides[4], pad_lo[4], dil[4]]
+  #
+  # pad_lo is padded with ZEROS rather than pad4/1's ones — a 1 there would shift
+  # every unused axis by one element. It is the one array in this file whose
+  # filler is not 1, which is why it does not use pad4/1.
   defp gpu_window_reduce(
          %T{shape: out_shape, type: type} = out,
          %T{shape: in_shape, data: %__MODULE__{ref: a_ref}},
          dimensions,
          strides,
+         pad_lo,
+         dilations,
          op_code,
          spv
        ) do
@@ -2267,7 +2322,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
               pad4(Tuple.to_list(in_shape)) ++
               pad4(Tuple.to_list(out_shape)) ++
               pad4(win) ++
-              pad4(strides),
+              pad4(strides) ++
+              pad0(pad_lo) ++
+              pad4(dilations),
           into: <<>> do
         <<v::signed-32-little>>
       end

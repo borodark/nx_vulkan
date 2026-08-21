@@ -18,10 +18,27 @@
 // infinity literal, which keeps the shader identical in shape for f32 and f64
 // and avoids depending on inf representation.
 //
-// Params buffer: [rank, in[4], out[4], win[4], strides[4]] — shapes
-// left-aligned, padded to 4 with 1s. Padding and window dilation are NOT
-// handled here; the backend only dispatches this for the unpadded, undilated
-// case and host-falls-back otherwise.
+// Params buffer: [rank, in[4], out[4], win[4], strides[4], pad_lo[4], dil[4]] —
+// shapes left-aligned, padded to 4 with 1s.
+//
+// PADDING AND DILATION ARE HANDLED HERE (W5). They used to be the gate: the
+// backend refused any padded or dilated window and host-fell-back, which was 23
+// doctests and — the part that mattered — not a dtype problem at all, since the
+// f32 cases were refused identically.
+//
+// The implementation needs no identity literals and no `inf`. Nx pads a window
+// reduction with the OP'S IDENTITY (0 for sum, 1 for product, -inf for max,
+// +inf for min), and for every one of those, SKIPPING the element is the same
+// as combining with the identity — EXCEPT when the whole window is padding and
+// there is nothing to seed from, which is handled explicitly at the end. So an
+// out-of-bounds source index is simply
+// not read: sum skips an implicit 0, product an implicit 1, and max/min ignore
+// it, which is what -inf/+inf would have done. That keeps this shader free of
+// the inf representation dependency the original deliberately avoided, and it
+// makes the integer twin identical in shape rather than needing INT_MIN/MAX.
+//
+// `seen` exists because max/min can no longer seed from element 0 — with a
+// leading pad, element 0 is not in the tensor.
 
 layout(local_size_x = 256) in;
 layout(constant_id = 0) const int OP = 0;
@@ -43,11 +60,15 @@ void main() {
     uint outs[4];
     uint win[4];
     uint str[4];
+    int lo[4];
+    uint dil[4];
     for (uint i = 0u; i < 4u; ++i) {
         ins[i]  = uint(prm[1 + i]);
         outs[i] = uint(prm[5 + i]);
         win[i]  = uint(prm[9 + i]);
         str[i]  = uint(prm[13 + i]);
+        lo[i]   = prm[17 + i];
+        dil[i]  = uint(prm[21 + i]);
     }
 
     // Output coordinates -> the window's origin in the input.
@@ -69,27 +90,52 @@ void main() {
     for (uint d = 0u; d < p.rank; ++d) total *= win[d];
 
     float best = 0.0;
+    bool seen = false;
     double acc = (OP == 3) ? double(1.0) : double(0.0);
     for (uint w = 0u; w < total; ++w) {
         uint rem = w;
-        uint in_off = 0u;
+        int in_off = 0;
+        bool inside = true;
         for (int d = int(p.rank) - 1; d >= 0; --d) {
             uint wc = rem % win[d];
             rem = rem / win[d];
-            in_off += (oc[d] * str[d] + wc) * istride[d];
+            int src = int(oc[d] * str[d] + wc * dil[d]) - lo[d];
+            if (src < 0 || src >= int(ins[d])) inside = false;
+            in_off += src * int(istride[d]);
         }
+
+        // Out of bounds means "this element is padding". Skipping it IS
+        // combining with the identity — see the note at the top.
+        if (!inside) continue;
 
         float v = a[in_off];
         if (OP == 2) {
             acc += double(v);
         } else if (OP == 3) {
             acc *= double(v);
-        } else if (w == 0u) {
+        } else if (!seen) {
             best = v;
+            seen = true;
         } else {
             best = (OP == 0) ? max(best, v) : min(best, v);
         }
     }
 
-    o[gid] = (OP >= 2) ? float(acc) : best;
+    if (OP >= 2) {
+        o[gid] = float(acc);
+    } else if (seen) {
+        o[gid] = best;
+    } else {
+        // EVERY element of this window was padding, so there is nothing to
+        // combine with and the "skipping is combining with the identity" trick
+        // above has no seed to work from. BinaryBackend returns the identity
+        // itself here — -inf/+inf for floats, INT_MIN/INT_MAX for s32 — and
+        // this is the one place the shader has to name it.
+        //
+        // Reachable whenever a pad is at least as wide as the window, e.g.
+        // window_max(t, {2}, padding: [{2, 2}]). Found by differential test,
+        // not by reading: the value assertions all passed without it, because
+        // every window they used touched at least one real element.
+        o[gid] = (OP == 0) ? -1.0 / 0.0 : 1.0 / 0.0;
+    }
 }

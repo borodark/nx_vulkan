@@ -16,12 +16,39 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **570 of 835 doctests (68.3%) run with host fallbacks refused** as of W5 T2.
-  Note the denominator: 835, not 843 — `weighted_mean/3`'s eight doctests joined
-  `@rounding` in `nx_doctest_test.exs` when T2 made its sums resident, so they
-  no longer execute at all. **Every ordinal below was renumbered by that**, which
-  is the fragility the moduledoc warns about, happening for real. Only the super-io figure is re-measured at this point; the Kepler
+  **606 of 833 doctests (72.7%) run with host fallbacks refused** after W5's two
+  narrow-gate fixes (unary coercion and the window padding gate). Note the
+  denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
+  in `nx_doctest_test.exs` as their operands went resident and their f32
+  arithmetic stopped matching BinaryBackend's inspect string, so those ten
+  doctests no longer execute at all. **Every ordinal below was renumbered
+  twice by that**, which is the fragility the moduledoc warns about, happening
+  for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## Two narrow gates, worth 36 between them — and neither was a missing kernel
+
+  570/835 -> 606/833. Both were `if`s that were narrower than the shader behind
+  them (skill §1b), and both were found by T2 rather than by reading:
+
+    * **The unary path never coerced its operand** (+13). `Nx.exp(s32_tensor)`
+      has an f32 output template against an s32 operand, so `a_v.type == type`
+      was false and the whole thing went to the host — though
+      `cast_s32_to_f32.spv` had existed since T11 and the BINARY path had been
+      coercing via `coerce_to/2` all along. Cost: `Nx.log/2` excepted, because
+      `log(t)/log(base)` computed wholly in f32 gives 2.9999998 for
+      log(27)/log(3) where BinaryBackend's f64 gives 3.0.
+    * **The window gate refused padded and dilated windows** (+23). Nx pads a
+      window reduction with the OP'S IDENTITY, and for all four ops skipping an
+      out-of-bounds element equals combining with that identity — so no `inf`
+      literals were needed, and the integer shader stayed identical in shape to
+      the float ones. One edge does need them: a window that is ENTIRELY
+      padding has nothing to seed from, and max/min must return -inf/+inf
+      (INT_MIN/INT_MAX on s32). Every value assertion passed without that
+      handling, because every window they used touched a real element.
+
+  Negative padding still falls back: it crops rather than pads, and
+  skip-out-of-bounds cannot express it.
 
   ## W5 T2 — integer reductions, and the bucket names stop meaning much
 
@@ -113,7 +140,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 265 listed ones step aside so the remaining 570
+  `NXV_HOST_FALLBACK=raise` the 227 listed ones step aside so the remaining 606
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -143,7 +170,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 169 doctests, down from 357 before W5 (226 after T1 + the pow correction).
+  # 151 doctests, down from 357 before W5 (169 after T2).
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -180,7 +207,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/2", [626, 629, 632, 633, 635, 636]},
     {"Nx.dot/4", [639, 641]},
     {"Nx.dot/6", [642, 643, 644, 645, 646]},
-    {"Nx.fill/3", [823]},
+    {"Nx.fill/3", [821]},
     {"Nx.gather/3", [711, 712]},
     {"Nx.indexed_add/4", [347, 348, 351, 352]},
     {"Nx.indexed_put/4", [356, 357, 358, 359, 360, 361, 364, 365]},
@@ -210,12 +237,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.take/3", [692, 693, 694, 695, 696, 697]},
     {"Nx.tril/2", [23]},
     {"Nx.triu/2", [27]},
-    {"Nx.window_max/3", [563, 565, 566]},
-    {"Nx.window_mean/3", [557, 559, 560, 561]},
-    {"Nx.window_min/3", [568, 570, 571]},
-    {"Nx.window_product/3", [573, 575, 576]},
-    {"Nx.window_reduce/5", [618, 619, 620, 621, 622]},
-    {"Nx.window_sum/3", [550, 552, 553, 554, 555]}
+    {"Nx.window_reduce/5", [618, 619, 620, 621, 622]}
   ]
 
   # 37 doctests. GLSL.std.450 defines its transcendentals for 32-bit floats
@@ -288,19 +310,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/4", [640]},
     {"Nx.indexed_add/4", [349, 350]},
     {"Nx.indexed_put/4", [362, 363]},
-    {"Nx.log/2", [819, 820]},
-    {"Nx.log10/1", [817, 818]},
-    {"Nx.log2/1", [815, 816]},
-    {"Nx.logsumexp/2", [827, 828, 829, 830, 831, 832, 833, 834, 835]},
     {"Nx.reduce/4", [609]},
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},
-    {"Nx.select/3", [343]},
-    {"Nx.window_max/3", [564]},
-    {"Nx.window_mean/3", [558]},
-    {"Nx.window_min/3", [569]},
-    {"Nx.window_product/3", [574]},
-    {"Nx.window_sum/3", [551]}
+    {"Nx.select/3", [343]}
   ]
 
   @doc """

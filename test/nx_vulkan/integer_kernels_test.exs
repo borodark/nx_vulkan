@@ -221,26 +221,18 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       end
     end
 
-    test "transcendentals on an integer input go to the FLOAT shader" do
+    test "transcendentals on an integer input are COERCED, not host-fallen-back" do
       # Nx runs these through Nx.Type.to_floating/1, so the output template is
       # f32 and the integer shader never sees code 0/1/2. Asserting the type
       # documents why elementwise_unary_s32.comp has no exp case.
-      assert Nx.type(Fallback.strict(:allow, fn -> Nx.exp(gpu([1, 2], {:s, 32})) end)) ==
-               {:f, 32}
+      assert Nx.type(Nx.exp(gpu([1, 2], {:s, 32}))) == {:f, 32}
 
-      assert_parity(fn t -> Nx.exp(t.([1, 2], {:s, 32})) end)
-
-      # And it FALLS BACK, which is a narrow gate rather than a missing kernel:
-      # the unary path requires `a_v.type == out.type` and never coerces, though
-      # cast_s32_to_f32.spv exists and the binary path already coerces via
-      # coerce_to/2. Surfaced by T2 — logsumexp's 9 doctests used to fail
-      # earlier, at `sum`. Pinned at an exact count so closing it fails here
-      # and gets noticed, rather than a `> 0` that a fix would silently satisfy.
-      # `count_total/1` only turns on recording — it does not relax the ambient
-      # mode, so under strict_test.sh it would raise before it could count.
-      assert Fallback.strict(:allow, fn ->
-               Fallback.count_total(fn -> Nx.exp(gpu([1, 2], {:s, 32})) end)
-             end) == 1
+      # It used to fall back here, pinned at exactly 1, and closing that gate is
+      # what this assertion was for — it fired the moment coerce_to/2 was wired
+      # into the unary path. Now the operand is cast s32 -> f32 on the device
+      # and the whole expression stays resident.
+      assert_parity_and_residency(fn t -> Nx.exp(t.([1, 2], {:s, 32})) end)
+      assert_parity_and_residency(fn t -> Nx.sqrt(t.([4, 9], {:s, 32})) end)
     end
   end
 
@@ -407,14 +399,81 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       end)
     end
 
-    test "padded and dilated windows still fall back" do
-      # window_reduce_op/6's gate refuses both; the shader indexes straight into
-      # the source and has no notion of an out-of-bounds element. 23 doctests,
-      # and NOT a dtype problem — the f32 ones fall back identically.
-      assert_parity(fn t -> Nx.window_sum(t.([1, 2, 3], {:s, 32}), {2}, padding: [{1, 1}]) end)
+    test "padded windows run on the GPU, for every op and every dtype" do
+      # This gate used to refuse them — 23 doctests, and never a dtype problem
+      # since the f32 cases were refused identically. Nx pads with the OP'S
+      # IDENTITY, and for all four ops skipping an out-of-bounds element is the
+      # same as combining with that identity, so the shader needs no literals.
+      for op <- [:window_sum, :window_product, :window_max, :window_min] do
+        assert_parity_and_residency(fn t ->
+          apply(Nx, op, [t.([1, 2, 3], {:s, 32}), {2}, [padding: [{1, 1}]]])
+        end)
 
+        assert_parity_and_residency(fn t ->
+          apply(Nx, op, [t.([1.0, 2.0, 3.0], {:f, 32}), {2}, [padding: :same]])
+        end)
+      end
+    end
+
+    test "dilated windows run on the GPU" do
+      for op <- [:window_sum, :window_max] do
+        assert_parity_and_residency(fn t ->
+          apply(Nx, op, [t.([1, 2, 3, 4], {:s, 32}), {2}, [window_dilations: [2]]])
+        end)
+      end
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_max(Nx.reshape(t.([1, 2, 3, 4, 5, 6, 7, 8, 9], {:s, 32}), {3, 3}), {2, 2},
+          window_dilations: [2, 2]
+        )
+      end)
+    end
+
+    test "padding combines with strides, and with rank 2" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_sum(t.([1, 2, 3, 4], {:s, 32}), {2}, padding: [{1, 1}], strides: [2])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_sum(Nx.reshape(t.([1, 2, 3, 4, 5, 6, 7, 8, 9], {:s, 32}), {3, 3}), {2, 2},
+          padding: [{1, 0}, {0, 1}]
+        )
+      end)
+    end
+
+    test "a window that is ENTIRELY padding returns the identity" do
+      # The edge the skip-out-of-bounds design misses: with nothing to seed
+      # from, max/min have to name -inf/+inf (INT_MIN/INT_MAX on s32)
+      # explicitly. Reachable whenever a pad is at least as wide as the window.
+      # Every value assertion above passed WITHOUT this handling, because every
+      # window they used touched at least one real element — a differential
+      # test found it, reading did not.
+      assert_parity_and_residency(fn t ->
+        Nx.window_max(t.([1, 2, 3], {:s, 32}), {2}, padding: [{2, 2}])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_min(t.([1, 2, 3], {:s, 32}), {2}, padding: [{2, 2}])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_max(t.([1.0, 2.0], {:f, 32}), {2}, padding: [{2, 2}])
+      end)
+
+      got = Nx.window_max(gpu([1, 2, 3], {:s, 32}), {2}, padding: [{2, 2}])
+      assert Nx.to_flat_list(got) == [-2_147_483_648, 1, 2, 3, 3, -2_147_483_648]
+
+      f = Nx.window_max(gpu([1.0, 2.0], {:f, 32}), {2}, padding: [{2, 2}])
+      assert Nx.to_flat_list(f) == [:neg_infinity, 1.0, 2.0, 2.0, :neg_infinity]
+    end
+
+    test "NEGATIVE padding still falls back" do
+      # Nx allows a negative pad as a form of cropping, which removes real
+      # elements rather than adding implicit ones — the skip-out-of-bounds
+      # trick cannot express it. `pad_lo/2` returns nil and the op goes to the
+      # host, which is correct.
       assert_parity(fn t ->
-        Nx.window_sum(t.([1, 2, 3, 4], {:s, 32}), {2}, window_dilations: [2])
+        Nx.window_sum(t.([1, 2, 3, 4], {:s, 32}), {2}, padding: [{-1, 0}])
       end)
     end
   end

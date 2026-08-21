@@ -79,12 +79,25 @@ defmodule Nx.Vulkan.NxDoctestTest do
   # integer reduction that used to fall back, taking the whole expression to the
   # host with it. With an s32 reduce shader the sums stay resident, so the final
   # divide happens on the GPU and lands on the other side of that 1 ULP.
+  # log/2 joined when the unary path learned to coerce an integer operand
+  # (W5, after T2). `Nx.log(t, base)` is `log(t) / log(base)`, and with an
+  # integer input the `log(t)` half used to fall back and carry the division to
+  # the host with it. Computed natively the whole chain is f32, where
+  # log(27)/log(3) is 2.9999998 rather than 3.0 — BinaryBackend does it in f64
+  # via :math.log and narrows once at the end.
+  #
+  # This one is a bigger visible gap than the 1-ULP entries above, and it is
+  # NOT the same phenomenon: exp/1, log/1 and sqrt/1 are here because an f32
+  # GPU transcendental differs from an f64-computed-then-narrowed one, which is
+  # exactly what this is, one composition deeper. Consistent with them, and the
+  # trade is 9 logsumexp doctests resident against Nx.log/2's excepted.
   @rounding [
     exp: 1,
     tanh: 1,
     sigmoid: 1,
     sqrt: 1,
     log: 1,
+    log: 2,
     add: 2,
     standard_deviation: 2,
     covariance: 3,
