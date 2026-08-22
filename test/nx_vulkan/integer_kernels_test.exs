@@ -681,6 +681,60 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "all / any" do
+    test "flat, over every supported input dtype" do
+      for type <- [{:s, 32}, {:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t -> Nx.all(t.([0, 1, 2], type)) end)
+        assert_parity_and_residency(fn t -> Nx.all(t.([1, 2, 3], type)) end)
+        assert_parity_and_residency(fn t -> Nx.any(t.([0, 0, 2], type)) end)
+        assert_parity_and_residency(fn t -> Nx.any(t.([0, 0, 0], type)) end)
+      end
+    end
+
+    test "over an axis, with and without :keep_axes" do
+      m = fn t -> Nx.reshape(t.([-1, 0, 1, 2, 3, 4], {:s, 32}), {2, 3}) end
+
+      for axes <- [[0], [1]], keep <- [false, true] do
+        assert_parity_and_residency(fn t -> Nx.all(m.(t), axes: axes, keep_axes: keep) end)
+        assert_parity_and_residency(fn t -> Nx.any(m.(t), axes: axes, keep_axes: keep) end)
+      end
+    end
+
+    test "on a u8 MASK, which is the whole point of the u8 entry" do
+      # `Nx.all(Nx.greater(a, b))` is the natural idiom and `greater` already
+      # emits a u8 mask on the GPU. Without an allany_u8 shader the mask would
+      # be dragged back to the host purely to be summarised — the same lesson
+      # T12's {:u, 8} -> {:u, 32} sum entry records.
+      assert_parity_and_residency(fn t ->
+        Nx.all(Nx.greater(t.([1, 5, 3], {:s, 32}), t.([0, 0, 0], {:s, 32})))
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.any(Nx.greater(t.([1, 5, 3], {:s, 32}), t.([9, 9, 9], {:s, 32})))
+      end)
+    end
+
+    test "NaN is TRUTHY, and needs no special case" do
+      # `NaN != 0.0` is true in IEEE and BinaryBackend agrees, so unlike
+      # argreduce_*.comp — where NaN had to be handled explicitly — the plain
+      # comparison is already right here.
+      assert_parity_and_residency(fn t -> Nx.all(t.([:nan, 1.0], {:f, 32})) end)
+      assert Nx.to_number(Nx.all(gpu([:nan, 1.0], {:f, 32}))) == 1
+    end
+
+    test "an output wider than one packed word" do
+      # The output is written 4 results per u32 word, so anything past 4 slots
+      # exercises the packing rather than a single-word special case.
+      assert_parity_and_residency(fn t ->
+        Nx.all(Nx.reshape(t.(Enum.to_list(1..20), {:s, 32}), {2, 10}), axes: [0])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.any(Nx.reshape(t.(List.duplicate(0, 20), {:s, 32}), {2, 10}), axes: [0])
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

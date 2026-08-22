@@ -1447,13 +1447,59 @@ defmodule Nx.Vulkan.VulkanoBackend do
     put_in(out.data, %__MODULE__{ref: out_ref, shape: out.shape, type: out.type})
   end
 
-  # all/3, any/3 — boolean reductions, host-fallback.
-  for op <- [:all, :any] do
-    @impl true
-    def unquote(op)(out, tensor, opts) do
-      bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-      result = apply(Nx, unquote(op), [bin, opts])
-      host_result(out, result)
+  # all/3, any/3 — boolean reductions. `glsl/allany_*.comp`, which share
+  # reduce_axis_*.comp's bindings and push layout and so reuse `reduce_axis/7`
+  # with no new NIF, exactly as the argreduce family does.
+  @allany_s32_spv Path.expand("../../priv/shaders/allany_s32.spv", __DIR__)
+  @allany_f32_spv Path.expand("../../priv/shaders/allany_f32.spv", __DIR__)
+  @allany_f64_spv Path.expand("../../priv/shaders/allany_f64.spv", __DIR__)
+  @allany_u8_spv Path.expand("../../priv/shaders/allany_u8.spv", __DIR__)
+
+  # Keyed on the INPUT type. The output is always {:u, 8} — Nx types these that
+  # way whatever went in — so there is no (in, out) pair to track.
+  #
+  # The u8 entry is the one that earns its keep: `Nx.all(Nx.greater(a, b))` is
+  # the natural idiom, `greater` already emits a u8 mask on the GPU, and without
+  # this the mask would be dragged back to the host to be summarised. Same
+  # lesson as T12's `{:u, 8} -> {:u, 32}` sum entry — the dtype a gate refuses
+  # is usually one the backend itself produced.
+  defp allany_spv({:s, 32}), do: @allany_s32_spv
+  defp allany_spv({:f, 32}), do: @allany_f32_spv
+  defp allany_spv({:f, 64}), do: @allany_f64_spv
+  defp allany_spv({:u, 8}), do: @allany_u8_spv
+  defp allany_spv(_), do: nil
+
+  @impl true
+  def all(out, tensor, opts), do: do_allany(out, tensor, opts, 0, :all, &Nx.all/2)
+
+  @impl true
+  def any(out, tensor, opts), do: do_allany(out, tensor, opts, 1, :any, &Nx.any/2)
+
+  defp do_allany(%T{shape: out_shape, type: out_type} = out, tensor, opts, op_code, op, host_fun) do
+    t = ensure_on_backend(tensor)
+    spv = allany_spv(t.type)
+    axes = Keyword.get(opts, :axes) || all_axes(t.shape)
+
+    fast_path? =
+      spv != nil and match?(%__MODULE__{}, t.data) and out_type == {:u, 8} and
+        match?({:ok, _}, classify_reduce_axes(t.shape, axes))
+
+    if fast_path? do
+      %T{data: %__MODULE__{ref: a_ref}} = t
+      {:ok, {outer, reduce_size, inner}} = classify_reduce_axes(t.shape, axes)
+      n_out = max(byte_size_of(out_shape), 1)
+      # u8 out, written as u32 words — pad the buffer to a 4-byte multiple, the
+      # same as gpu_compare/5.
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(div(n_out + 3, 4) * 4)
+
+      :ok =
+        Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)
+
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: out_type})
+    else
+      bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      # Explicit attribution — shared helper, see do_argreduce/6.
+      host_result(out, host_fun.(bin, opts), {op, 3})
     end
   end
 

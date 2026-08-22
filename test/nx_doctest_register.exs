@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **643 of 833 doctests (77.2%) run with host fallbacks refused** after the
-  arg-reduction shaders. Note the
+  **653 of 833 doctests (78.4%) run with host fallbacks refused** after the
+  all/any shaders. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
   in `nx_doctest_test.exs` as their operands went resident and their f32
   arithmetic stopped matching BinaryBackend's inspect string, so those ten
@@ -25,6 +25,24 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `allany` — all and any (+10)
+
+  643/833 -> 653/833. Four more shaders that reuse `reduce_axis/7` verbatim, so
+  still no new NIF. The output is `{:u, 8}` whatever the input, written as
+  packed u32 words with ONE THREAD PER FOUR OUTPUT SLOTS — which makes the
+  dispatch geometry deliberately loose, since the NIF launches four times the
+  threads this needs and the surplus return at the bounds guard. Reusing the
+  NIF is worth the idle threads.
+
+  The `{:u, 8}` INPUT entry is the one that earns its keep:
+  `Nx.all(Nx.greater(a, b))` is the natural idiom and `greater` already emits a
+  u8 mask on the GPU, so without it the mask went back to the host purely to be
+  summarised. Same lesson as T12's `{:u, 8} -> {:u, 32}` sum entry — the dtype a
+  gate refuses is usually one the backend itself produced.
+
+  NaN needs no special case here, unlike argreduce: `NaN != 0.0` is true and
+  BinaryBackend agrees, so NaN is truthy on both sides.
 
   ## `argreduce` — argmax and argmin (+14)
 
@@ -190,7 +208,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 190 listed ones step aside so the remaining 643
+  `NXV_HOST_FALLBACK=raise` the 180 listed ones step aside so the remaining 653
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -220,7 +238,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 116 doctests, down from 357 before W5.
+  # 106 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -245,9 +263,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   # — what actually gated them was the axis > 0 concatenate, not the dtype, so
   # they left this bucket without W5 touching it.
   @integer_dtype [
-    {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
+    {"Nx.all/2", [446]},
     {"Nx.all_close/3", [460]},
-    {"Nx.any/2", [447, 448, 449, 450, 451]},
     {"Nx.argmax/2", [532, 534, 535, 536]},
     {"Nx.argmin/2", [543, 545, 546, 547]},
     {"Nx.as_type/2", [87, 90, 91]},
