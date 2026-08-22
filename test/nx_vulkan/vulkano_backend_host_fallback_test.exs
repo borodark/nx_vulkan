@@ -92,13 +92,33 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [0.0, 7.0, 8.0, 0.0]
     end
 
-    test "indexed_put result is on BinaryBackend" do
+    # indexed_put got `glsl/scatter.comp` and now stays on the GPU, like
+    # put_slice above. This test used to pin it to BinaryBackend; the pin
+    # failing is the intended signal that the op was promoted.
+    #
+    # Note that indexed_ADD below did NOT move, and that is the interesting
+    # half: the two ops share a shader and differ only in whether duplicate
+    # indices must accumulate. `indexed_put` documents its race, so a plain
+    # write is the specified behaviour at any dtype; `indexed_add` needs an
+    # atomic, and an f32 one needs GL_EXT_shader_atomic_float, which the Kepler
+    # fleet does not guarantee. Integer indexed_add does run on the GPU.
+    test "indexed_put (f32) stays on VulkanoBackend and is correct" do
       target = v(f32([0.0, 0.0, 0.0, 0.0]))
       idx = Nx.tensor([[0], [2]], type: :s64, backend: Nx.BinaryBackend)
       upd = Nx.tensor([1.0, 3.0], type: :f32, backend: Nx.BinaryBackend)
       r = Nx.indexed_put(target, idx, upd)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [1.0, 0.0, 3.0, 0.0]
+    end
+
+    test "indexed_add on INTEGERS stays on VulkanoBackend, unlike the f32 case" do
+      target = Nx.tensor([10, 10, 10], type: :s32, backend: VulkanoBackend)
+      idx = Nx.tensor([[0], [2], [0]], type: :s32, backend: Nx.BinaryBackend)
+      upd = Nx.tensor([1, 3, 5], type: :s32, backend: Nx.BinaryBackend)
+      r = Nx.indexed_add(target, idx, upd)
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
+      # Duplicate index 0 accumulates: 10 + 1 + 5. That is the atomic working.
+      assert Nx.to_flat_list(r) == [16, 10, 13]
     end
 
     test "indexed_add result is on BinaryBackend" do

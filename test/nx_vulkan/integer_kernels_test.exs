@@ -478,6 +478,133 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "scatter — indexed_put and indexed_add" do
+    test "indexed_put writes only what the indices name" do
+      # The elements NOT named have to survive, which is why the output is
+      # seeded with a copy of the target rather than a zeroed buffer.
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_put(t.([9, 8, 7, 6], {:s, 32}), t.([[1]], {:s, 32}), t.([99], {:s, 32}))
+      end)
+    end
+
+    test "indexed_put at f32, f64 and s32" do
+      for type <- [{:s, 32}, {:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t ->
+          Nx.indexed_put(t.([0, 0, 0], type), t.([[1], [2]], {:s, 32}), t.([2, 4], type))
+        end)
+      end
+    end
+
+    test "indexed_put on a rank-3 tensor, and writing whole blocks" do
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_put(
+          Nx.reshape(t.([0, 1, 2, 3, 4, 5], {:s, 32}), {1, 2, 3}),
+          t.([[0, 0, 0], [0, 1, 1], [0, 0, 2]], {:s, 32}),
+          t.([1, 3, -2], {:s, 32})
+        )
+      end)
+
+      # K < rank: each index row names a leading coord and a contiguous block of
+      # `count` elements is written.
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_put(
+          Nx.reshape(t.([0, 1, 2, 3, 4, 5], {:s, 32}), {2, 3}),
+          t.([[1]], {:s, 32}),
+          Nx.reshape(t.([7, 8, 9], {:s, 32}), {1, 3})
+        )
+      end)
+    end
+
+    test "indexed_add ACCUMULATES duplicate indices — the atomic" do
+      # The one behavioural difference between the two ops. indexed_put
+      # documents its race; indexed_add must be deterministic, and that is what
+      # the integer atomicAdd buys.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.indexed_add(
+            t.([0, 0, 0], {:s, 32}),
+            t.([[0], [0], [0], [1]], {:s, 32}),
+            t.([1, 2, 3, 4], {:s, 32})
+          )
+        end)
+
+      assert Nx.to_flat_list(got) == [6, 4, 0]
+    end
+
+    test "indexed_add wraps at s32, like every other integer op here" do
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_add(
+          t.([2_000_000_000], {:s, 32}),
+          t.([[0], [0]], {:s, 32}),
+          t.([2_000_000_000, 1], {:s, 32})
+        )
+      end)
+    end
+
+    test "FLOAT indexed_add stays on the host — a decision, not a gap" do
+      # An f32 atomicAdd needs GL_EXT_shader_atomic_float, which the Kepler
+      # fleet does not guarantee. Same constraint that keeps overlapping pooling
+      # backward on the host. Value parity still holds; only residency differs.
+      assert_parity(fn t ->
+        Nx.indexed_add(t.([1.0], {:f, 32}), t.([[0], [0]], {:s, 32}), t.([1.0, 1.0], {:f, 32}))
+      end)
+
+      assert Fallback.strict(:allow, fn ->
+               Fallback.count_total(fn ->
+                 Nx.indexed_add(gpu([1.0], {:f, 32}), gpu([[0]], {:s, 32}), gpu([1.0], {:f, 32}))
+               end)
+             end) == 1
+    end
+
+    test "Nx PROMOTES both target and updates, and both are coerced" do
+      # Nx's own doctests for indexed_add cover both directions. Requiring exact
+      # type equality refused them, and that is where Nx.LinAlg.invert/1 fell
+      # back at the last step of an otherwise-resident chain.
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_put(t.([1.0, 2.0], {:f, 32}), t.([[0]], {:s, 32}), t.([9], {:s, 32}))
+      end)
+
+      # For indexed_ADD the same promotion goes the other way: an s32 target
+      # with f32 updates promotes to an f32 RESULT, and a float indexed_add is
+      # the atomic case that stays on the host. So this one is parity-only —
+      # the coercion is not what refuses it, the output dtype is.
+      assert_parity(fn t ->
+        Nx.indexed_add(t.([1], {:s, 32}), t.([[0], [0]], {:s, 32}), t.([1.0, 1.0], {:f, 32}))
+      end)
+
+      # An integer-in, integer-out promotion DOES stay resident.
+      assert_parity_and_residency(fn t ->
+        Nx.indexed_add(t.([1, 1], {:s, 32}), t.([[0], [0]], {:s, 32}), t.([2, 3], {:s, 32}))
+      end)
+    end
+
+    test "Nx.LinAlg.invert/1 no longer falls back at indexed_put" do
+      # The motivation MISSION §3.3 records: invert composes at the Nx level, so
+      # with_binary_backend/1 never sees it and it died at indexed_put/5. What
+      # is left is the two allowlisted LinAlg blocks and nothing else.
+      a = Nx.tensor([[2.0, 0.0], [0.0, 4.0]], backend: VulkanoBackend)
+
+      {_res, counts} =
+        Fallback.strict(:allow, fn -> Fallback.count(fn -> Nx.LinAlg.invert(a) end) end)
+
+      refute Map.has_key?(counts, {:indexed_put, 5})
+      refute Map.has_key?(counts, {:scatter_op, 8})
+    end
+
+    test "non-prefix axes still fall back" do
+      # Shared with gather: the shader's strides assume the indexed axes are the
+      # leading prefix [0..K-1]. Anything else needs a transpose first.
+      assert_parity(fn t ->
+        Nx.indexed_put(
+          Nx.reshape(t.([0, 1, 2, 3, 4, 5], {:s, 32}), {2, 3}),
+          t.([[1]], {:s, 32}),
+          Nx.reshape(t.([7, 8], {:s, 32}), {1, 2}),
+          axes: [1]
+        )
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

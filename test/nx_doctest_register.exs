@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **606 of 833 doctests (72.7%) run with host fallbacks refused** after W5's two
-  narrow-gate fixes (unary coercion and the window padding gate). Note the
+  **629 of 833 doctests (75.5%) run with host fallbacks refused** after the
+  scatter shader. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
   in `nx_doctest_test.exs` as their operands went resident and their f32
   arithmetic stopped matching BinaryBackend's inspect string, so those ten
@@ -25,6 +25,33 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `scatter` — indexed_put and indexed_add (+23)
+
+  606/833 -> 629/833. `glsl/scatter.comp` is the inverse of `gather.comp` —
+  same index arithmetic, same params layout, source and destination swapped —
+  and it closes the largest non-decided residual W5's census named. It is also
+  where `Nx.LinAlg.invert/1` died (MISSION §3.3); invert now reports only its
+  two allowlisted LinAlg blocks.
+
+  The two ops share a shader and differ in exactly one way, which decides their
+  dtype gates:
+
+    * `indexed_put` DOCUMENTS its race — "in case of repeating indices, the
+      result is non-deterministic, since the operation happens in parallel when
+      running on devices such as the GPU". A plain word write is therefore the
+      SPECIFIED behaviour rather than a tolerated approximation, and every
+      4/8-byte dtype gets it.
+    * `indexed_add` must accumulate duplicates deterministically, which needs an
+      atomic. Integer `atomicAdd` is core GLSL 4.30 and exact on the
+      two's-complement bit pattern. Float `indexed_add` stays on the host for
+      the same reason overlapping pooling backward does — an f32 atomic needs
+      `GL_EXT_shader_atomic_float`, which the Kepler fleet does not guarantee.
+
+  Two things it needed beyond the gather template: the output is seeded with a
+  COPY of the target (a scatter writes only what the indices name, so a zeroed
+  buffer is wrong), and both target and updates are coerced, because Nx promotes
+  them — which is the narrow gate invert was actually hitting.
 
   ## Two narrow gates, worth 36 between them — and neither was a missing kernel
 
@@ -140,7 +167,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 227 listed ones step aside so the remaining 606
+  `NXV_HOST_FALLBACK=raise` the 204 listed ones step aside so the remaining 629
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -170,7 +197,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 151 doctests, down from 357 before W5 (169 after T2).
+  # 130 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -209,12 +236,11 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/6", [642, 643, 644, 645, 646]},
     {"Nx.fill/3", [821]},
     {"Nx.gather/3", [711, 712]},
-    {"Nx.indexed_add/4", [347, 348, 351, 352]},
-    {"Nx.indexed_put/4", [356, 357, 358, 359, 360, 361, 364, 365]},
+    {"Nx.indexed_add/4", [351]},
+    {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
     {"Nx.linspace/3", [804, 805, 806]},
-    {"Nx.make_diagonal/2", [39, 40, 41, 42, 43, 44]},
     {"Nx.max/2", [270]},
     {"Nx.min/2", [276]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
@@ -224,7 +250,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.population_count/1", [424]},
     {"Nx.pow/2", [241, 242, 244]},
     {"Nx.product/2", [505]},
-    {"Nx.put_diagonal/3", [46, 47, 48, 49, 50, 51]},
     {"Nx.quotient/2", [260, 261]},
     {"Nx.reduce/4", [607, 608, 610, 611, 612, 613, 614, 615, 616, 617]},
     {"Nx.reflect/2", [814]},
@@ -309,7 +334,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/2", [627, 628, 634]},
     {"Nx.dot/4", [640]},
     {"Nx.indexed_add/4", [349, 350]},
-    {"Nx.indexed_put/4", [362, 363]},
     {"Nx.reduce/4", [609]},
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},

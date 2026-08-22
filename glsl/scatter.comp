@@ -1,0 +1,79 @@
+#version 450
+
+// Scatter — indexed_put and indexed_add for the leading-prefix axes case. The
+// exact inverse of gather.comp: same index arithmetic, same params layout, with
+// source and destination swapped. One thread per UPDATE element:
+//   row   = gid / count           (which index row)
+//   inner = gid % count           (offset within the written block)
+//   dst   = Σ_j idx[row,j] * stride[j] + inner
+//
+// Spec constant 0 selects the mode, and the two are NOT symmetric:
+//
+//   0 = put — a plain word write, any 4/8-byte dtype. Duplicate indices race,
+//       and that is CORRECT rather than tolerated: `Nx.indexed_put/4` documents
+//       "in case of repeating indices, the result is non-deterministic, since
+//       the operation happens in parallel when running on devices such as the
+//       GPU". This backend is that device. No atomics, no ordering, no cost.
+//
+//   1 = add — `atomicAdd`, and INTEGER ONLY. Here duplicates must accumulate
+//       deterministically, which a plain read-modify-write cannot do. Integer
+//       atomicAdd on an SSBO is core GLSL 4.30, needs no extension, and works
+//       on the two's-complement bit pattern, so signed s32 addition (wrapping
+//       included) comes out exactly right through a `uint` view.
+//
+//       FLOAT indexed_add stays on the host, and it is the same constraint that
+//       keeps overlapping pooling backward there: an f32 atomicAdd needs
+//       GL_EXT_shader_atomic_float, which the Kepler fleet does not guarantee.
+//       That is a decision, not a gap.
+//
+// `out` is seeded with a copy of the target before this runs — every element
+// the indices do not touch has to survive — and is therefore read-write, not
+// writeonly.
+//
+// Indices are read as their low u32 word (idx_words = index_bytes/4: 1 for s32,
+// 2 for s64). Out-of-range indices are NOT clamped, matching BinaryBackend.
+//
+// Params: [K, ews, idx_words, count, stride[4]] where stride[j] = product of
+// target dims after axis j (row-major), for j in 0..K-1. Identical to gather's.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer U { uint upd[]; };
+layout(std430, binding = 1) buffer O { uint o[]; };
+layout(std430, binding = 2) readonly buffer Idx { uint idxb[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    uint idxw = uint(prm[2]);
+    uint count = uint(prm[3]);
+
+    uint row = gid / count;
+    uint inner = gid % count;
+
+    uint base = 0u;
+    for (uint j = 0u; j < p.K; ++j) {
+        uint w = idxb[(row * p.K + j) * idxw];
+        base += w * uint(prm[4 + int(j)]);
+    }
+
+    uint dst = base + inner;
+
+    if (OP == 0) {
+        for (uint w = 0u; w < ews; ++w) {
+            o[dst * ews + w] = upd[gid * ews + w];
+        }
+    } else {
+        // ews is 1 here — the backend only dispatches add for 4-byte integers.
+        atomicAdd(o[dst], upd[gid]);
+    }
+}

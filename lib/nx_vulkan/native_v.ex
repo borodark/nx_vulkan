@@ -157,6 +157,22 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Scatter: `indexed_put` (op 0) and `indexed_add` (op 1), the inverse of
+  `apply_gather/7`.
+
+  `out` is read-write and must arrive PRE-SEEDED with a copy of the target — a
+  scatter writes only the elements the indices name, and the rest have to
+  survive. `VulkanoBackend` makes that copy with `concat_buffers/1` on a single
+  buffer.
+
+  op 1 accumulates with an integer `atomicAdd` and is dispatched for 4-byte
+  integer dtypes only; float `indexed_add` needs `GL_EXT_shader_atomic_float`,
+  which the Kepler fleet does not guarantee, and stays on the host.
+  """
+  def apply_scatter(_out, _upd, _idx, _params, _n, _k, _op_code, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Generic JIT-shader dispatch (thrust 3 fusion compiler). Runs a runtime-
   generated shader: inputs at bindings 0..k-1 (in the order of `in_refs`),
   output at binding k, push {n = element count}. One dispatch replaces a whole
