@@ -16,8 +16,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **653 of 833 doctests (78.4%) run with host fallbacks refused** after the
-  all/any shaders. Note the
+  **664 of 833 doctests (79.7%) run with host fallbacks refused**, of which
+  **653 (78.4%) are genuinely device-resident**. The 11-doctest gap is
+  `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
+  reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
   in `nx_doctest_test.exs` as their operands went resident and their f32
   arithmetic stopped matching BinaryBackend's inspect string, so those ten
@@ -25,6 +27,34 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `reduce/5` is allowlisted, and that +11 is PERMISSION not residency
+
+  This is the second time the headline has moved for a reason other than work
+  reaching the GPU — the first was W4's 25 FFT doctests. `Nx.reduce/4` takes an
+  arbitrary user fun and now carries an allowlist entry, so its 11 doctests stop
+  being refused and leave this register by the script's rules. **Not one of them
+  runs on the device.** Refused-clean is 664/833 (79.7%); device-resident is
+  653/833 (78.4%).
+
+  The entry is a decision backed by measurement, not a shrug. Vectorising the
+  fold — one dispatch per step along the reduced axis, fun evaluated on resident
+  tensors — was prototyped and raced against the host path it would replace:
+
+  | reduce_size | on-device fold | host fallback |
+  |---:|---:|---:|
+  | 8 | 0.97 ms | 0.19 ms |
+  | 64 | 6.12 ms | 3.02 ms |
+  | 512 | 39.81 ms | 22.01 ms |
+  | 4096 | 440.62 ms | 37.40 ms |
+
+  It is slower at every size and the gap WIDENS with the axis, because the cost
+  is per-dispatch launch overhead. Nothing removes that without assuming the fun
+  is associative (a log2-step tree reduce), which `Nx.reduce` does not guarantee
+  — it is a left fold. Probing the fun to recognise `add` is the other tempting
+  shortcut and is unsound for the same reason a probe always is.
+
+  Trading +11 residency for a 12x regression is the 0.2.0 mistake in miniature.
 
   ## `allany` — all and any (+10)
 
@@ -208,7 +238,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 180 listed ones step aside so the remaining 653
+  `NXV_HOST_FALLBACK=raise` the 169 listed ones step aside so the remaining 664
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -291,7 +321,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.pow/2", [241, 242, 244]},
     {"Nx.product/2", [505]},
     {"Nx.quotient/2", [260, 261]},
-    {"Nx.reduce/4", [607, 608, 610, 611, 612, 613, 614, 615, 616, 617]},
     {"Nx.reflect/2", [814]},
     {"Nx.remainder/2", [249]},
     {"Nx.select/3", [336, 337, 338, 339, 344, 345, 346]},
@@ -374,7 +403,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/2", [627, 628, 634]},
     {"Nx.dot/4", [640]},
     {"Nx.indexed_add/4", [349, 350]},
-    {"Nx.reduce/4", [609]},
     {"Nx.remainder/2", [247]},
     {"Nx.round/1", [440]},
     {"Nx.select/3", [343]}

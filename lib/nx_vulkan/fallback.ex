@@ -260,6 +260,19 @@ defmodule Nx.Vulkan.Fallback do
        "avoids float atomics, and that only holds for non-overlapping windows; " <>
        "the overlapping case needs GL_EXT_shader_atomic_float, which the Kepler " <>
        "fleet does not guarantee. Non-overlapping runs on the GPU."},
+    {{:reduce, 5}, :always,
+     "arbitrary user fun, folded sequentially. A shader cannot express it, and " <>
+       "the obvious workaround is SLOWER than the host path, which is why this " <>
+       "is a decision rather than a gap. Vectorising the fold — one dispatch " <>
+       "per step along the reduced axis, evaluating the fun on resident " <>
+       "tensors — was prototyped and measured on super-io: 0.97ms vs 0.19ms at " <>
+       "reduce_size 8, 39.8 vs 22.0 at 512, and 441ms vs 37ms at 4096. The gap " <>
+       "widens with the axis because the cost is per-dispatch launch overhead, " <>
+       "and no implementation removes it without assuming the fun is " <>
+       "ASSOCIATIVE (a log2-step tree reduce), which Nx.reduce does not " <>
+       "guarantee — it is a left fold. Probing the fun to recognise `add` is " <>
+       "the other tempting shortcut and is unsound for the same reason: a fun " <>
+       "that agrees on probe values can differ elsewhere."},
     {{:sort, 3}, :always, "no sort shader and no plan for one; the host path is correct"},
     {{:argsort, 3}, :always, "no sort shader and no plan for one; the host path is correct"},
     {{:triangular_solve, 4}, :always,
