@@ -605,6 +605,82 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "argmax / argmin" do
+    defp r3(t, type),
+      do: Nx.reshape(t.([4, 2, 3, 1, -5, 3, 6, 2, 3, 4, 8, 3], type), {2, 2, 3})
+
+    test "flat (no :axis) returns a FLAT index" do
+      for type <- [{:s, 32}, {:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t -> Nx.argmax(r3(t, type)) end)
+        assert_parity_and_residency(fn t -> Nx.argmin(r3(t, type)) end)
+      end
+    end
+
+    test "along an axis, with and without :keep_axis" do
+      for axis <- [0, 2], keep <- [false, true] do
+        assert_parity_and_residency(fn t ->
+          Nx.argmax(r3(t, {:s, 32}), axis: axis, keep_axis: keep)
+        end)
+
+        assert_parity_and_residency(fn t ->
+          Nx.argmin(r3(t, {:f, 32}), axis: axis, keep_axis: keep)
+        end)
+      end
+    end
+
+    test ":tie_break — :low keeps the FIRST extreme, :high the LAST" do
+      # Invisible on any input without duplicates, which most test data is.
+      assert Nx.to_number(Nx.argmax(gpu([1, 3, 3, 2], {:s, 32}))) == 1
+      assert Nx.to_number(Nx.argmax(gpu([1, 3, 3, 2], {:s, 32}), tie_break: :high)) == 2
+      assert Nx.to_number(Nx.argmin(gpu([2, 1, 1, 3], {:s, 32}))) == 1
+      assert Nx.to_number(Nx.argmin(gpu([2, 1, 1, 3], {:s, 32}), tie_break: :high)) == 2
+
+      for tb <- [:low, :high] do
+        assert_parity_and_residency(fn t ->
+          Nx.argmax(t.([1, 3, 3, 2], {:s, 32}), tie_break: tb)
+        end)
+
+        assert_parity_and_residency(fn t ->
+          Nx.argmin(t.([2, 1, 1, 3], {:s, 32}), tie_break: tb)
+        end)
+
+        assert_parity_and_residency(fn t -> Nx.argmax(t.([5, 5, 5], {:s, 32}), tie_break: tb) end)
+      end
+    end
+
+    test "NaN is absorbing, and it is LAST-NaN-wins" do
+      # BinaryBackend's rule is one line — `x == :nan or comparator.(...)` — and
+      # IEEE comparison gets both halves wrong on its own, because `v < best`
+      # and `v > best` are FALSE for any NaN operand. Without the special case
+      # the shader reports index 0 for all of these.
+      for f <- [&Nx.argmax/2, &Nx.argmin/2] do
+        # A NaN CANDIDATE always replaces the incumbent...
+        assert_parity_and_residency(fn t -> f.(t.([2.0, :nan, 4.0], {:f, 32}), []) end)
+        # ...including another NaN, so this is 2 even at the default :low.
+        assert_parity_and_residency(fn t -> f.(t.([:nan, 5.0, :nan], {:f, 32}), []) end)
+        # ...and a NaN INCUMBENT is unbeatable by any number.
+        assert_parity_and_residency(fn t -> f.(t.([:nan, 5.0, 1.0], {:f, 32}), []) end)
+      end
+
+      assert Nx.to_number(Nx.argmax(gpu([:nan, 5.0, :nan], {:f, 32}))) == 2
+      assert Nx.to_number(Nx.argmin(gpu([:nan, 5.0, 1.0], {:f, 32}))) == 0
+    end
+
+    test "infinities need no special case — IEEE ordering is already right" do
+      assert_parity_and_residency(fn t -> Nx.argmax(t.([1.0, :infinity, 2.0], {:f, 32})) end)
+      assert_parity_and_residency(fn t -> Nx.argmin(t.([1.0, :neg_infinity, 2.0], {:f, 32})) end)
+      assert_parity_and_residency(fn t -> Nx.argmax(t.([1.0, :nan, :infinity], {:f, 32})) end)
+    end
+
+    test "a non-default :type still works" do
+      assert_parity_and_residency(fn t -> Nx.argmax(t.([1, 9, 3], {:s, 32}), type: {:u, 32}) end)
+    end
+
+    test "an s64 input falls back — no shader, and no Int64 capability" do
+      assert_parity(fn t -> Nx.argmax(t.([1, 9, 3], {:s, 64})) end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

@@ -2255,19 +2255,72 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # argmax / argmin: indices of extrema along an axis. Used by
   # credible-interval extraction and PyMC-style posterior summaries.
-  # Tier 1 host fallback — no GPU shader yet.
-  @impl true
-  def argmax(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.argmax(t_bin, opts)
-    host_result(out, result)
-  end
+  @argreduce_f32_spv Path.expand("../../priv/shaders/argreduce_f32.spv", __DIR__)
+  @argreduce_f64_spv Path.expand("../../priv/shaders/argreduce_f64.spv", __DIR__)
+  @argreduce_s32_spv Path.expand("../../priv/shaders/argreduce_s32.spv", __DIR__)
+
+  # Keyed on the INPUT type only. Unlike reduce_spv/2 there is no (in, out) pair
+  # to track, because the output is an index rather than a value — always a
+  # 4-byte integer, whatever the input dtype.
+  defp argreduce_spv({:f, 32}), do: @argreduce_f32_spv
+  defp argreduce_spv({:f, 64}), do: @argreduce_f64_spv
+  defp argreduce_spv({:s, 32}), do: @argreduce_s32_spv
+  defp argreduce_spv(_), do: nil
 
   @impl true
-  def argmin(out, tensor, opts) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    result = Nx.argmin(t_bin, opts)
-    host_result(out, result)
+  def argmax(out, tensor, opts), do: do_argreduce(out, tensor, opts, 0, :argmax, &Nx.argmax/2)
+
+  @impl true
+  def argmin(out, tensor, opts), do: do_argreduce(out, tensor, opts, 2, :argmin, &Nx.argmin/2)
+
+  # `glsl/argreduce_*.comp`. These reuse `reduce_axis/7` verbatim — same
+  # bindings, same (outer, reduce_size, inner, op) push layout — so no new NIF
+  # was needed even though the output dtype differs from the input's.
+  #
+  # Nx hands this callback `[tie_break:, axis:, keep_axis:]` with `out.shape`
+  # already contracted, so `keep_axis` needs no handling here: it changes the
+  # shape Nx computed and not the number of output slots, which stays
+  # outer * inner either way.
+  #
+  # `axis: nil` means reduce EVERYTHING to a flat index. That is the same
+  # (1, n, 1) slab `classify_reduce_axes/2` already returns for an all-axes
+  # reduction, and the shader's loop variable is then the flat index — so the
+  # two cases share one path rather than needing a separate flatten.
+  defp do_argreduce(
+         %T{shape: out_shape, type: out_type} = out,
+         tensor,
+         opts,
+         base_code,
+         op,
+         host_fun
+       ) do
+    t = ensure_on_backend(tensor)
+    spv = argreduce_spv(t.type)
+    axes = if opts[:axis] == nil, do: all_axes(t.shape), else: [opts[:axis]]
+    tie_high = opts[:tie_break] == :high
+
+    fast_path? =
+      spv != nil and match?(%__MODULE__{}, t.data) and
+        element_bytes(out_type) == 4 and integer_type?(out_type) and
+        match?({:ok, _}, classify_reduce_axes(t.shape, axes))
+
+    if fast_path? do
+      %T{data: %__MODULE__{ref: a_ref}} = t
+      {:ok, {outer, reduce_size, inner}} = classify_reduce_axes(t.shape, axes)
+      n_out = max(byte_size_of(out_shape), 1)
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(n_out * element_bytes(out_type))
+      op_code = base_code + if tie_high, do: 1, else: 0
+
+      :ok =
+        Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)
+
+      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: out_type})
+    else
+      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+      # Explicit attribution — this helper is shared by argmax and argmin, so the
+      # __CALLER__.function capture would name `do_argreduce/6` instead.
+      host_result(out, host_fun.(t_bin, opts), {op, 3})
+    end
   end
 
   # clip: elementwise clip to [min, max]. min and max arrive as

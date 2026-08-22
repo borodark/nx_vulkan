@@ -158,31 +158,34 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [1, 2, 3]
     end
 
-    test "argmax result is on BinaryBackend" do
+    # argmax/argmin got glsl/argreduce_*.comp and now stay on the GPU. These
+    # four used to pin them to BinaryBackend; the pins failing is the intended
+    # signal that the ops were promoted.
+    test "argmax result is on VulkanoBackend" do
       a = v(f32([1.0, 5.0, 2.0, 4.0]))
       r = Nx.argmax(a)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_number(r) == 1
     end
 
     test "argmax along axis (2D source)" do
       a = v(f32([[1.0, 5.0, 2.0], [4.0, 0.0, 3.0]]))
       r = Nx.argmax(a, axis: 1)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [1, 0]
     end
 
-    test "argmin result is on BinaryBackend" do
+    test "argmin result is on VulkanoBackend" do
       a = v(f32([1.0, 5.0, 2.0, 4.0]))
       r = Nx.argmin(a)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_number(r) == 0
     end
 
     test "argmin along axis (2D source)" do
       a = v(f32([[1.0, 5.0, 2.0], [4.0, 0.0, 3.0]]))
       r = Nx.argmin(a, axis: 1)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
       assert Nx.to_flat_list(r) == [0, 1]
     end
 

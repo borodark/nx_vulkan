@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **629 of 833 doctests (75.5%) run with host fallbacks refused** after the
-  scatter shader. Note the
+  **643 of 833 doctests (77.2%) run with host fallbacks refused** after the
+  arg-reduction shaders. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
   in `nx_doctest_test.exs` as their operands went resident and their f32
   arithmetic stopped matching BinaryBackend's inspect string, so those ten
@@ -25,6 +25,29 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `argreduce` — argmax and argmin (+14)
+
+  629/833 -> 643/833. `glsl/argreduce_{f32,f64,s32}.comp` reuse `reduce_axis/7`
+  verbatim — same bindings, same (outer, reduce_size, inner, op) push layout —
+  so three shaders landed with no new NIF. The output is an INDEX rather than a
+  value, so unlike `reduce_spv/2` the selector is keyed on the input type alone.
+
+  Two semantics traps, and neither is visible on ordinary data:
+
+    * **`:tie_break`.** `:low` (the default) keeps the FIRST index holding the
+      extreme; `:high` the last. A strict comparison gives `:low` for free, and
+      `:high` needs the tie to count as a win. Any input without duplicates
+      passes either way.
+    * **NaN is absorbing, and last-NaN-wins.** BinaryBackend's rule is one line
+      (`x == :nan or comparator.(x, cur)`), and IEEE comparison gets BOTH halves
+      wrong on its own because `v < best` and `v > best` are false for a NaN
+      operand. A NaN candidate always replaces the incumbent — including another
+      NaN, so `argmax([nan, 5, nan])` is 2 even at `:low` — and a NaN incumbent
+      is unbeatable by any number. Two of Nx's own doctests pin this and nothing
+      else in the suite would have.
+
+  Infinities need no special case: IEEE ordering already matches.
 
   ## `scatter` — indexed_put and indexed_add (+23)
 
@@ -167,7 +190,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 204 listed ones step aside so the remaining 629
+  `NXV_HOST_FALLBACK=raise` the 190 listed ones step aside so the remaining 643
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -197,7 +220,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 130 doctests, down from 357 before W5.
+  # 116 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -225,8 +248,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.all/2", [441, 442, 443, 444, 445, 446]},
     {"Nx.all_close/3", [460]},
     {"Nx.any/2", [447, 448, 449, 450, 451]},
-    {"Nx.argmax/2", [527, 528, 529, 530, 531, 532, 533, 534, 535, 536, 537]},
-    {"Nx.argmin/2", [538, 539, 540, 541, 542, 543, 544, 545, 546, 547, 548]},
+    {"Nx.argmax/2", [532, 534, 535, 536]},
+    {"Nx.argmin/2", [543, 545, 546, 547]},
     {"Nx.as_type/2", [87, 90, 91]},
     {"Nx.bitcast/2", [95]},
     {"Nx.bitwise_not/1", [418, 419]},

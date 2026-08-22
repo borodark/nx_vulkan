@@ -1,0 +1,89 @@
+#version 450
+
+// arg-reduction: the INDEX of the extreme value along an axis, f32 input.
+// Collapses the middle `reduce_size` axis of an (outer, reduce_size, inner)
+// view, one invocation per output slot — the same virtual shape, the same push
+// layout and the same bindings as reduce_axis_f32.comp, which is why this
+// needs no new dispatch NIF. It reuses `reduce_axis/7` verbatim.
+//
+// The output is an INDEX, not a value: always a 4-byte integer regardless of
+// the input dtype, written as `uint`. Nx types argmax/argmin as {:s, 32} by
+// default and the bit pattern of a non-negative s32 and a u32 are the same, so
+// one output declaration covers both.
+//
+// `r` is the coordinate along the reduced axis, which is exactly what Nx wants
+// for `axis:`-style calls. For a no-axis call the whole tensor is one
+// (1, n, 1) slab, so `r` is the FLAT index into the tensor — also what Nx
+// wants. The same loop variable serves both, with nothing to special-case.
+//
+// push `op` packs both choices Nx offers:
+//   bit 1 = min rather than max, bit 0 = :tie_break high rather than low
+//   0 = max/low   1 = max/high   2 = min/low   3 = min/high
+//
+//
+// NaN IS ABSORBING, AND IT IS LAST-NaN-WINS. Nx.BinaryBackend's rule is one
+// line — `if cur_extreme_x == :first or x == :nan or comparator.(x, cur)` —
+// and it has two consequences that IEEE comparison gets wrong on its own:
+//
+//   * a NaN CANDIDATE always replaces the incumbent, including another NaN.
+//     So argmax([nan, 5, nan]) is 2 even at :tie_break :low — NaN vs NaN is
+//     not a tie, the later one wins.
+//   * a NaN INCUMBENT is unbeatable by any number. argmin([nan, 5, 1]) is 0.
+//
+// Plain `v < best` / `v > best` are both FALSE for NaN operands, so without
+// this the shader silently reports the first element instead. Two of Nx's own
+// doctests pin it, and nothing else in the suite would have.
+//
+// TIE-BREAKING IS THE WHOLE DIFFICULTY, and it is not a detail: Nx defaults to
+// :low, meaning the FIRST index holding the extreme value. A strict comparison
+// (`v > best`) keeps the first by construction; :high needs the tie to count as
+// a win so the last one overwrites. Getting this backwards is invisible on any
+// input without duplicates, which most test data is.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint slots = p.outer * p.inner;
+    if (gid >= slots) return;
+
+    uint outr = gid / p.inner;
+    uint inr = gid % p.inner;
+    uint base = outr * p.reduce_size * p.inner + inr;
+
+    bool is_min = (p.op >= 2u);
+    bool tie_high = ((p.op & 1u) == 1u);
+
+    float best = a[base];
+    uint bi = 0u;
+
+    for (uint r = 1u; r < p.reduce_size; ++r) {
+        float v = a[base + r * p.inner];
+        // See the NaN note above: candidate NaN always wins, incumbent NaN
+        // never loses to a number.
+        if (isnan(v)) {
+            best = v;
+            bi = r;
+            continue;
+        }
+        if (isnan(best)) continue;
+
+        bool better = is_min ? (v < best) : (v > best);
+        if (better || (tie_high && v == best)) {
+            best = v;
+            bi = r;
+        }
+    }
+
+    o[gid] = bi;
+}
