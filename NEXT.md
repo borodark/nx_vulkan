@@ -1,17 +1,16 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-17, against `main` @ `c9b1a31`, with **W4 and the
-`concat_nd` shader both landed** on top of W2/W1/W3. The ranking is unchanged;
-the super-io re-verification is closed, the leapfrog ownership question is
-settled *and fixed downstream*, and the work item W4's census surfaced — an
-axis > 0 `concatenate` shader — is **written and green**. Next is W5, and it is
-now scoped and priced: **§1.2**.
+**Refreshed:** 2026-08-22, against `main` @ `9fc58f5`, with **W5 done and
+pushed** — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
+W1–W5 are all closed. §1.2 is the write-up; §1.3 is what to do next and is
+measured against the current tree rather than inherited from `MISSION.md` §7,
+whose ranking W5's own census showed to be built on numbers that do not mean
+what they look like.
 
-**The reboot happened, and both worries came to nothing.** The driver came back
-matched at **580.178.04** on both sides, `device_name()` is the 3060 Ti, and all
-three figures reproduce exactly (§5). The five commits are **pushed** —
-`origin/main` is at `9167899`, level with `HEAD` (§0).
+**Everything is pushed and the tree is clean.** `origin/main` is at `9fc58f5`.
+The 2026-08-17 reboot came and went without incident: the driver is matched at
+**580.178.04** on both sides and `device_name()` is the 3060 Ti (§5).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
 one is only *what to do next and in what order*, plus the state as it actually
 stands rather than as the mission planned it.
@@ -35,24 +34,13 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `9167899` | W2 + W1 + W3 + W4 + `concat_nd` |
-| `origin/main` | `9167899` | **level — the W4/concat work is pushed** |
-| `upstream/main` | `6ab64ac` | **48 behind** |
-
-The five commits that were the only copy of W4 and the concat shader are on the
-private server as of 2026-08-17. Nothing here is unbacked any more:
-
-```
-9167899  docs(NEXT): refresh against c9b1a31, before the super-io reboot
-c9b1a31  concat_nd: an axis > 0 concatenate shader, and it moves five ops at once
-70117d5  docs(NEXT): the §0/§1 ledger, refreshed against the merge
-73c57f0  docs(NEXT): the leapfrog defect is fixed upstream, and why it nearly wasn't
-cae4dad  W4: fold the 30 doctests it moved, and mark it done
-cc77b2a  W4: route eight Nx.Block.* on-device, allowlist the four FFT ones
-```
+| `HEAD` / local `main` | `9fc58f5` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany` |
+| `origin/main` | `9fc58f5` | **level — nothing unbacked** |
+| `upstream/main` | `6ab64ac` | **59 behind** |
 
 Push with `git push origin main` — **not** `upstream`, which is the public
-release remote and is deliberately 48 behind.
+release remote and is deliberately behind. Publishing there is a release
+decision and belongs to the operator (§2).
 
 `../_exmc-things/exmc/mix.lock` still pins **`a25432f`**, i.e. the commit before
 any of this. That is the right default — see §4 — but it now means the consumer
@@ -86,20 +74,25 @@ gitignored and safe to delete. And `~/.exmc/gpu_node/spv/` caches synthesised
 shaders **keyed by a hash of the generated GLSL**, so it invalidates itself
 correctly — but delete it if you suspect otherwise.
 
-**The shader invariant: 57 `.comp` ↔ 57 `.spv`, every blob regenerable.**
+**The shader invariant: 73 `.comp` ↔ 73 `.spv`, every blob regenerable.**
 Established in `ac509d2`, checked by the skill on every run, and holding as of
-`a25432f`. Until then,
+`9fc58f5` — W5 added 16 shaders and the count moved 57 → 73 with it. Until then,
 seven `.spv` had no source in the tree and the only copies lived in
 `~/spirit/shaders/` on the two Keplers, outside any repository. If the skill
 ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. W2, W1, W3, W4 and `concat_nd` are done. Next is W5
+## 1. W1–W5 are done. Next is picked from §1.3, not from `MISSION.md` §7
 
-`MISSION.md` §7 ranks W1–W13 and nothing since has changed the ranking. Its
-sequencing note put W2 first, because W2 is what tells you whether W1 and W5
-worked. **That gate is open, and it has now been used four times.**
+`MISSION.md` §7 ranks W1–W13 and its sequencing note put W2 first, because W2 is
+what tells you whether everything after it worked. **That gate is open and has
+now been used nine times.**
+
+The ranking itself no longer survives contact: W5's own census showed that §7's
+scores came from first-fallback counts, and those name the OP rather than the
+GAP (§1.2). Pick the next item from **§1.3**, which is measured against the
+current tree, not from §7's table.
 
 | item | state |
 |---|---|
@@ -108,32 +101,39 @@ worked. **That gate is open, and it has now been used four times.**
 | **W3** — `Nx.LinAlg.solve/2` | **done** `f614dd0`…`62b622e` |
 | **W4** — decide the twelve `Nx.Block.*` | **done** `cc77b2a` `cae4dad` |
 | **`concat_nd`** — axis > 0 concatenate | **done** `c9b1a31` — not a W item; W4's census found it |
-| **W5** — integer kernels | the 357-doctest bucket; the big one, and now the clear next. **Scoped in §1.2** — worth 47.2% → 76.0% |
+| **W5** — integer kernels | **done** `828ae14`…`9fc58f5`, nine commits — see §1.2. 47.2% → 80.4% |
+| **`scatter`, `argreduce`, `allany`** | **done** — not W items; W5's census found all three |
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 398 / 843 (47.2%) run with host fallbacks refused
+#=> doctest Nx residency: 670 / 833 (80.4%) run with host fallbacks refused
+#   (659 / 833, 79.1%, device-resident — see §1.2 on the 11-doctest gap)
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 445 doctests that still leave the GPU,
-131 lines in four reason-bucketed lists; `test_helper.exs` applies it only when
-fallbacks are being refused, so a normal `mix test` still runs and asserts all
-843. The strict suite went from 910 excluded to 591 at W2, then 557 as W1 and
-W3 moved doctests onto the device, 527 at W4 and 518 after `concat_nd`. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
+`test/nx_doctest_register.exs` names the 163 doctests that still leave the GPU,
+in four reason-bucketed lists; `test_helper.exs` applies it only when fallbacks
+are being refused, so a normal `mix test` still runs and asserts all 833. The
+strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
+518 (`concat_nd`) and **237** across W5. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
-**The register is portable.** It was measured on super-io (Ampere/Linux) and
-reproduces byte-identically on mac-247 (Kepler/FreeBSD) — same 524 at W2, same
-496 at W1, same 488 at W3. The gates really are dtype/shape logic. The one exception found so
-far is **llvmpipe**, where `Nx.sum` on `{:u, 8}` returns 0 and three doctests
-plus three `select` tests fail on value; if a run reports one extra fallback,
-check `device_name()` before touching the register.
+**The register was portable, and that has not been re-checked since W4.** It was
+measured on super-io (Ampere/Linux) and reproduced byte-identically on mac-247
+(Kepler/FreeBSD) — same 524 at W2, same 496 at W1, same 488 at W3. The gates
+really are dtype/shape logic. **But `concat_nd` and all sixteen of W5's shaders
+have only ever run on Ampere**, which is the largest untested delta the register
+has carried; see §2. The one exception found so far is **llvmpipe**, where
+`Nx.sum` on `{:u, 8}` returns 0 and three doctests plus three `select` tests fail
+on value; if a run reports one extra fallback, check `device_name()` before
+touching the register.
 
-**W1, W3 and W4 were all measured with it, and it worked every time.** The
-rate moved 319 → 347 → 355 → 385 → 398, and every time the ratchet failed the
-build on stale entries and named every one. That is the loop this project was missing.
+**Every item since W2 has been measured with it, and it has worked every time.**
+The rate moved 319 → 347 → 355 → 385 → 398 → 670, and every time the ratchet
+failed the build on stale entries and named every one — including twice when the
+ordinals renumbered wholesale and the repair was a paste rather than an
+investigation. That is the loop this project was missing.
 
 **W1 and W3 were briefly verified on mac-247 only — that gap is now closed.**
 super-io's nvidia kernel module had gone version-mismatched against its userspace
@@ -154,14 +154,15 @@ on Ampere/Linux as well as Kepler/FreeBSD.
 
 **Use it as the acceptance test for everything that follows.** Run the script
 before and after; if the rate did not move, the op did not reach the device.
-The buckets are scored as work items:
+The buckets as they now stand — but read §1.3, not this table, for what to do
+next: **the bucket names have stopped meaning what they say.**
 
-| bucket | doctests | item |
+| bucket | doctests | note |
 |---|---:|---|
-| `@integer_dtype` | 357 | **W5** — but it does *not* empty this bucket wholesale; §1.2 has the census that says so, and the simulation that prices it at 47.2% → 76.0%. W1 took 28, W3 took 8 |
-| `@float_residency_gap` | 32 | **W8** and the rest of the narrow-gate work — float ops that still left a float backend. Rank-0 `dot`/`product`/`reduce`/`divide`, `dot` at `{1,1,2,2}`, rank-3 windows, and `Nx.log2`/`log10`/`log/2` refusing at f32 while `Nx.log/1` runs natively |
-| `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` |
-| `@complex_and_fft` | 20 | not work under current dtype support. W4 allowlisted the four FFT blocks, which took 25 doctests out of this bucket without moving them onto the device |
+| `@integer_dtype` | 92 | **badly named now.** Most of what is left is shape- or capability-gated and is s32 only because Nx's doctests are. W5 took 265 out of it |
+| `@float_residency_gap` | 16 | narrow-gate work on float ops. W5 closed most of this bucket as a side effect, because the gates it widened were never dtype-specific |
+| `@f64_transcendental` | 37 | not work — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`. Same constraint that allowlists `pow/3` at float types |
+| `@complex_and_fft` | 18 | not work under current dtype support. W4 allowlisted the four FFT blocks, which took 25 doctests out of this bucket without moving them onto the device |
 
 ### 1.1 `concat_nd` — the census cashed in
 
@@ -172,7 +173,8 @@ of them and **all five ops that shared it went resident at once** — all four
 
 **Unlike W4's own 30, this 13 needs no asterisk.** Every one is genuinely
 device-resident, not merely permitted to leave. Refused-clean and
-device-resident readings are now 398/843 (47.2%) and 373/843 (44.2%).
+device-resident readings stood at 398/843 (47.2%) and 373/843 (44.2%) when this
+landed; W5 has moved both since — see §1.2.
 
 Axis 0 was never the problem — a row-major axis-0 concat is a byte append and
 `concat_buffers/1` already did it. Axis > 0 is the kernel. It belongs to the
@@ -208,155 +210,150 @@ in `test/nx_vulkan/concat_test.exs` pins that fallback so nobody "fixes" it agai
 alone rather than made consistent — it is the `stack/3` NUTS trace-building
 shape and deserves its own measurement before being touched.
 
-### 1.2 W5, scoped — the census, and what it is actually worth
+### 1.2 W5 is done — 47.2% to 80.4%, and what the census got wrong
 
-Measured on super-io at `1c57eb7`, 2026-08-17, by the same method W4 used: run
-the 843 `doctest Nx` under `NXV_HOST_FALLBACK=raise` with the register off, and
-read the op and dtype out of every `Nx.Vulkan.HostFallbackError`. All 445
-failures parse; the 357 in `@integer_dtype` partition exactly.
+**Landed 2026-08-17 → 2026-08-22, on `main` @ `9fc58f5`, pushed.** W5 as scoped
+was three tiers; it ran to seven commits because the census kept being right
+about the direction and wrong about the size.
 
-**The headline first, because it is the argument for doing W5 at all.** The
-allowlist can be used as a simulator: excuse a family of callbacks and re-run,
-and the residency you get back is the residency that family's shaders would
-buy. Excusing every op W5 would write:
-
-| tier | what is excused | residency |
+| commit | what | refused-clean |
 |---|---|---:|
-| — | today | 398 / 843 (47.2%) |
-| **T1** | integer elementwise binary + unary + compare + select | **535 / 843 (63.5%)** |
-| **T2** | T1 + integer axis-reduce and window-reduce | **624 / 843 (74.0%)** |
-| **T3** | T2 + integer `dot` | **641 / 843 (76.0%)** |
+| — | before | 398 / 843 (47.2%) |
+| `828ae14` | **T1** integer elementwise, compare, select | 532 / 843 (63.1%) |
+| `856132a` | `pow` allowlist correction | 529 / 843 (62.8%) |
+| `d964fd0` | **T2** integer axis- and window-reduce | 570 / 835 (68.3%) |
+| `ef084b3` | unary coercion + window padding gate | 606 / 833 (72.7%) |
+| `ef2ca14` | `scatter` — indexed_put / indexed_add | 629 / 833 (75.5%) |
+| `55a4495` | `argreduce` — argmax / argmin | 643 / 833 (77.2%) |
+| `0fcd907` | `allany` — all / any | 653 / 833 (78.4%) |
+| `66fdc96` | `reduce/5` allowlisted | 664 / 833 (79.7%) |
+| `9fc58f5` | **T3** s32 matmul + rank-1 promotion | **670 / 833 (80.4%)** |
 
-**+243 doctests, 47.2% → 76.0%.** Nothing else on the board is within an order
-of magnitude of that. The figure errs in both directions and roughly cancels:
-it over-counts by ~14, because excusing `window_sum/4` excuses its f32
-instances too and those belong to `@float_residency_gap`; and it under-counts,
-because an *allowlisted* op still computes on the host and returns a host
-tensor, so every residency-gated op downstream of one still reports. That
-second effect is visible and large — see the residual below.
+**Quote both numbers.** Refused-clean is **670/833 (80.4%)**; device-resident is
+**659/833 (79.1%)**. The 11-doctest gap is `reduce/5`, allowlisted rather than
+implemented — an allowlisted fallback is *permitted*, so it leaves the register
+without running on the device. Same asterisk W4's 25 FFT doctests carried.
 
-#### The 357 is three different gaps, not one
+The denominator moved too: 843 → 833. `weighted_mean/3` (8) and `Nx.log/2` (2)
+joined `@rounding` in `nx_doctest_test.exs` as their operands went resident and
+their f32 arithmetic stopped matching BinaryBackend's *inspect string*. That
+renumbered every register ordinal twice — the fragility the register's moduledoc
+warns about, happening for real, and the ratchet printed the repair both times.
 
-`MISSION.md` §7 scopes W5 as "integer elementwise / compare / select / reduce
-kernels" and the register scores it at 357. **Those are not the same number.**
-Classified by what is actually in the way:
+16 new shaders: **57 ↔ 57 → 73 ↔ 73.**
 
-| class | doctests | what it is |
+#### The census was directionally right and numerically wrong, three times
+
+§1.2's original split — 195 dtype-gated / 138 no-path-at-any-dtype / 24
+shape-gated — held up. What did not hold is **scoring work off first-fallback
+counts**, because under `:raise` a doctest reports only where it stops first:
+
+* **`window_sum` / `window_product`** were filed as dtype-gated. They had no GPU
+  path at **any** dtype — the f32 cases fell back identically — so T2 had to add
+  op codes and routing, not an integer variant.
+* **`dot/7` showed 17** and T3 was scored at that. Only **four** were
+  rank-2 × rank-2. The rest were rank-1, batched, multi-axis or higher-rank
+  contractions that no dtype port touches. T3 was worth 4, plus 2 more from a
+  gate widening that needed no shader.
+* **`exp/2` appeared from nowhere at 9** after T2 — not a regression, but
+  `logsumexp` doctests getting further and stopping somewhere new.
+
+**The rule to carry forward: a first-fallback census names the OP, not the GAP.**
+It is still the right tool for finding *what to look at* — it found `concat_nd`,
+it found `indexed_put` — but the count next to a name is an upper bound on the
+work, not an estimate of it.
+
+#### What actually paid, and it was not the shaders
+
+Four of the nine commits closed **narrow gates** rather than writing kernels, and
+between them they were worth **65 doctests** — more than T2 and T3 combined:
+
+| gate | doctests | what was wrong |
 |---|---:|---|
-| **A — dtype-gated** | **195** | a shader exists for f32/f64 and the selector returns `nil` for integers. `binary_spv/1`, `unary_spv/1`, `compare_spv/1`, `select_spv/1`, `reduce_spv/2`, `window_reduce_spv/1` — six functions, each ending in `defp …(_), do: nil`. This is W5 as written |
-| **B — no path at any dtype** | **138** | the callback is in `@host_fallback_unary_ops` / `@host_fallback_binary_ops`, or transfers unconditionally. f32 falls back here too. Writing an integer shader does *not* close these; each also needs an op code and a route |
-| **C — shape/residency-gated** | **24** | dtype is not the gate. `gather/4` off-prefix axes, `concatenate/3` with a host operand, int→int `as_type/2`. They sit in `@integer_dtype` only because Nx's doctests are `{:s, 32}` |
+| window padding / dilation | 23 | the `if` refused them; the shader needed a skip-out-of-bounds and no `inf` literals |
+| unary coercion | 13 | `a_v.type == out.type` refused an integer operand, with `cast_s32_to_f32.spv` already in the tree |
+| scatter operand coercion | — | `upd.type == type` refused what Nx *promotes*; this was what `Nx.LinAlg.invert/1` was actually hitting |
+| rank-1 `dot` promotion | 2 | a length-1 axis is free in row-major; it helps floats too |
 
-Class B splits again, and the split is the plan. **67 of the 138 ride the same
-shaders as class A** — `quotient`, `remainder`, the three bitwise binaries, both
-shifts, the three logicals, `bitwise_not`, `population_count`,
-`count_leading_zeros`, `is_nan`, `is_infinity`, `product` — they need an op code
-in a kernel W5 is writing anyway, plus deletion from the host-fallback list. The
-other **71** are separate work items and W5 should not claim them:
-`indexed_put/5` (20) and `indexed_add/5` (4) have no scatter shader for any
-dtype, `argmax`/`argmin` (22) no shader at all, `reduce/5` (10) takes an
-arbitrary fun, `all`/`any` (10) are u8 boolean reductions, `stack/3` (5)
-transfers unconditionally and could simply route to `concatenate/3`.
+All four are the same species, and it is worth stating flatly:
+**an exact-type-equality guard is almost always wrong where Nx promotes.**
+Skill §1b said this about *gradients*; it is more general than that.
 
-#### It is a 32-bit job
+#### Six semantics traps, all measured against `BinaryBackend`, none recalled
 
-Of the 195 class-A doctests: **168 are `{:s, 32}`**, 23 are `{:u, 8}` *outputs*
-of comparisons whose *inputs* are `s32` — the compare shader already writes
-packed u8, so those need an `int` input variant and nothing more — and **4 are
-`{:s, 8}`**. Across the whole 445 there are five `{:s, 64}` rows, four
-`{:u, 32}`, two `{:s, 16}`.
+The bar on integers is bit-equality — there is no eps to hide in. All six are
+pinned in `test/nx_vulkan/integer_kernels_test.exs`:
 
-So `int`/`uint` in core GLSL 450 covers 191 of the 195. **No `Int64`
-capability, no `GL_EXT_shader_8bit_storage`, no `16bit_storage`** — nothing that
-would need checking against the Kepler fleet. The four s8 rows are a documented
-tail, not a scope item.
-
-**And no Rust.** Every dispatch entry point already takes the SPIR-V path as a
-parameter — `apply_binary(out, a, b, n, op_code, spv_path)`,
-`apply_unary/5`, `apply_compare/7`, `apply_select/8`, `reduce_axis/7`,
-`window_reduce/7`, `matmul32/7`. W5 is `.comp` files, `glslangValidator`, and
-one clause per selector. The `native/` tree does not move.
-
-Seven new shaders, taking the invariant from 57 ↔ 57 to 64 ↔ 64:
-`elementwise_binary_s32`, `elementwise_binary_bcast_s32`,
-`elementwise_unary_s32`, `compare_s32`, `select_s32`, `reduce_axis_s32`,
-`window_reduce_s32` — plus `matmul_s32` for T3.
-
-#### Six semantics traps, each measured against `Nx.BinaryBackend`
-
-The correctness test for W5 is bit-equality against `BinaryBackend` on integers,
-which is *exact* — there is no tolerance to hide in. These are the places where
-the obvious GLSL gives a different answer. All six were run on the host at
-`1c57eb7`:
-
-| what | `BinaryBackend` says | the trap |
+| what | reference says | the trap |
 |---|---|---|
-| `sum` of `{:s, 32}` overflowing | `2e9 + 2e9 → -294967296` | it **wraps**. The f32 reduce shader accumulates in `double` to match; an s32 reduce must **not** widen, or it disagrees exactly where it matters |
-| `sum` of `{:s, 8}` | type `{:s, 32}` | reductions **widen**, like the existing `{:u, 8} → {:u, 32}` entry. `reduce_spv/2` is keyed on the (in, out) pair for precisely this reason — keep it that way |
-| `multiply` on `{:s, 8}` | `100 * 100 → 16` | elementwise ops wrap **at the element width**, not at 32 bits |
-| `remainder` | `-7 rem 3 → -1`, `7 rem -3 → 1` | sign of the **dividend**. GLSL's `%` is *undefined* for negative operands — write `x - (x/y)*y`, do not use `%` |
-| `quotient` | `-7 / 3 → -2` | truncates toward zero. Same GLSL caveat |
-| `count_leading_zeros` | `0 → 32`, `1 → 31`, `-1 → 0` | `findMSB` returns `-1` for zero; the zero case needs its own branch |
+| s32 `sum` / `dot` accumulate | `2e9 + 2e9 → -294967296` | **wraps**. The opposite of `reduce_axis_f32.comp`'s `double` accumulator — same rule, match the reference, opposite conclusion |
+| `{:s, 8}` `multiply` | `100 * 100 → 16` | wraps at the **element** width, not 32 bits |
+| `remainder` / `quotient` | `-7 rem 3 → -1`, `-7 / 3 → -2` | sign of the **dividend**, truncate toward zero; GLSL `%` and `/` are *undefined* for negatives |
+| `count_leading_zeros(0)` | `32` | `findMSB` gives −1 for 0 *and* −1, and reports the top **zero** bit for negatives |
+| `argmax`/`argmin` NaN | `argmax([nan,5,nan]) → 2` at `:tie_break :low` | NaN is **absorbing** and **last-NaN-wins**; `v > best` is *false* for any NaN operand, so IEEE gets both halves wrong |
+| f32 `product` | `1e20 · 1e20 · 1e-20 → 1.00000002e20` | needs a **wide** accumulator — pure f32 overflows to `inf` on the first multiply |
 
-One thing that is *not* a trap: `Nx.divide` on two integers returns `{:f, 32}`,
-so the integer binary shader needs no divide op code at all.
+Two of these were found by the suite going red, not by reading: integer `pow`
+returning `0`, and `argmin([2.0, :nan, 4.0])`. In both cases the fix came from
+reading `Nx.BinaryBackend`'s source for the exact rule rather than guessing at
+a plausible one.
 
-#### Read the demand histogram, not just the first-fallback count
+#### One correction to the record
 
-Under `:raise` each doctest reports once — its *first* fallback. Under
-`:warn` all 843 run to completion and report **759** fallbacks. The two
-orderings disagree sharply, and the second is the one that predicts how much
-GPU work W5 keeps resident:
+`@rounding` in `nx_doctest_test.exs` claimed the GPU's f32 divide was "1 ULP off
+a correctly-rounded one". **It is the other way round.** For 10/6 the GPU returns
+`0x3FD55556` and BinaryBackend `0x3FD55555`; against the true 5/3 those sit
+3.97e-8 and 1.59e-7 away. The GPU's is the correctly-rounded f32. The doctests
+still need excepting — they assert BinaryBackend's string, and that is the
+contract — but that bucket is **not** a list of GPU imprecisions.
 
-| op | first-fallback | all fallbacks |
-|---|---:|---:|
-| `max/3` | 13 | **89** |
-| `add/3` | 15 | **70** |
-| `concatenate/3` | 8 | **57** |
-| `subtract/3` | 23 | 47 |
-| `sum/3` | 24 | 31 |
+#### `reduce/5` is a decision, and the numbers are committed
 
-Integer `max` is the single most-called missing kernel in the whole API, and it
-ranks thirteenth by the first-fallback count. `Nx.clip/3`, `Nx.mode/2` and the
-`cumulative_*` family all lean on it.
+`Nx.reduce/4` takes an arbitrary user fun, so no shader expresses it. The obvious
+workaround — vectorise the fold, one dispatch per step, fun evaluated on resident
+tensors, which is exactly W4's block-routing move — was prototyped and **raced
+against the host path it would replace**:
 
-#### What is left at 76%, and why some of it is an artifact
+| `reduce_size` | on-device fold | host fallback |
+|---:|---:|---:|
+| 8 | 0.97 ms | 0.19 ms |
+| 512 | 39.81 ms | 22.01 ms |
+| 4096 | **440.62 ms** | **37.40 ms** |
 
-The residual after the full simulation is 202 doctests. The honest reading:
+Slower at every size, and the gap widens with the axis because the cost is
+per-dispatch launch overhead. Nothing removes it without assuming the fun is
+**associative** (a log2-step tree reduce), which `Nx.reduce` does not guarantee —
+it is a left fold. Probing the fun to recognise `add` is unsound the way any
+probe is. Trading +11 residency for a 12× regression is the 0.2.0 mistake in
+miniature. `bench/reduce_fold_vs_host.exs` is committed so the next person
+re-measures instead of re-deriving.
 
-```
-34  concatenate/3   s32     ← artifact: see below
-22  indexed_put/5           no scatter shader, any dtype
-16  do_fft/4        c64     decided (complex)
-12  as_type/2               int→int and f16/bf16 casts
-11  gather/4        s32     off-prefix axes
-11  argmax/3        s32     no shader
-11  argmin/3        s32     no shader
-11  reduce/5        s32     arbitrary-fun reduce
-40  f64 transcendentals     decided (GLSL.std.450)
-```
+### 1.3 What is left, and what it is actually made of
 
-**`concatenate/3` going 7 → 34 is the simulation lying, not a real gap.** An
-allowlisted op still computes on the host, so its result comes back on
-`BinaryBackend`, and `concat_nd`'s `all_vulkano?` gate — the one §1.1 explains
-at length and pins a test on — then refuses. With real integer shaders those
-operands stay resident and most of the 34 close for free. The same applies to
-`gather/4` (11) and `stack/3` (5). Do not plan work against those rows.
+163 doctests still refuse, and **the biggest single group is not work**:
 
-**`indexed_put/5` at 22 is the real find.** It is an unconditional host
-fallback for *every* dtype, it is the largest single non-decided residual after
-W5, and `MISSION.md` §3.3 already noted that `Nx.LinAlg.invert/1` dies there.
-It deserves a W-number of its own; a scatter shader is the natural sibling of
-`gather.comp`, which has existed all along.
+| group | doctests | state |
+|---|---:|---|
+| f64 transcendentals | 37 | **decided** — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf` |
+| complex / FFT | 18 | **decided** — the ISA is real-valued |
+| `dot/7` batched + higher-rank | 11 | needs a real **tensordot** generalisation; helps floats equally |
+| `gather/4` off-prefix axes | 12 | needs a transpose-then-gather normalisation, exactly as `dot_orient/6` does for matmul |
+| `as_type/2` | 12 | int→int, f16/bf16 casts; a cast-shader matrix, mechanical |
+| `select/4`, `concatenate/3` | 15 | mixed-backend operands — see the §1.1 note before touching these gates |
+| `stack/3` | 5 | transfers unconditionally; could simply route to `concatenate/3` |
+| `window_reduce/6` | 5 | arbitrary fun — the same argument as `reduce/5`, and probably the same answer |
+| narrow dtypes (s8/s16/s64/u32) | ~20 | needs Int64 or 8/16-bit storage; **check the Kepler fleet before assuming** |
 
-#### Suggested order
+**Ranked by value over effort, the next three are:**
 
-T1 first, and stop to measure. It is 137 doctests on its own, it is the tier
-whose shaders every later tier reuses, and it is where all six semantics traps
-live — get wrapping and sign conventions bit-exact against `BinaryBackend` on
-30 lines of GLSL before there are 200. Then T2, then T3. Run
-`sh scripts/doctest_residency.sh` before and after each; if the rate does not
-move, the op did not reach the device.
+1. **`gather/4` off-prefix axes (12)** — `dot_orient/6` is the pattern and it is
+   proven; normalise with a transpose rather than refusing.
+2. **`stack/3` (5)** — likely a routing change, not a kernel.
+3. **`as_type/2` (12)** — mechanical, but it is a matrix of cast shaders and
+   should be sized before starting.
+
+`window_reduce/6` should be measured the way `reduce/5` was, and allowlisted if
+it loses. Do not write that kernel on principle.
 
 ### W4 is done — and it went by routing, not by allowlisting
 
@@ -456,12 +453,12 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 
 | item | state | who can do it |
 |---|---|---|
-| ~~Push to `origin`~~ | **done** — `origin/main` at `9167899`, level with `HEAD` | |
-| ~~Re-verify on super-io~~ | **done twice** — once at `a930157`, again after the 2026-08-17 reboot at `9167899`: driver matched 580.178.04 both sides, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| **Re-verify on mac-247** | not run since W4; W4 and `concat_nd` are super-io-only measurements | anyone with the Kepler |
+| ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
+| ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
+| **Re-verify on mac-247** | **now the most overdue item.** Not run since W4 — `concat_nd` and the WHOLE of W5 (16 shaders, 9 commits) are super-io-only measurements. The register has been portable at every previous checkpoint, but 16 new kernels is the largest untested delta it has ever carried | anyone with the Kepler |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
-| **`upstream/main` is 47 commits behind** | unpublished | **operator** — publishing decision |
-| **Consumer pin is 10 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
+| **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
+| **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
 
 The retirement command, for when someone has the password:
 
@@ -583,7 +580,8 @@ regression test for the fix.
 
 **The pin is a feature, not friction.** `../_exmc-things/exmc/mix.lock` pins
 `a25432f` as of this refresh — it tracked `7067499` when §0 was first written,
-so it has been bumped once already. Bumping it is a deliberate act that should
+so it has been bumped once already. It is now **19 commits behind**, all of W5
+among them. Bumping it is a deliberate act that should
 come with a run of that
 repo's `bench/nuts_truth.exs` on both arms, because a backend change that
 alters numerics shows up in a posterior long before it shows up in a test that
@@ -602,16 +600,17 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite: 843 doctests, 526 tests, 0 failures.
-# Last measured on super-io at 9167899, after the reboot. mac-247 has NOT been
-# re-run since W4 — see §1 and the reboot note below.
+# suite: 833 doctests, 589 tests, 0 failures.
+# Last measured on super-io at 9fc58f5. mac-247 has NOT been re-run since W4 —
+# the whole of W5 is a super-io-only measurement. See §2.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 843/526/0, 518 excluded
+sh scripts/strict_test.sh            # 833/589/0, 237 excluded
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 398 / 843 (47.2%), exits 0
+sh scripts/doctest_residency.sh      # 670 / 833 (80.4%), exits 0
+                                     # 659 / 833 (79.1%) device-resident
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
@@ -632,9 +631,8 @@ cat /proc/driver/nvidia/version                        # loaded
 ls /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.*     # installed
 ```
 
-The two must match. They both read **580.178.04** at `c9b1a31` and still do
-after the 2026-08-17 reboot at `9167899`, which is the state every figure in
-this file was measured under.
+The two must match. They both read **580.178.04** throughout W5, which is the
+state every figure in this file was measured under.
 
 **Residency is not correctness, and a value assertion cannot see the
 difference** — the host fallback *is* `Nx.BinaryBackend`, the reference every
