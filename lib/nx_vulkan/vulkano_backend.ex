@@ -2803,6 +2803,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  @matmul_s32_spv Path.expand("../../priv/shaders/matmul_s32.spv", __DIR__)
+
+  # No accumulator policy for integers, unlike the f32 pair above. :f32 and
+  # :f64 are both defensible approximations of an exact float sum; on integers
+  # only one answer matches BinaryBackend, which wraps mod 2^32.
+  defp matmul_spv({:s, 32}), do: @matmul_s32_spv
+
   defp matmul_spv(_), do: nil
 
   # Dot product (matmul) — Nx callback signature:
@@ -2874,6 +2881,38 @@ defmodule Nx.Vulkan.VulkanoBackend do
     a = if aa == 0, do: Nx.transpose(a, axes: [1, 0]), else: a
     b = if ba == 1, do: Nx.transpose(b, axes: [1, 0]), else: b
     {a, [1], b, [0]}
+  end
+
+  # Rank-1 operands are promoted to rank 2 with a length-1 axis, which turns
+  # three more contraction shapes into the one the shader already does:
+  #
+  #   vec·vec  {K}   ·{K}    -> {1,K}·{K,1} -> {1,1}, reshaped to {}
+  #   mat·vec  {M,K} ·{K}    -> {M,K}·{K,1} -> {M,1}, reshaped to {M}
+  #   vec·mat  {K}   ·{K,N}  -> {1,K}·{K,N} -> {1,N}, reshaped to {N}
+  #
+  # No new shader and no new dispatch — `out_shape` is whatever Nx computed, and
+  # the result buffer is byte-identical either way because a length-1 axis costs
+  # nothing in a row-major layout. This is a pure gate widening (skill §1b), and
+  # it closes these shapes for FLOATS as well, which is why it is worth more
+  # than the integer matmul it shipped alongside: `Nx.dot/2` on two f32 vectors
+  # was going to the host with a shader sitting right there.
+  #
+  # `Nx.reshape/2` on this backend is metadata only, so the promotion is free.
+  defp dot_orient(%T{shape: as} = a, [0], %T{shape: bs} = b, [0], [], [])
+       when tuple_size(as) == 1 and tuple_size(bs) == 1 do
+    {Nx.reshape(a, {1, elem(as, 0)}), [1], Nx.reshape(b, {elem(bs, 0), 1}), [0]}
+  end
+
+  defp dot_orient(%T{shape: as} = a, [aa], %T{shape: bs} = b, [0], [], [])
+       when tuple_size(as) == 2 and tuple_size(bs) == 1 and aa in [0, 1] do
+    a = if aa == 0, do: Nx.transpose(a, axes: [1, 0]), else: a
+    {a, [1], Nx.reshape(b, {elem(bs, 0), 1}), [0]}
+  end
+
+  defp dot_orient(%T{shape: as} = a, [0], %T{shape: bs} = b, [ba], [], [])
+       when tuple_size(as) == 1 and tuple_size(bs) == 2 and ba in [0, 1] do
+    b = if ba == 1, do: Nx.transpose(b, axes: [1, 0]), else: b
+    {Nx.reshape(a, {1, elem(as, 0)}), [1], b, [0]}
   end
 
   defp dot_orient(a, axes_a, b, axes_b, _batched_a, _batched_b), do: {a, axes_a, b, axes_b}

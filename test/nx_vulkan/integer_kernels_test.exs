@@ -735,6 +735,61 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "dot — the s32 matmul and rank-1 promotion" do
+    test "rank-2 x rank-2 on s32" do
+      m22 = fn t, ty -> Nx.reshape(t.([1, 2, 3, 4], ty), {2, 2}) end
+
+      for type <- [{:s, 32}, {:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t -> Nx.dot(m22.(t, type), m22.(t, type)) end)
+      end
+    end
+
+    test "the s32 accumulator WRAPS, like every other integer kernel here" do
+      assert_parity_and_residency(fn t ->
+        Nx.dot(t.([2_000_000_000, 2_000_000_000], {:s, 32}), t.([2, 2], {:s, 32}))
+      end)
+
+      assert Nx.to_number(
+               Nx.dot(gpu([2_000_000_000, 2_000_000_000], {:s, 32}), gpu([2, 2], {:s, 32}))
+             ) == -589_934_592
+    end
+
+    test "rank-1 operands are promoted rather than refused — and it helps FLOATS" do
+      # vec·vec, mat·vec and vec·mat all become the (M,K)·(K,N) the shader
+      # already does, by adding a length-1 axis that costs nothing in a
+      # row-major layout. No new shader, no new dispatch — a pure gate widening.
+      # `Nx.dot/2` on two f32 vectors was going to the host with the matmul
+      # shader sitting right there.
+      m22 = fn t, ty -> Nx.reshape(t.([1, 2, 3, 4], ty), {2, 2}) end
+
+      for type <- [{:s, 32}, {:f, 32}] do
+        assert_parity_and_residency(fn t -> Nx.dot(t.([1, 2, 3], type), t.([4, 5, 6], type)) end)
+        assert_parity_and_residency(fn t -> Nx.dot(m22.(t, type), t.([5, 6], type)) end)
+        assert_parity_and_residency(fn t -> Nx.dot(t.([5, 6], type), m22.(t, type)) end)
+      end
+    end
+
+    test "a non-square matmul, so the tiling is not exercised only at K = 16" do
+      assert_parity_and_residency(fn t ->
+        Nx.dot(
+          Nx.reshape(t.(Enum.to_list(1..20), {:s, 32}), {4, 5}),
+          Nx.reshape(t.(Enum.to_list(1..15), {:s, 32}), {5, 3})
+        )
+      end)
+    end
+
+    test "batched and higher-rank contractions still fall back" do
+      # Not a dtype gap: these need a real tensordot/batched-matmul
+      # generalisation, and the f32 cases are refused identically. 11 doctests.
+      assert_parity(fn t ->
+        Nx.dot(
+          Nx.reshape(t.(Enum.to_list(1..8), {:s, 32}), {2, 2, 2}),
+          Nx.reshape(t.(Enum.to_list(1..8), {:s, 32}), {2, 2, 2})
+        )
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

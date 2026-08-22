@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **664 of 833 doctests (79.7%) run with host fallbacks refused**, of which
-  **653 (78.4%) are genuinely device-resident**. The 11-doctest gap is
+  **670 of 833 doctests (80.4%) run with host fallbacks refused**, of which
+  **659 (79.1%) are genuinely device-resident**. The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -27,6 +27,32 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `dot` — the s32 matmul, and why W5 T3 was worth 4 rather than 17 (+6)
+
+  664/833 -> 670/833. `glsl/matmul_s32.comp` is the integer twin of
+  matmul_f32_f32acc — same 16x16 tiling, same dispatch, reusing `matmul/7`.
+  Note there is no accumulator POLICY for integers: f32 offers :f32 and :f64
+  because both are defensible approximations of an exact sum, whereas on
+  integers only one answer matches the reference. Tiling changes the summation
+  ORDER, which for floats is a precision question and for integers is not one
+  at all — wrapping addition is associative.
+
+  **The census over-counted this one badly, and it is worth understanding why.**
+  `dot/7` showed 17 first-fallbacks, which MISSION §7 scored as W5's T3. Only
+  FOUR of them were rank-2 x rank-2; the rest were rank-1, batched, multi-axis
+  or higher-rank contractions that no dtype port touches. First-fallback
+  attribution names the OP, not the gap — the same trap `window_sum` and
+  `window_product` sprang in T2, where the register's `@integer_dtype` bucket
+  claimed two ops that had no GPU path at any dtype.
+
+  The other 2 of the 6 came from promoting rank-1 operands to rank 2 with a
+  length-1 axis (vec·vec, mat·vec, vec·mat), which needs no shader at all and
+  helps FLOATS as much as integers — `Nx.dot/2` on two f32 vectors was going to
+  the host with the matmul shader sitting right there.
+
+  11 `dot` doctests remain and are not dtype-gated: batched and higher-rank
+  contractions need a real tensordot generalisation.
 
   ## `reduce/5` is allowlisted, and that +11 is PERMISSION not residency
 
@@ -238,7 +264,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 169 listed ones step aside so the remaining 664
+  `NXV_HOST_FALLBACK=raise` the 163 listed ones step aside so the remaining 670
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -268,7 +294,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 106 doctests, down from 357 before W5.
+  # 92 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -301,8 +327,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.bitcast/2", [95]},
     {"Nx.bitwise_not/1", [418, 419]},
     {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},
-    {"Nx.dot/2", [626, 629, 632, 633, 635, 636]},
-    {"Nx.dot/4", [639, 641]},
+    {"Nx.dot/2", [632, 635, 636]},
+    {"Nx.dot/4", [641]},
     {"Nx.dot/6", [642, 643, 644, 645, 646]},
     {"Nx.fill/3", [821]},
     {"Nx.gather/3", [711, 712]},
@@ -400,7 +426,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.bitcast/2", [94]},
     {"Nx.concatenate/2", [719]},
     {"Nx.divide/2", [254]},
-    {"Nx.dot/2", [627, 628, 634]},
+    {"Nx.dot/2", [634]},
     {"Nx.dot/4", [640]},
     {"Nx.indexed_add/4", [349, 350]},
     {"Nx.remainder/2", [247]},

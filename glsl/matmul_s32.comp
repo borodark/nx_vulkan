@@ -1,0 +1,74 @@
+#version 450
+
+// Tiled s32 matmul. The integer twin of matmul_f32_f32acc.comp — same 16x16
+// shared-memory tiling, same dispatch geometry, same push layout — so it needs
+// no new NIF and reuses `matmul/7`.
+//
+// The accumulator is `int` and WRAPS, for the reason every integer kernel in
+// this repo does: Nx.BinaryBackend computes s32 arithmetic modulo 2^32, and a
+// wider accumulator would produce the mathematically nicer answer and the wrong
+// one. There is no accumulator POLICY here, unlike the f32 pair: f32 offers
+// :f32 and :f64 accumulators because both are defensible approximations of an
+// exact sum, whereas on integers only one answer matches the reference.
+//
+// Tiling changes the SUMMATION ORDER (16-wide blocks rather than a flat
+// sequential sum), which for floats is a precision question. For integers it is
+// not even that: wrapping addition is associative, so the tiled order and the
+// sequential one agree exactly.
+//
+// Shared-memory tiling: each 16x16 workgroup computes one 16x16 tile of C,
+// streaming 16x16 tiles of A and B through workgroup-shared memory so every
+// global load is reused 16x. This fixes the bandwidth/occupancy cliff the naive
+// one-thread-per-output kernel hit at large N (n=1024 collapsed to ~1.1x on
+// Ampere). Tiling also sums in 16-wide blocks, so it is *more* accurate than a
+// flat f32 sequential sum, not less. Precision still degrades ~sqrt(K); use the
+// :f64 policy when that matters.
+//
+// C = A*B, A is MxK row-major, B is KxN row-major, all s32. Dispatch matches the
+// matmul NIF: global x over N, global y over M, local 16x16.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer A { int a[]; };
+layout(std430, binding = 1) readonly buffer B { int b[]; };
+layout(std430, binding = 2) writeonly buffer O { int o[]; };
+
+layout(push_constant) uniform Push {
+    uint m;
+    uint n;
+    uint k;
+} p;
+
+const uint T = 16u;
+shared int As[T][T];
+shared int Bs[T][T];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;   // C row (0..m)
+    uint col = gl_GlobalInvocationID.x;   // C col (0..n)
+    uint ly = gl_LocalInvocationID.y;
+    uint lx = gl_LocalInvocationID.x;
+
+    int acc = 0;
+    uint tiles = (p.k + T - 1u) / T;
+
+    for (uint t = 0u; t < tiles; ++t) {
+        uint aCol = t * T + lx;
+        As[ly][lx] = (row < p.m && aCol < p.k) ? a[row * p.k + aCol] : 0;
+
+        uint bRow = t * T + ly;
+        Bs[ly][lx] = (bRow < p.k && col < p.n) ? b[bRow * p.n + col] : 0;
+
+        barrier();
+
+        for (uint i = 0u; i < T; ++i) {
+            acc += As[ly][i] * Bs[i][lx];
+        }
+
+        barrier();
+    }
+
+    if (row < p.m && col < p.n) {
+        o[row * p.n + col] = acc;
+    }
+}
