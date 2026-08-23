@@ -2770,14 +2770,113 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # backend cannot fix it. Pinning the default for the duration of the callback
   # is the fix, and every other fallback that evaluates composed ops already
   # does it.
-  def window_reduce(out, tensor, acc, dimensions, opts, fun) do
-    t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
-    acc_bin = Nx.backend_transfer(ensure_on_backend(acc), Nx.BinaryBackend)
+  def window_reduce(%T{type: type} = out, tensor, acc, dimensions, opts, fun) do
+    t = ensure_on_backend(tensor)
+    a = ensure_on_backend(acc)
+    rank = tuple_size(t.shape)
+    win = if is_tuple(dimensions), do: Tuple.to_list(dimensions), else: dimensions
+    strides = Keyword.get(opts, :strides) || List.duplicate(1, rank)
+    padding = Keyword.get(opts, :padding) || :valid
+    dilations = Keyword.get(opts, :window_dilations) || List.duplicate(1, rank)
+
+    eligible? =
+      match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, a.data) and
+        t.type == type and a.type == type and
+        rank >= 1 and rank <= 4 and length(win) == rank and
+        rem(element_bytes(type), 4) == 0 and
+        pad_lo(padding, rank) != nil
+
+    case eligible? && gpu_window_fold(out, t, a, win, strides, padding, dilations, fun) do
+      %T{} = result -> result
+      _ -> window_reduce_host(out, t, a, dimensions, opts, fun)
+    end
+  end
+
+  # `window_reduce/6` takes an arbitrary user fun, which is where `reduce/5`'s
+  # story starts too — and they end differently. Vectorising the fold was
+  # MEASURED for both (bench/window_reduce_fold_vs_host.exs,
+  # bench/reduce_fold_vs_host.exs): `reduce/5` lost at every size and by 12x at
+  # reduce_size 4096, this wins by 45x to 1800x. The difference is fold LENGTH.
+  # `reduce/5` folds over the reduced axis — thousands of steps — while this
+  # folds over the WINDOW, which is 4 or 9 or 25 steps regardless of how large
+  # the tensor is. Both host arms scale with the DATA, and the data is much
+  # bigger than the window.
+  #
+  # One dispatch per window OFFSET, each a strided slice that covers every
+  # window at once: for offset (i, j), `slice(t, [i*dil, j*dil], ...,
+  # strides: strides)` is the (i, j)-th element of every window simultaneously.
+  # Overlapping windows simply give overlapping slices.
+  #
+  # PADDING NEEDS NO SPECIAL CASE. `Nx.BinaryBackend.window_reduce/6` starts with
+  # `Nx.pad(tensor, acc, ...)` — it pads with the ACCUMULATOR, not with a
+  # per-op identity — so doing the same here reduces every padded window to the
+  # valid case. `Nx.pad/3` is already a GPU op for these dtypes.
+  #
+  # The fun runs on RESIDENT tensors, so it composes this backend's shaders and
+  # each constituent op is individually attributed — the same routing W4 applied
+  # to `Nx.Block.*`. Where a constituent has no GPU path, IT reports, naming the
+  # real gap instead of hiding it behind "window_reduce fell back".
+  defp gpu_window_fold(
+         %T{shape: out_shape, type: type} = out,
+         t,
+         acc,
+         win,
+         strides,
+         padding,
+         dilations,
+         fun
+       ) do
+    out_dims = Tuple.to_list(out_shape)
+
+    padded =
+      case padding do
+        :valid -> t
+        list -> Nx.pad(t, acc, Enum.map(list, fn {lo, hi} -> {lo, hi, 0} end))
+      end
+
+    # Every window offset, in row-major order — the same order BinaryBackend
+    # traverses a window in, which matters for a non-commutative fun.
+    offsets =
+      Enum.reduce(win, [[]], fn w, acc_offsets ->
+        for prefix <- acc_offsets, i <- 0..(w - 1), do: prefix ++ [i]
+      end)
+
+    lengths = Enum.zip_with(out_dims, strides, fn o, s -> (o - 1) * s + 1 end)
+    seed = Nx.broadcast(acc, out_shape)
+
+    Enum.reduce_while(offsets, seed, fn off, a ->
+      starts = Enum.zip_with(off, dilations, &(&1 * &2))
+      plane = Nx.slice(padded, starts, lengths, strides: strides)
+
+      # `fun.(element, accumulator)` — element first, matching BinaryBackend.
+      next = fun.(plane, a)
+
+      # The fun is USER code and this applies it to whole planes rather than to
+      # scalars, which assumes it is shape-polymorphic and elementwise. Almost
+      # every such fun is, but one that reduces (`fn x, y -> Nx.sum(...) end`)
+      # would silently change the shape. Checking is one comparison per step and
+      # turns a wrong answer into a fallback.
+      cond do
+        not match?(%T{}, next) -> {:halt, nil}
+        Nx.shape(next) != out_shape -> {:halt, nil}
+        Nx.type(next) != type -> {:halt, nil}
+        true -> {:cont, next}
+      end
+    end)
+    |> case do
+      %T{data: %__MODULE__{}} = r -> put_in(out.data, r.data)
+      _ -> nil
+    end
+  end
+
+  defp window_reduce_host(out, t, acc, dimensions, opts, fun) do
+    t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+    acc_bin = Nx.backend_transfer(acc, Nx.BinaryBackend)
 
     result =
       with_binary_backend(fn -> Nx.window_reduce(t_bin, acc_bin, dimensions, opts, fun) end)
 
-    host_result(out, result)
+    host_result(out, result, {:window_reduce, 6})
   end
 
   @scatter_max_f64_spv Path.expand("../../priv/shaders/window_scatter_max_f64.spv", __DIR__)

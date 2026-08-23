@@ -1190,6 +1190,93 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "window_reduce — the fold that WON, unlike reduce/5's" do
+    defp m33(t, type), do: Nx.reshape(t.(Enum.to_list(1..9), type), {3, 3})
+
+    test "the fold order matters, and a NON-COMMUTATIVE fun proves it" do
+      # BinaryBackend folds a window in row-major order with `fun.(element, acc)`
+      # — element first. Every test with `add` would pass under any order and
+      # either argument convention; `subtract` passes under exactly one.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.window_reduce(m33(t, {:s, 32}), 0, {2, 2}, [], fn x, y -> Nx.subtract(x, y) end)
+        end)
+
+      assert Nx.to_flat_list(got) == [2, 2, 2, 2]
+    end
+
+    test "sum and product over a window" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(t.([1, 2, 3, 4], {:s, 32}), 0, {2}, [], fn x, y -> Nx.add(x, y) end)
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 1, {2, 2}, [], fn x, y -> Nx.multiply(x, y) end)
+      end)
+    end
+
+    test "PADDING needs no special case — the accumulator is the pad value" do
+      # BinaryBackend starts with `Nx.pad(tensor, acc, ...)`, padding with the
+      # ACCUMULATOR rather than a per-op identity. Doing the same reduces every
+      # padded window to the valid case, and Nx.pad/3 is already a GPU op here.
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 0, {2, 2}, [padding: [{1, 1}, {1, 1}]], fn x, y ->
+          Nx.add(x, y)
+        end)
+      end)
+
+      # A non-zero accumulator with padding, so an implementation that padded
+      # with 0 regardless would fail here.
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 1, {2, 2}, [padding: [{1, 0}, {0, 1}]], fn x, y ->
+          Nx.multiply(x, y)
+        end)
+      end)
+    end
+
+    test "strides and dilations" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 0, {2, 2}, [strides: [2, 2]], fn x, y ->
+          Nx.add(x, y)
+        end)
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 0, {2, 2}, [window_dilations: [2, 2]], fn x, y ->
+          Nx.add(x, y)
+        end)
+      end)
+    end
+
+    test "rank 1 and rank 3, and floats" do
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(m33(t, {:f, 32}), 0.0, {2, 2}, [], fn x, y -> Nx.add(x, y) end)
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.window_reduce(
+          Nx.reshape(t.(Enum.to_list(1..24), {:s, 32}), {2, 3, 4}),
+          0,
+          {1, 2, 2},
+          [],
+          fn x, y -> Nx.add(x, y) end
+        )
+      end)
+    end
+
+    test "a fun that is not elementwise falls back instead of answering wrongly" do
+      # The fold applies the user's fun to whole PLANES, not to scalars, which
+      # assumes it is shape-polymorphic. Almost every such fun is. One that
+      # reduces is not, and the shape check turns that from a wrong answer into
+      # a host fallback.
+      assert_parity(fn t ->
+        Nx.window_reduce(m33(t, {:s, 32}), 0, {2, 2}, [], fn x, y ->
+          Nx.sum(Nx.add(x, y))
+        end)
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **709 of 833 doctests (85.1%) run with host fallbacks refused**, of which
-  **698 (83.8%) are genuinely device-resident**. **`dot/7` and `select/4` are
+  **714 of 833 doctests (85.7%) run with host fallbacks refused**, of which
+  **703 (84.4%) are genuinely device-resident**. **`dot/7` and `select/4` are
   both entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
@@ -28,6 +28,28 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `window_reduce/6` — the fold that WON (+5)
+
+  709/833 -> 714/833, and the opposite answer to `reduce/5` from the same
+  starting position: an arbitrary user fun that no shader can express.
+
+  The difference is fold LENGTH, and it was measured rather than argued.
+  `reduce/5` folds over the reduced axis — thousands of steps — and lost by 12x
+  at reduce_size 4096. `window_reduce` folds over the WINDOW: 4 or 9 or 25 steps
+  whatever the tensor size. Both host arms scale with the DATA, and the data is
+  much bigger than the window, so this wins by 45x to 1800x
+  (`bench/window_reduce_fold_vs_host.exs`, confirmed on the GT 650M).
+
+  Padding needed no special case. BinaryBackend starts with
+  `Nx.pad(tensor, acc, ...)` — it pads with the ACCUMULATOR, not a per-op
+  identity — so doing the same reduces every padded window to the valid case.
+
+  Two things the tests pin that `add` alone would never catch: the fold order is
+  row-major with `fun.(element, acc)` — element FIRST — which only a
+  non-commutative fun such as `subtract` can distinguish; and a fun that is not
+  elementwise (one that reduces) would silently change the shape, so the fold
+  checks and falls back rather than answering wrongly.
 
   ## `as_type` float -> integer (+2), and it is three rules
 
@@ -386,7 +408,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 124 listed ones step aside so the remaining 709
+  `NXV_HOST_FALLBACK=raise` the 119 listed ones step aside so the remaining 714
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -416,7 +438,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 56 doctests, down from 357 before W5.
+  # 51 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -469,8 +491,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.sum/2", [466, 467]},
     {"Nx.take/3", [697]},
     {"Nx.tril/2", [23]},
-    {"Nx.triu/2", [27]},
-    {"Nx.window_reduce/5", [618, 619, 620, 621, 622]}
+    {"Nx.triu/2", [27]}
   ]
 
   # 37 doctests. GLSL.std.450 defines its transcendentals for 32-bit floats
