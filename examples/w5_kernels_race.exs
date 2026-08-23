@@ -228,6 +228,82 @@ results = results ++
     race.("dot s32 #{m}x#{m}", iters, gpu_of.(fn -> Nx.dot(a, b) end), host_of.([a, b], &Nx.dot/2))
   end
 
+# ---- the follow-on items: stack, gather, bitcast, tensordot -------------
+#
+# None of these were in the original W5 race, and none had ever been measured.
+# Four of the five are GATE WIDENINGS on kernels that already existed, so the
+# question here is different from "is the shader fast": it is whether the
+# NORMALISATION each one inserts — a reshape, a transpose, a relabel — costs
+# less than the host round trip it replaced. A transpose is a full copy, so
+# `gather` at an off-prefix axis genuinely does more work than at a prefix one.
+
+results = results ++
+  for {n, iters} <- [{262_144, 10}] do
+    a = gt.(seq.(n, 1), {512, 512}, {:s, 32})
+    b = gt.(seq.(n, 2), {512, 512}, {:s, 32})
+    race.("stack 2x512x512 axis 0", iters,
+      gpu_of.(fn -> Nx.stack([a, b]) end),
+      host_of.([a, b], fn x, y -> Nx.stack([x, y]) end))
+  end
+
+results = results ++
+  for {iters} <- [{10}] do
+    a = gt.(seq.(262_144, 1), {512, 512}, {:s, 32})
+    b = gt.(seq.(262_144, 2), {512, 512}, {:s, 32})
+    race.("stack 2x512x512 axis 1", iters,
+      gpu_of.(fn -> Nx.stack([a, b], axis: 1) end),
+      host_of.([a, b], fn x, y -> Nx.stack([x, y], axis: 1) end))
+  end
+
+# gather at a LEADING-PREFIX axis (no transpose) against an off-prefix one
+# (transpose inserted). The pair is the point: the delta between these two rows
+# is the cost of the normalisation.
+results = results ++
+  for {iters} <- [{10}] do
+    a = gt.(seq.(262_144, 1), {512, 512}, {:s, 32})
+    idx = gt.(for(i <- 1..256, do: rem(i * 7, 512)), {256}, {:s, 32})
+    race.("take axis 0 (prefix)", iters,
+      gpu_of.(fn -> Nx.take(a, idx, axis: 0) end),
+      host_of.([a, idx], fn t, i -> Nx.take(t, i, axis: 0) end))
+  end
+
+results = results ++
+  for {iters} <- [{10}] do
+    a = gt.(seq.(262_144, 1), {512, 512}, {:s, 32})
+    idx = gt.(for(i <- 1..256, do: rem(i * 7, 512)), {256}, {:s, 32})
+    race.("take axis 1 (ROTATED)", iters,
+      gpu_of.(fn -> Nx.take(a, idx, axis: 1) end),
+      host_of.([a, idx], fn t, i -> Nx.take(t, i, axis: 1) end))
+  end
+
+results = results ++
+  for {iters} <- [{20}] do
+    a = gt.(seq.(1_048_576, 1), {1_048_576}, {:s, 32})
+    race.("bitcast s32->f32 n=1048576", iters,
+      gpu_of.(fn -> Nx.bitcast(a, :f32) end),
+      host_of.([a], fn t -> Nx.bitcast(t, :f32) end))
+  end
+
+# A rank-3 contraction: reaches the matmul only via transpose + reshape.
+results = results ++
+  for {iters} <- [{5}] do
+    a = gt.(seq.(64 * 64 * 16, 1), {64, 64, 16}, {:s, 32})
+    race.("dot r3 contract axis 1", iters,
+      gpu_of.(fn -> Nx.dot(a, [1], [], a, [1], []) end),
+      host_of.([a], fn t -> Nx.dot(t, [1], [], t, [1], []) end))
+  end
+
+# BATCHED — the new kernel, and the third dispatch dimension. Two batch counts,
+# because the z-dimension is the part that has never run on Kepler hardware
+# under measurement.
+results = results ++
+  for {batch, m, iters} <- [{8, 64, 5}, {64, 32, 5}] do
+    a = gt.(seq.(batch * m * m, 1), {batch, m, m}, {:s, 32})
+    race.("dot BATCHED b=#{batch} #{m}x#{m}", iters,
+      gpu_of.(fn -> Nx.dot(a, [2], [0], a, [1], [0]) end),
+      host_of.([a], fn t -> Nx.dot(t, [2], [0], t, [1], [0]) end))
+  end
+
 IO.puts("")
 IO.puts(String.pad_trailing("op", 34) <> String.pad_leading("gpu ms", 10) <>
         String.pad_leading("host ms", 11) <> String.pad_leading("speedup", 10) <>
