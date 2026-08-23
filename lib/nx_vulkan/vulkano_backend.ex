@@ -2915,23 +2915,60 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     spv = matmul_spv(type)
 
-    fast_path =
+    # ANY unbatched contraction is a matmul once both operands are laid out for
+    # it. `dot_orient/6` above rotates the rank-2 cases; this generalises the
+    # same idea to every rank and axis count, which is the last structural gap
+    # in the dot path and needs no new kernel:
+    #
+    #   a -> transpose to [free_a..., contracted_a...] -> reshape {M, K}
+    #   b -> transpose to [contracted_b..., free_b...] -> reshape {K, N}
+    #   matmul -> {M, N} -> reshape to out.shape
+    #
+    # M, K and N are the PRODUCTS of those dim groups, so a rank-4 contraction
+    # over two axes is the same dispatch as a rank-2 one over a single axis.
+    #
+    # Three things make it correct rather than merely plausible:
+    #
+    #   * `axes_a[i]` contracts with `axes_b[i]` POSITIONALLY. Putting each list
+    #     in its given order on the inside of both operands keeps those pairings
+    #     aligned once the group is flattened into K.
+    #   * Nx defines the output as a's free dims followed by b's free dims, each
+    #     in their original relative order — which is exactly what {M, N} unrolls
+    #     to. No output permutation is needed, for the same reason the `gather`
+    #     rotation needs none.
+    #   * An empty `axes_a` is an outer product, and it falls out rather than
+    #     being special-cased: the contracted group is empty, so K is the empty
+    #     product 1 and the shapes are {M, 1} and {1, N}.
+    #
+    # Reshape here is metadata only and a transpose is skipped when the
+    # permutation is already the identity, so the common rank-2 case still costs
+    # exactly one dispatch.
+    # `0..-1//1` is the EMPTY range, which is what a rank-0 operand needs: no
+    # axes, so no free axes either. Clamping the rank up to 1 here instead
+    # produced `[0]` and then `elem({}, 0)` — Nx.dot(scalar, [], [], vec, [], [])
+    # is a real doctest and it crashed rather than falling back.
+    free_a = Enum.reject(0..(tuple_size(a_v.shape) - 1)//1, &(&1 in axes_a))
+    free_b = Enum.reject(0..(tuple_size(b_v.shape) - 1)//1, &(&1 in axes_b))
+
+    general? =
       spv != nil and a_v.type == type and b_v.type == type and
-        tuple_size(a_v.shape) == 2 and tuple_size(b_v.shape) == 2 and
-        axes_a == [1] and axes_b == [0] and
-        batched_a == [] and batched_b == []
+        batched_a == [] and batched_b == [] and
+        tuple_size(a_v.shape) <= 4 and tuple_size(b_v.shape) <= 4 and
+        match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data)
 
-    if fast_path do
-      %T{data: %__MODULE__{ref: a_ref}, shape: a_shape} = a_v
-      %T{data: %__MODULE__{ref: b_ref}, shape: b_shape} = b_v
-      m = elem(a_shape, 0)
-      k_a = elem(a_shape, 1)
-      n = elem(b_shape, 1)
+    if general? do
+      k = axes_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+      m = free_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+      n = free_b |> Enum.map(&elem(b_v.shape, &1)) |> Enum.product()
 
-      out_bytes = m * n * element_bytes(type)
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(out_bytes)
+      a2 = dot_flatten(a_v, free_a ++ axes_a, {m, k})
+      b2 = dot_flatten(b_v, axes_b ++ free_b, {k, n})
 
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k_a, spv)
+      %T{data: %__MODULE__{ref: a_ref}} = a2
+      %T{data: %__MODULE__{ref: b_ref}} = b2
+
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
+      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k, spv)
 
       put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
     else
@@ -2990,6 +3027,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   defp dot_orient(a, axes_a, b, axes_b, _batched_a, _batched_b), do: {a, axes_a, b, axes_b}
+
+  # Permute a tensor's axes into `perm` and flatten to `shape`. The transpose is
+  # skipped when `perm` is already the identity — reshape is metadata here, so
+  # the identity case costs nothing at all.
+  defp dot_flatten(t, perm, shape) do
+    rank = tuple_size(t.shape)
+    t = if perm == Enum.to_list(0..(rank - 1)//1), do: t, else: Nx.transpose(t, axes: perm)
+    Nx.reshape(t, shape)
+  end
 
   # ---------------------------------------------------------------- helpers
 

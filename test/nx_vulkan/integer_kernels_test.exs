@@ -941,6 +941,85 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "dot — any unbatched contraction is a matmul" do
+    defp r234t(t, type), do: Nx.reshape(t.(Enum.to_list(1..24), type), {2, 3, 4})
+    defp m23t(t, type), do: Nx.reshape(t.(Enum.to_list(1..6), type), {2, 3})
+
+    test "contracting any single axis of a rank-3 pair" do
+      for ax <- [0, 1, 2] do
+        assert_parity_and_residency(fn t ->
+          Nx.dot(r234t(t, {:s, 32}), [ax], [], r234t(t, {:s, 32}), [ax], [])
+        end)
+      end
+    end
+
+    test "contracting TWO axes, including a reversed pairing" do
+      # axes_a[i] contracts with axes_b[i] positionally, so [2,0] against [2,0]
+      # is a different contraction from [0,2] against [0,2]. Flattening the
+      # group in the given order is what keeps those aligned.
+      for pair <- [{[0, 1], [0, 1]}, {[2, 0], [2, 0]}, {[1, 2], [1, 2]}] do
+        {aa, bb} = pair
+
+        assert_parity_and_residency(fn t ->
+          Nx.dot(r234t(t, {:s, 32}), aa, [], r234t(t, {:s, 32}), bb, [])
+        end)
+      end
+    end
+
+    test "an EMPTY contraction is an outer product, and needs no special case" do
+      # The contracted group is empty, so K is the empty product 1 and the
+      # operands reshape to {M, 1} and {1, N}.
+      assert_parity_and_residency(fn t ->
+        Nx.dot(t.([1, 2, 3], {:s, 32}), [], [], t.([4, 5], {:s, 32}), [], [])
+      end)
+    end
+
+    test "rank-0 operands, in either position" do
+      # `0..-1//1` is the empty range. Clamping the rank up to 1 instead gave
+      # `[0]` and then elem({}, 0) — a crash, not a fallback.
+      assert_parity_and_residency(fn t ->
+        Nx.dot(t.(3, {:s, 32}), [], [], t.([1, 2], {:s, 32}), [], [])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.dot(t.([1, 2], {:s, 32}), [], [], t.(3, {:s, 32}), [], [])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.dot(t.(3, {:s, 32}), [], [], t.(4, {:s, 32}), [], [])
+      end)
+    end
+
+    test "floats take the same path" do
+      for type <- [{:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t ->
+          Nx.dot(r234t(t, type), [2], [], r234t(t, type), [2], [])
+        end)
+      end
+    end
+
+    test "the rank-2 case still works and still wraps" do
+      assert_parity_and_residency(fn t ->
+        Nx.dot(m23t(t, {:s, 32}), [1], [], m23t(t, {:s, 32}), [1], [])
+      end)
+
+      assert Nx.to_number(
+               Nx.dot(gpu([2_000_000_000, 2_000_000_000], {:s, 32}), gpu([2, 2], {:s, 32}))
+             ) == -589_934_592
+    end
+
+    test "BATCHED contractions still fall back" do
+      # Nx requires batch axes to be successive dimensions starting from 0, and
+      # a vectorized operand becomes one. Closing these needs a batched matmul —
+      # a new kernel and a new dispatch, unlike everything above.
+      assert_parity(fn t ->
+        u = Nx.reshape(t.([1, 1, 2, 2], {:s, 32}), {2, 1, 2})
+        v = Nx.reshape(t.([3, 3, 4, 4], {:s, 32}), {2, 2, 1})
+        Nx.dot(u, [2], [0], v, [1], [0])
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension
