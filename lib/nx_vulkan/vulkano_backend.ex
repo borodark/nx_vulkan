@@ -2520,10 +2520,25 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   # bitcast: reinterpret bytes as different type without conversion
   @impl true
+  # bitcast is a REINTERPRETATION of the same bytes, and Nx raises on mismatched
+  # bit widths before dispatch ("cannot bitcast types with different bit sizes"),
+  # so this backend only ever sees a same-width relabel. That is metadata, not
+  # work — exactly like `reshape/2` above, and for the same reason: the buffer
+  # is unchanged and only the type attached to it differs.
+  #
+  # It was transferring the whole tensor to the host to do nothing to it.
+  #
+  # The clause is narrow on purpose. An operand that is not resident falls
+  # through to the host path rather than being uploaded, because a bitcast is
+  # the one op where a round trip buys literally nothing.
+  def bitcast(%T{type: type, shape: shape} = out, %T{data: %__MODULE__{ref: ref}}) do
+    put_in(out.data, %__MODULE__{ref: ref, shape: shape, type: type})
+  end
+
   def bitcast(out, tensor) do
     t_bin = Nx.backend_transfer(ensure_on_backend(tensor), Nx.BinaryBackend)
     result = Nx.bitcast(t_bin, out.type)
-    host_result(out, result)
+    host_result(out, result, {:bitcast, 2})
   end
 
   # to_batched: split leading axis into chunks. Returns a stream of tensors.

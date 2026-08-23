@@ -913,6 +913,34 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "bitcast — a relabel, not a conversion" do
+    test "same-width reinterpretation across every pair Nx allows" do
+      # Nx raises on mismatched bit widths before dispatch, so the backend only
+      # ever sees a same-width relabel of the same bytes.
+      assert_parity_and_residency(fn t -> Nx.bitcast(t.([0, 0, 0], {:s, 32}), :f32) end)
+      assert_parity_and_residency(fn t -> Nx.bitcast(t.([-1, 1], {:s, 32}), :u32) end)
+      assert_parity_and_residency(fn t -> Nx.bitcast(t.([200, 1], {:u, 8}), :s8) end)
+      assert_parity_and_residency(fn t -> Nx.bitcast(t.([-1, 1], {:s, 8}), :u8) end)
+      assert_parity_and_residency(fn t -> Nx.bitcast(t.([1.5], {:f, 64}), :s64) end)
+    end
+
+    test "the bytes really are untouched — a round trip is the identity" do
+      assert_parity_and_residency(fn t ->
+        Nx.bitcast(Nx.bitcast(t.([1.5, -2.5], {:f, 32}), :s32), :f32)
+      end)
+
+      assert Nx.to_flat_list(Nx.bitcast(gpu([1_065_353_216], {:s, 32}), :f32)) == [1.0]
+    end
+
+    test "it does NOT upload a host operand" do
+      # A round trip buys literally nothing for a relabel, so a non-resident
+      # operand stays on the host rather than being promoted to be renamed.
+      host_t = Nx.tensor([1, 2], type: {:s, 32}, backend: Nx.BinaryBackend)
+      r = Fallback.strict(:allow, fn -> Nx.bitcast(host_t, :f32) end)
+      assert r.data.__struct__ == Nx.BinaryBackend
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension
