@@ -2293,17 +2293,40 @@ defmodule Nx.Vulkan.VulkanoBackend do
     eb = element_bytes(t.type)
     ib = element_bytes(idx.type)
 
-    # GPU path: the indexed axes are a leading prefix [0..K-1] (no transpose
-    # needed — includes the default all-axes gather), value + index dtypes are
-    # 4/8-byte, rank 1..4, both operands GPU-resident.
-    if match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, idx.data) and
-         axes == Enum.to_list(0..(k - 1)) and rem(eb, 4) == 0 and rem(ib, 4) == 0 and
-         rank >= 1 and rank <= 4 and k >= 1 do
-      gpu_gather(out, t, idx, k, eb, ib)
-    else
-      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
-      i_bin = Nx.backend_transfer(idx, Nx.BinaryBackend)
-      host_result(out, with_binary_backend(fn -> Nx.gather(t_bin, i_bin, opts) end))
+    # The shader wants the indexed axes as a leading prefix [0..K-1]. When they
+    # are not, ROTATE rather than refuse — the same normalise-then-dispatch move
+    # `dot_orient/6` makes for matmul, and the reason SKILL §1b gives for
+    # preferring it: the kernel can do the work, only the layout is wrong.
+    #
+    # `perm = axes ++ everything else, in order` puts them there, and the OUTPUT
+    # NEEDS NO ROTATION BACK. Nx defines a gather's result as the index batch
+    # dims followed by the non-indexed source dims IN THEIR ORIGINAL RELATIVE
+    # ORDER, and a transpose that only moves the indexed axes to the front
+    # leaves that order untouched. That is what makes this two lines instead of
+    # a second permutation.
+    #
+    # The transpose is available exactly when the gather is: `transpose_nd` is a
+    # word copy for rank <= 4 and 4-byte-divisible dtypes, which this gate
+    # already requires. One extra dispatch against a host round trip for the
+    # whole tensor is the same trade dot makes.
+    prefix? = axes == Enum.to_list(0..(k - 1))
+
+    rotatable? =
+      match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, idx.data) and
+        rem(eb, 4) == 0 and rem(ib, 4) == 0 and rank >= 1 and rank <= 4 and k >= 1
+
+    cond do
+      rotatable? and prefix? ->
+        gpu_gather(out, t, idx, k, eb, ib)
+
+      rotatable? ->
+        perm = axes ++ Enum.reject(0..(rank - 1)//1, &(&1 in axes))
+        gpu_gather(out, Nx.transpose(t, axes: perm), idx, k, eb, ib)
+
+      true ->
+        t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+        i_bin = Nx.backend_transfer(idx, Nx.BinaryBackend)
+        host_result(out, with_binary_backend(fn -> Nx.gather(t_bin, i_bin, opts) end))
     end
   end
 

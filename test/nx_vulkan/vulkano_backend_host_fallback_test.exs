@@ -230,11 +230,16 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.shape(r) == {2, 2}
     end
 
-    test "take along axis 1 (2D source)" do
+    # Axis 1 now stays on the GPU too. The note above says axis 0 worked because
+    # "indexed axes are a leading prefix" — gather no longer REQUIRES that, it
+    # rotates the source with a transpose first, the way dot_orient/6 does for
+    # matmul. This pin failing is the intended signal that the gate widened.
+    test "take along axis 1 (2D source) stays on the GPU — the axes are rotated" do
       a = v(f32([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
       idx = Nx.tensor([0, 2], type: :s64, backend: Nx.BinaryBackend)
       r = Nx.take(a, idx, axis: 1)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
+      assert Nx.Vulkan.Fallback.count_total(fn -> Nx.take(a, idx, axis: 1) end) == 0
       assert Nx.to_flat_list(r) == [1.0, 3.0, 4.0, 6.0]
       assert Nx.shape(r) == {2, 2}
     end

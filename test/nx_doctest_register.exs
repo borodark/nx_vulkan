@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **675 of 833 doctests (81.0%) run with host fallbacks refused**, of which
-  **664 (79.7%) are genuinely device-resident**. The 11-doctest gap is
+  **687 of 833 doctests (82.5%) run with host fallbacks refused**, of which
+  **676 (81.2%) are genuinely device-resident**. The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -27,6 +27,24 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `gather/4` rotates its axes instead of refusing them (+12)
+
+  675/833 -> 687/833, again with no new shader. The gate required the indexed
+  axes to be a leading prefix `[0..K-1]`; it now transposes the source when they
+  are not, which is `dot_orient/6`'s normalise-then-dispatch applied to a
+  different kernel.
+
+  **The output needs no rotation back**, and that is what makes it two lines.
+  Nx defines a gather's result as the index batch dims followed by the
+  non-indexed source dims IN THEIR ORIGINAL RELATIVE ORDER, and a transpose that
+  only moves the indexed axes to the front leaves that order untouched.
+
+  The transpose is available exactly where the gather is — `transpose_nd` is a
+  word copy for rank <= 4 and 4-byte-divisible dtypes, which the gate already
+  required — so this costs one extra dispatch against a host round trip for the
+  whole tensor. Closed `Nx.take/3` at axis > 0 (5), `Nx.gather/3` off-prefix (2),
+  `Nx.pad_outer/3` (4) and `Nx.reflect/2` (1).
 
   ## `stack/3` routed to `concatenate/3` — no kernel at all (+5)
 
@@ -276,7 +294,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 158 listed ones step aside so the remaining 675
+  `NXV_HOST_FALLBACK=raise` the 146 listed ones step aside so the remaining 687
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -306,7 +324,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 87 doctests, down from 357 before W5.
+  # 75 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -343,7 +361,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/4", [641]},
     {"Nx.dot/6", [642, 643, 644, 645, 646]},
     {"Nx.fill/3", [821]},
-    {"Nx.gather/3", [711, 712]},
     {"Nx.indexed_add/4", [351]},
     {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
@@ -354,18 +371,16 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
     {"Nx.multiply/2", [239]},
     {"Nx.negate/1", [414]},
-    {"Nx.pad_outer/3", [156, 158, 160, 162]},
     {"Nx.population_count/1", [424]},
     {"Nx.pow/2", [241, 242, 244]},
     {"Nx.product/2", [505]},
     {"Nx.quotient/2", [260, 261]},
-    {"Nx.reflect/2", [814]},
     {"Nx.remainder/2", [249]},
     {"Nx.select/3", [336, 337, 338, 339, 344, 345, 346]},
     {"Nx.slice_along_axis/4", [683]},
     {"Nx.subtract/2", [233]},
     {"Nx.sum/2", [466, 467]},
-    {"Nx.take/3", [692, 693, 694, 695, 696, 697]},
+    {"Nx.take/3", [697]},
     {"Nx.tril/2", [23]},
     {"Nx.triu/2", [27]},
     {"Nx.window_reduce/5", [618, 619, 620, 621, 622]}

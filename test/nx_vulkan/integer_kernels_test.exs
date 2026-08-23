@@ -861,6 +861,58 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "gather — off-prefix axes are rotated, not refused" do
+    defp m23(t, type), do: Nx.reshape(t.([1, 2, 3, 4, 5, 6], type), {2, 3})
+    defp r234(t, type), do: Nx.reshape(t.(Enum.to_list(1..24), type), {2, 3, 4})
+
+    test "take along every axis of a rank-2 and a rank-3 source" do
+      assert_parity_and_residency(fn t ->
+        Nx.take(m23(t, {:s, 32}), t.([2, 0], {:s, 32}), axis: 1)
+      end)
+
+      for axis <- [0, 1, 2] do
+        assert_parity_and_residency(fn t ->
+          Nx.take(r234(t, {:s, 32}), t.([1, 0], {:s, 32}), axis: axis)
+        end)
+      end
+    end
+
+    test "every axes combination a rank-3 gather can name" do
+      # The rotation has to preserve the ORDER of the non-indexed dims, which is
+      # what makes a back-transpose unnecessary. A wrong permutation shows up
+      # here and nowhere else.
+      cases = [
+        {[1], [[0], [2]]},
+        {[2], [[3], [0]]},
+        {[0, 2], [[0, 3], [1, 1]]},
+        {[1, 2], [[0, 3], [2, 1]]},
+        {[0, 1], [[0, 2], [1, 1]]}
+      ]
+
+      for {axes, idx} <- cases do
+        flat = List.flatten(idx)
+        shape = {length(idx), length(hd(idx))}
+
+        assert_parity_and_residency(fn t ->
+          Nx.gather(r234(t, {:s, 32}), Nx.reshape(t.(flat, {:s, 32}), shape), axes: axes)
+        end)
+      end
+    end
+
+    test "rotation works for floats as well as integers" do
+      assert_parity_and_residency(fn t ->
+        Nx.gather(m23(t, {:f, 32}), Nx.reshape(t.([2, 0], {:s, 32}), {2, 1}), axes: [1])
+      end)
+    end
+
+    test "a leading-prefix gather still takes the direct path" do
+      # No transpose should be inserted when the axes already lead.
+      assert_parity_and_residency(fn t ->
+        Nx.gather(m23(t, {:s, 32}), Nx.reshape(t.([0, 2, 1, 1], {:s, 32}), {2, 2}), axes: [0, 1])
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension
