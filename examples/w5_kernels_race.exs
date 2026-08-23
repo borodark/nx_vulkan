@@ -123,6 +123,18 @@ end
 gpu_of = fn f -> fn -> f.() |> Nx.backend_transfer(B) end end
 host_of = fn tensors, f -> fn -> apply(f, Enum.map(tensors, &Nx.backend_copy(&1, B))) end end
 
+# Ops that do NO GPU WORK. `bitcast` is a relabel — same buffer, new type — so
+# there is nothing for a kernel to be fast at. Both arms of this harness end
+# with the answer on the host, and for a zero-work op that measure is entirely
+# the transfer they BOTH pay, so ~1.0x is the correct result and means "costs
+# nothing", not "regression".
+#
+# What the GPU path actually buys is that the result stays RESIDENT for whatever
+# comes next, and the header says plainly that this harness does not count that.
+# Labelling such a row REGRESSION would be the harness lying about its own
+# blind spot, which is the failure mode the load check already had once.
+zero_work = ["bitcast s32->f32 n=1048576"]
+
 results = []
 
 # ---- integer elementwise binary (T1) ------------------------------------
@@ -327,6 +339,9 @@ for r <- results do
   # A "regression" measured on a loaded box is not a finding. Say so on the row
   # rather than letting the word REGRESSION stand unqualified.
   flag = cond do
+    r.op in zero_work ->
+      "  (zero-work op: ~1.0x is CORRECT, both arms are just the transfer)"
+
     r.speedup < 1.0 and busy -> "  <-- slower, BUT baseline load #{baseline_load} — RE-RUN IDLE"
     r.speedup < 1.0 -> "  <-- REGRESSION"
     r.gpu_spread_pct > 50.0 -> "  (noisy: ±#{r.gpu_spread_pct}%)"
