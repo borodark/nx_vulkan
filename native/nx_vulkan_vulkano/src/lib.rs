@@ -2212,6 +2212,15 @@ struct PushMatmul {
     k: u32,
 }
 
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushMatmulBatched {
+    m: u32,
+    n: u32,
+    k: u32,
+    batch: u32,
+}
+
 /// 2D matmul. C = A · B where A is M×K, B is K×N, C is M×N.
 /// All row-major f32. Bindings: a, b, out at 0, 1, 2. Push {m, n, k}.
 /// Workgroup 16×16, dispatch ceil(N/16)×ceil(M/16).
@@ -2293,6 +2302,63 @@ fn matmul<'a>(
 // wired as the backend default — the register-blocked kernels regressed on
 // Kepler; this NIF exists so `examples/matmul_rb_race.exs` can benchmark them
 // against the tiled default on other GPUs (e.g. Ampere). See F32_PLAN.md.
+/// Batched matmul. C[b] = A[b] · B[b] for b in 0..batch, batches laid out
+/// contiguously. Bindings match `matmul/7`; the push block gains `batch` and
+/// the batch index rides the THIRD dispatch dimension rather than being looped
+/// in the caller — dispatching once per matrix would pay the launch cost per
+/// batch element, which is the overhead that made the vectorised `reduce/5`
+/// fold lose to the host (bench/reduce_fold_vs_host.exs).
+///
+/// Workgroup 16×16×1, dispatch ceil(N/16) × ceil(M/16) × batch. Note /16 here
+/// against `matmul32`'s /32: this shader uses a plain 16×16 output tile, not
+/// the register-blocked one.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn matmul_batched<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    b_ref: ResourceArc<VulkanoTensor>,
+    batch: u32,
+    m: u32,
+    n: u32,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, b_ref.buf.clone()),
+                WriteDescriptorSet::buffer(2, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        enqueue_dispatch(
+            context,
+            &cached,
+            set,
+            PushMatmulBatched { m, n, k, batch },
+            [n.div_ceil(16), m.div_ceil(16), batch],
+        )
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 #[allow(clippy::too_many_arguments)]
 fn matmul32<'a>(

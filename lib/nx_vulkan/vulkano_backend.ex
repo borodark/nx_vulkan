@@ -2886,6 +2886,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp matmul_spv(_), do: nil
 
+  @matmul_batched_f32_spv Path.expand("../../priv/shaders/matmul_batched_f32.spv", __DIR__)
+  @matmul_batched_f64_spv Path.expand("../../priv/shaders/matmul_batched_f64.spv", __DIR__)
+  @matmul_batched_s32_spv Path.expand("../../priv/shaders/matmul_batched_s32.spv", __DIR__)
+
+  # The batched family has no f32 accumulator POLICY. `matmul_spv/1` offers the
+  # :f32 variant as an opt-in for f64-rate-limited GPUs; the batched shader is
+  # f64-accumulating only, because there is no benchmark justifying a second
+  # variant and F32_PLAN.md's numbers were measured on the unbatched pair.
+  defp matmul_batched_spv({:f, 32}), do: @matmul_batched_f32_spv
+  defp matmul_batched_spv({:f, 64}), do: @matmul_batched_f64_spv
+  defp matmul_batched_spv({:s, 32}), do: @matmul_batched_s32_spv
+  defp matmul_batched_spv(_), do: nil
+
   # Dot product (matmul) — Nx callback signature:
   #   dot(out, a, contracting_axes_a, batched_axes_a,
   #            b, contracting_axes_b, batched_axes_b)
@@ -2950,32 +2963,82 @@ defmodule Nx.Vulkan.VulkanoBackend do
     free_a = Enum.reject(0..(tuple_size(a_v.shape) - 1)//1, &(&1 in axes_a))
     free_b = Enum.reject(0..(tuple_size(b_v.shape) - 1)//1, &(&1 in axes_b))
 
-    general? =
-      spv != nil and a_v.type == type and b_v.type == type and
-        batched_a == [] and batched_b == [] and
+    resident? =
+      a_v.type == type and b_v.type == type and
         tuple_size(a_v.shape) <= 4 and tuple_size(b_v.shape) <= 4 and
         match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data)
 
-    if general? do
-      k = axes_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
-      m = free_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
-      n = free_b |> Enum.map(&elem(b_v.shape, &1)) |> Enum.product()
+    general? = spv != nil and resident? and batched_a == [] and batched_b == []
 
-      a2 = dot_flatten(a_v, free_a ++ axes_a, {m, k})
-      b2 = dot_flatten(b_v, axes_b ++ free_b, {k, n})
+    # BATCHED contractions are the same reduction with a batch dimension in
+    # front. Nx guarantees the batch axes are "successive dimensions starting
+    # from 0" and that both sides carry the same count, so the batch is always a
+    # leading prefix on both operands and needs no rotation:
+    #
+    #   a -> [batch..., free_a..., contracted_a...] -> reshape {B, M, K}
+    #   b -> [batch..., contracted_b..., free_b...] -> reshape {B, K, N}
+    #
+    # Half the doctests reaching here are batched only because an operand is
+    # `Nx.vectorize`d — Nx turns a vectorised axis into a leading batch axis, so
+    # this closes vectorised `dot` as a side effect rather than as a separate
+    # feature.
+    #
+    # The batch rides the third dispatch dimension, capped at 65535 by
+    # maxComputeWorkGroupCount[2]. Beyond that it falls back rather than looping
+    # per matrix: the per-dispatch cost is what made the vectorised `reduce/5`
+    # fold lose to the host, and a loop here would reintroduce it.
+    bspv = matmul_batched_spv(type)
+    nbatch = batched_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
 
-      %T{data: %__MODULE__{ref: a_ref}} = a2
-      %T{data: %__MODULE__{ref: b_ref}} = b2
+    batched? =
+      bspv != nil and resident? and batched_a != [] and
+        batched_a == Enum.to_list(0..(length(batched_a) - 1)//1) and
+        batched_b == Enum.to_list(0..(length(batched_b) - 1)//1) and
+        length(batched_a) == length(batched_b) and nbatch <= 65_535
 
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
-      :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k, spv)
+    cond do
+      batched? ->
+        free_a = Enum.reject(free_a, &(&1 in batched_a))
+        free_b = Enum.reject(free_b, &(&1 in batched_b))
 
-      put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
-    else
-      a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
-      b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
-      result = Nx.dot(a_bin, axes_a, batched_a, b_bin, axes_b, batched_b)
-      host_result(out, result)
+        k = axes_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+        m = free_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+        n = free_b |> Enum.map(&elem(b_v.shape, &1)) |> Enum.product()
+
+        a2 = dot_flatten(a_v, batched_a ++ free_a ++ axes_a, {nbatch, m, k})
+        b2 = dot_flatten(b_v, batched_b ++ axes_b ++ free_b, {nbatch, k, n})
+
+        %T{data: %__MODULE__{ref: a_ref}} = a2
+        %T{data: %__MODULE__{ref: b_ref}} = b2
+
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(nbatch * m * n * element_bytes(type))
+
+        :ok =
+          Nx.Vulkan.NativeV.matmul_batched(out_ref, a_ref, b_ref, nbatch, m, n, k, bspv)
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      general? ->
+        k = axes_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+        m = free_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
+        n = free_b |> Enum.map(&elem(b_v.shape, &1)) |> Enum.product()
+
+        a2 = dot_flatten(a_v, free_a ++ axes_a, {m, k})
+        b2 = dot_flatten(b_v, axes_b ++ free_b, {k, n})
+
+        %T{data: %__MODULE__{ref: a_ref}} = a2
+        %T{data: %__MODULE__{ref: b_ref}} = b2
+
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(m * n * element_bytes(type))
+        :ok = Nx.Vulkan.NativeV.matmul(out_ref, a_ref, b_ref, m, n, k, spv)
+
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
+
+      true ->
+        a_bin = Nx.backend_transfer(a_v, Nx.BinaryBackend)
+        b_bin = Nx.backend_transfer(b_v, Nx.BinaryBackend)
+        result = Nx.dot(a_bin, axes_a, batched_a, b_bin, axes_b, batched_b)
+        host_result(out, result, {:dot, 7})
     end
   end
 

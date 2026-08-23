@@ -1008,14 +1008,47 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
              ) == -589_934_592
     end
 
-    test "BATCHED contractions still fall back" do
-      # Nx requires batch axes to be successive dimensions starting from 0, and
-      # a vectorized operand becomes one. Closing these needs a batched matmul —
-      # a new kernel and a new dispatch, unlike everything above.
-      assert_parity(fn t ->
+    test "BATCHED contractions run on the batched kernel" do
+      # Nx requires batch axes to be successive dimensions starting from 0, so
+      # the batch is always a leading prefix on both operands and needs no
+      # rotation — only the flatten to {B, M, K} and {B, K, N}.
+      assert_parity_and_residency(fn t ->
         u = Nx.reshape(t.([1, 1, 2, 2], {:s, 32}), {2, 1, 2})
         v = Nx.reshape(t.([3, 3, 4, 4], {:s, 32}), {2, 2, 1})
         Nx.dot(u, [2], [0], v, [1], [0])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        u = Nx.reshape(t.(Enum.to_list(1..12), {:s, 32}), {2, 3, 2})
+        v = Nx.reshape(t.(Enum.to_list(1..8), {:s, 32}), {2, 2, 2})
+        Nx.dot(u, [2], [0], v, [1], [0])
+      end)
+
+      # A batch larger than 2, so the third dispatch dimension is exercised
+      # beyond the degenerate case.
+      assert_parity_and_residency(fn t ->
+        u = Nx.reshape(t.(Enum.to_list(1..16), {:s, 32}), {4, 2, 2})
+        Nx.dot(u, [2], [0], u, [1], [0])
+      end)
+    end
+
+    test "batched works at every dtype with a matmul shader" do
+      for type <- [{:f, 32}, {:f, 64}] do
+        assert_parity_and_residency(fn t ->
+          u = Nx.reshape(t.(Enum.to_list(1..12), type), {2, 3, 2})
+          v = Nx.reshape(t.(Enum.to_list(1..8), type), {2, 2, 2})
+          Nx.dot(u, [2], [0], v, [1], [0])
+        end)
+      end
+    end
+
+    test "a VECTORIZED dot is a batched dot, and closes for free" do
+      # Nx turns a vectorized axis into a leading batch axis, so half the
+      # doctests this closed were never about batching as the user wrote it.
+      assert_parity_and_residency(fn t ->
+        u = Nx.vectorize(Nx.reshape(t.([1, 1, 2, 2], {:s, 32}), {2, 1, 2}), :x)
+        v = Nx.vectorize(Nx.reshape(t.([3, 3, 4, 4], {:s, 32}), {2, 2, 1}), :x)
+        Nx.dot(u, [1], [], v, [0], [])
       end)
     end
   end

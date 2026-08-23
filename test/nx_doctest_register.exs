@@ -16,8 +16,9 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **694 of 833 doctests (83.3%) run with host fallbacks refused**, of which
-  **683 (82.0%) are genuinely device-resident**. The 11-doctest gap is
+  **699 of 833 doctests (83.9%) run with host fallbacks refused**, of which
+  **688 (82.6%) are genuinely device-resident**. **`dot/7` is now entirely
+  closed** — no contraction of any rank, axis count or batching falls back. The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -27,6 +28,25 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## batched matmul closes `dot/7` completely (+5)
+
+  694/833 -> 699/833, and `dot/7` disappears from this register entirely. Three
+  shaders (`matmul_batched_{f32,f64,s32}`) and one NIF — the first Rust since
+  `scatter`, and the last this backend needed for the dot path.
+
+  Nx guarantees batch axes are "successive dimensions starting from 0" on both
+  operands, so the batch is always a leading prefix and needs no rotation — only
+  the flatten to `{B, M, K}` and `{B, K, N}`. The batch index rides the THIRD
+  dispatch dimension rather than being looped in the caller, because dispatching
+  once per matrix would pay the launch cost per batch element: the exact
+  overhead that made the vectorised `reduce/5` fold lose to the host. Capped at
+  65535 by `maxComputeWorkGroupCount[2]`, above which it falls back rather than
+  looping.
+
+  **Half of what this closed was never about batching as the user wrote it.**
+  `Nx.vectorize` turns a vectorised axis into a leading batch axis, so vectorised
+  `dot` came along as a side effect.
 
   ## `dot` generalised to any UNBATCHED contraction (+5)
 
@@ -327,7 +347,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 139 listed ones step aside so the remaining 694
+  `NXV_HOST_FALLBACK=raise` the 134 listed ones step aside so the remaining 699
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -357,7 +377,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 70 doctests, down from 357 before W5.
+  # 65 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -389,9 +409,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.as_type/2", [87, 90, 91]},
     {"Nx.bitwise_not/1", [418, 419]},
     {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},
-    {"Nx.dot/2", [636]},
-    {"Nx.dot/4", [641]},
-    {"Nx.dot/6", [644, 645, 646]},
     {"Nx.fill/3", [821]},
     {"Nx.indexed_add/4", [351]},
     {"Nx.indexed_put/4", [361, 364]},

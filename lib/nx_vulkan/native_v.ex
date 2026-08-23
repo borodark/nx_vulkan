@@ -321,6 +321,20 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Batched matmul: `C[b] = A[b] · B[b]` for each of `batch` contiguous matrices.
+
+  Same bindings and push layout as `matmul/7` with `batch` appended. The batch
+  index rides the THIRD dispatch dimension, so one launch covers every matrix —
+  looping in the caller would pay the per-dispatch cost per batch element, which
+  is the overhead that made the vectorised `reduce/5` fold lose to the host.
+
+  `batch` must not exceed `maxComputeWorkGroupCount[2]` (65535 in practice); the
+  backend gates on that.
+  """
+  def matmul_batched(_out, _a, _b, _batch, _m, _n, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Register-blocked matmul dispatch (32-wide output tiles) for the *_rb32 shaders.
   Benchmark-only — the register-blocked kernels regressed on Kepler; used by
   examples/matmul_rb_race.exs to evaluate them on other GPUs. See F32_PLAN.md.

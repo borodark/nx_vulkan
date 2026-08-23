@@ -1,0 +1,74 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// BATCHED tiled matmul, f64. C[b] = A[b] * B[b] for b in 0..batch-1, with
+// A[b] MxK row-major and B[b] KxN row-major, the batches laid out contiguously.
+//
+// The only difference from matmul_f64.comp is a third dispatch dimension: the
+// batch index rides gl_GlobalInvocationID.z and offsets each operand by a whole
+// matrix. Tiling, tile size and accumulator policy are untouched, so this
+// inherits the 16x16 shared-memory staging and its accuracy behaviour rather
+// than restating them.
+//
+// Why a separate kernel rather than a loop in the caller: a batched contraction
+// is exactly what `Nx.vectorize` produces, and dispatching once per batch would
+// pay the launch cost per matrix — the same per-dispatch overhead that made the
+// vectorised `reduce/5` fold lose to the host (bench/reduce_fold_vs_host.exs).
+//
+// Dispatch: global x over N, global y over M, global z over BATCH, local 16x16x1.
+// The caller gates on batch <= 65535, the usual maxComputeWorkGroupCount limit.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer A { double a[]; };
+layout(std430, binding = 1) readonly buffer B { double b[]; };
+layout(std430, binding = 2) writeonly buffer O { double o[]; };
+
+layout(push_constant) uniform Push {
+    uint m;
+    uint n;
+    uint k;
+    uint batch;
+} p;
+
+const uint T = 16u;
+shared double As[T][T];
+shared double Bs[T][T];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint bat = gl_GlobalInvocationID.z;
+    uint ly = gl_LocalInvocationID.y;
+    uint lx = gl_LocalInvocationID.x;
+
+    if (bat >= p.batch) return;
+
+    // Whole-matrix offsets for this batch element.
+    uint a_off = bat * p.m * p.k;
+    uint b_off = bat * p.k * p.n;
+    uint o_off = bat * p.m * p.n;
+
+    double acc = 0.0lf;
+    uint tiles = (p.k + T - 1u) / T;
+
+    for (uint t = 0u; t < tiles; ++t) {
+        uint aCol = t * T + lx;
+        As[ly][lx] = (row < p.m && aCol < p.k) ? a[a_off + row * p.k + aCol] : 0.0lf;
+
+        uint bRow = t * T + ly;
+        Bs[ly][lx] = (bRow < p.k && col < p.n) ? b[b_off + bRow * p.n + col] : 0.0lf;
+
+        barrier();
+
+        for (uint i = 0u; i < T; ++i) {
+            acc += double(As[ly][i]) * double(Bs[i][lx]);
+        }
+
+        barrier();
+    }
+
+    if (row < p.m && col < p.n) {
+        o[o_off + row * p.n + col] = double(acc);
+    }
+}
