@@ -61,6 +61,15 @@ loadavg = fn ->
   end
 end
 
+# THE BASELINE, sampled before this script does any work, is what decides
+# whether the box was busy. Mid-run load is NOT that signal and must not be used
+# as one: the host arm is a single-threaded Elixir loop over Nx.BinaryBackend
+# and it drives the 1-minute average past 1.5 all by itself. Judging on mid-run
+# load flagged a genuinely idle mac-247 run (baseline 0.00 / 0.08 / 0.45) as
+# contaminated — which is the more dangerous failure of the two, because it
+# throws away good measurements rather than admitting bad ones.
+baseline_load = loadavg.()
+
 host = System.cmd("hostname", ["-s"]) |> elem(0) |> String.trim()
 commit = System.cmd("git", ["rev-parse", "--short", "HEAD"]) |> elem(0) |> String.trim()
 
@@ -225,13 +234,13 @@ IO.puts(String.pad_trailing("op", 34) <> String.pad_leading("gpu ms", 10) <>
         String.pad_leading("gpu±%", 8) <> String.pad_leading("host±%", 8))
 IO.puts(String.duplicate("-", 81))
 
-busy = Enum.any?(results, &(&1.load_after > 1.5))
+busy = baseline_load > 1.0
 
 for r <- results do
   # A "regression" measured on a loaded box is not a finding. Say so on the row
   # rather than letting the word REGRESSION stand unqualified.
   flag = cond do
-    r.speedup < 1.0 and r.load_after > 1.5 -> "  <-- slower, BUT load #{r.load_after} — RE-RUN IDLE"
+    r.speedup < 1.0 and busy -> "  <-- slower, BUT baseline load #{baseline_load} — RE-RUN IDLE"
     r.speedup < 1.0 -> "  <-- REGRESSION"
     r.gpu_spread_pct > 50.0 -> "  (noisy: ±#{r.gpu_spread_pct}%)"
     r.speedup < 1.5 -> "  (marginal)"
@@ -253,13 +262,18 @@ File.write!(path, Jason.encode_to_iodata!(%{
   host: host, commit: commit, device: dev, device_kind: kind,
   replicates: 5, note: "median of 5; both arms end with the answer on the host",
   box_was_busy: busy,
+  baseline_load: baseline_load,
   results: results
 }, pretty: true))
 
 if busy do
-  IO.puts("\n*** THIS BOX WAS NOT IDLE. Load exceeded 1.5 during the run, so every")
-  IO.puts("*** number above is suspect and any regression is unproven. Re-run when")
-  IO.puts("*** `uptime` is quiet before drawing a conclusion from it.")
+  IO.puts("\n*** THIS BOX WAS NOT IDLE. Baseline load was #{baseline_load} BEFORE this")
+  IO.puts("*** run started, so every number above is suspect and any regression is")
+  IO.puts("*** unproven. Re-run when `uptime` is quiet before concluding anything.")
+else
+  IO.puts("\nbaseline load #{baseline_load} before the run — clean.")
+  IO.puts("(The per-row load rising past 1 during the run is THIS BENCHMARK: the")
+  IO.puts(" host arm is a single-threaded Elixir loop. That is expected, not noise.)")
 end
 
 IO.puts("\nwrote #{path}")
