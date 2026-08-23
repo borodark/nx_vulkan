@@ -1190,6 +1190,45 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp cast_spv({:u, 32}, {:f, 64}), do: @cast_u32_to_f64_spv
   defp cast_spv(_from, _to), do: nil
 
+  # Casts that go TO an integer. These are kept out of `cast_spv/2` because the
+  # dispatch differs: the 32-bit one needs a SPEC CONSTANT to pick signedness
+  # (the two destinations agree on every bit pattern except the infinities), and
+  # the u8 one writes packed bytes, so its output buffer is padded rather than
+  # sized by element count.
+  #
+  # `as_type` is an elementwise unary op, so `apply_unary/5` is the honest
+  # dispatcher for the first and `cast/4` for the second — both bind a->0, out->1
+  # with push {n}, which is exactly what these shaders declare. No new NIF.
+  @cast_f32_to_w32_spv Path.expand("../../priv/shaders/cast_f32_to_w32.spv", __DIR__)
+  @cast_f32_to_u8_spv Path.expand("../../priv/shaders/cast_f32_to_u8.spv", __DIR__)
+
+  # {spv, spec constant, output bytes per element or :packed_u8}
+  defp cast_to_int_spv({:f, 32}, {:s, 32}), do: {@cast_f32_to_w32_spv, 0, 4}
+  defp cast_to_int_spv({:f, 32}, {:u, 32}), do: {@cast_f32_to_w32_spv, 1, 4}
+  defp cast_to_int_spv({:f, 32}, {:u, 8}), do: {@cast_f32_to_u8_spv, nil, :packed_u8}
+  defp cast_to_int_spv(_from, _to), do: nil
+
+  defp gpu_cast_to_int(%T{shape: shape, type: to} = out, ref, {spv, spec, layout}) do
+    n = byte_size_of(shape)
+
+    bytes =
+      case layout do
+        :packed_u8 -> div(n + 3, 4) * 4
+        eb -> n * eb
+      end
+
+    {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(bytes)
+
+    :ok =
+      if spec == nil do
+        Nx.Vulkan.NativeV.cast(out_ref, ref, n, spv)
+      else
+        Nx.Vulkan.NativeV.apply_unary(out_ref, ref, n, spec, spv)
+      end
+
+    put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: to})
+  end
+
   # Coerce an on-GPU tensor to `to` type via the f32<->f64 cast shader so
   # mixed-dtype ops (e.g. f64 tensor + f32 scalar literal) stay on the GPU.
   # Returns the coerced %T{} (a no-op when already `to`), or nil when the pair
@@ -1238,6 +1277,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     cond do
       type == source_type ->
         put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+
+      cast_to_int_spv(source_type, type) != nil ->
+        gpu_cast_to_int(out, ref, cast_to_int_spv(source_type, type))
 
       cast_spv(source_type, type) != nil ->
         # f32<->f64 widening/narrowing on the GPU (mixed precision).

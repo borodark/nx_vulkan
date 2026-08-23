@@ -1,0 +1,52 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// f32 -> {:u, 8}, matching Nx.BinaryBackend exactly. Same three rules as
+// cast_f32_to_w32.comp — NaN to 0, infinities SATURATE to the destination's
+// limits, everything else truncates toward zero and WRAPS — but at 8 bits, and
+// with a packed output.
+//
+//   +infinity -> 255, -infinity -> 0, NaN -> 0
+//   300.0 -> 44,  -1.0 -> 255,  256.0 -> 0,  1.9 -> 1,  -1.9 -> 255
+//
+// The output is one byte per element written as packed u32 words (4 results per
+// word), the same trick compare_*.comp and allany_*.comp use, so no 8-bit
+// storage extension is needed. One thread per WORD; the caller pads the output
+// buffer to a 4-byte multiple.
+//
+// The wrap is done modulo 2^32 first and narrowed to 8 bits afterwards rather
+// than modulo 256 directly. That keeps the exactness argument identical to the
+// 32-bit shader's — see the 2^55 note there — and `& 0xFF` on a correct 32-bit
+// wrap is a correct 8-bit wrap.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push { uint n; } p;
+
+uint to_u8(float x) {
+    if (isnan(x)) return 0u;
+    if (isinf(x)) return (x > 0.0) ? 255u : 0u;
+    if (abs(x) >= 36028797018963968.0) return 0u;
+
+    double tr = trunc(double(x));
+    double m = tr - floor(tr / 4294967296.0lf) * 4294967296.0lf;
+    return uint(m) & 0xFFu;
+}
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    uint nwords = (p.n + 3u) / 4u;
+    if (word >= nwords) return;
+
+    uint packed = 0u;
+    for (uint j = 0u; j < 4u; ++j) {
+        uint gid = word * 4u + j;
+        if (gid >= p.n) break;
+        packed |= to_u8(a[gid]) << (j * 8u);
+    }
+
+    o[word] = packed;
+}

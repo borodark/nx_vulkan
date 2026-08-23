@@ -151,10 +151,14 @@ defmodule Nx.Vulkan.VulkanoBackend.HostFallbackTest do
       assert Nx.to_flat_list(r) == [1.0, 20.0, 3.0]
     end
 
-    test "as_type cast result is on BinaryBackend" do
+    # f32 -> integer got glsl/cast_f32_to_{w32,u8}.comp and now stays on the GPU.
+    # This pin failing is the intended signal that the op was promoted. Casts
+    # TO a float were already resident; this was the direction with no shader.
+    test "as_type f32 -> s32 stays on VulkanoBackend and truncates toward zero" do
       a = v(f32([1.5, 2.7, 3.9]))
       r = Nx.as_type(a, :s32)
-      assert r.data.__struct__ == Nx.BinaryBackend
+      assert r.data.__struct__ == Nx.Vulkan.VulkanoBackend
+      assert Nx.Vulkan.Fallback.count_total(fn -> Nx.as_type(a, :s32) end) == 0
       assert Nx.to_flat_list(r) == [1, 2, 3]
     end
 

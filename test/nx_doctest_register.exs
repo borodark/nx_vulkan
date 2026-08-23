@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **707 of 833 doctests (84.9%) run with host fallbacks refused**, of which
-  **696 (83.6%) are genuinely device-resident**. **`dot/7` and `select/4` are
+  **709 of 833 doctests (85.1%) run with host fallbacks refused**, of which
+  **698 (83.8%) are genuinely device-resident**. **`dot/7` and `select/4` are
   both entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
@@ -28,6 +28,33 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `as_type` float -> integer (+2), and it is three rules
+
+  707/833 -> 709/833. The cast matrix had eight entries and every one went TO a
+  float; nothing converted to an integer. `cast_f32_to_w32.comp` and
+  `cast_f32_to_u8.comp` are the first that do.
+
+  It is not the one-line `int(x)` it looks like. `Nx.BinaryBackend` applies
+  THREE rules depending on the value, and GLSL's own float->int conversion is
+  UNDEFINED for most of them:
+
+    * `NaN` -> 0;
+    * the infinities SATURATE to the destination's limits;
+    * everything else truncates toward zero and WRAPS modulo 2^width — `300.0`
+      becomes 44 at u8, not 255.
+
+  Saturating and wrapping in the same conversion is the trap: an implementation
+  that clamped everything would pass the infinity tests and fail on `300.0`, and
+  one that wrapped everything would do the reverse. Both directions are pinned.
+
+  `int(1.0e10)` is itself undefined behaviour, so the modulo happens in floating
+  point BEFORE the conversion and has to be exact. Above 2^55 an f32 is already
+  a multiple of 2^32 so the answer is 0; below it the double arithmetic is
+  exact. `1.0e15` is the case that would break a naive version — large enough to
+  need the wrap, small enough that the answer is not 0.
+
+  Integer-to-integer casts still fall back; only the float sources are covered.
 
   ## `select/4` takes any numeric predicate (+8)
 
@@ -359,7 +386,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 126 listed ones step aside so the remaining 707
+  `NXV_HOST_FALLBACK=raise` the 124 listed ones step aside so the remaining 709
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -389,7 +416,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 58 doctests, down from 357 before W5.
+  # 56 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -418,7 +445,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.all_close/3", [460]},
     {"Nx.argmax/2", [532, 534, 535, 536]},
     {"Nx.argmin/2", [543, 545, 546, 547]},
-    {"Nx.as_type/2", [87, 90, 91]},
+    {"Nx.as_type/2", [87, 90]},
     {"Nx.bitwise_not/1", [418, 419]},
     {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},
     {"Nx.fill/3", [821]},
@@ -426,7 +453,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
-    {"Nx.linspace/3", [804, 805, 806]},
+    {"Nx.linspace/3", [804, 806]},
     {"Nx.max/2", [270]},
     {"Nx.min/2", [276]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},

@@ -1,0 +1,73 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+// f32 -> a 32-bit INTEGER, matching Nx.BinaryBackend exactly.
+// Spec constant 0 picks the destination: 0 = {:s, 32}, 1 = {:u, 32}.
+//
+// This is the first cast in the repo that goes TO an integer, and it is not the
+// one-line `int(x)` it looks like. BinaryBackend applies THREE different rules
+// depending on the value, and GLSL's own float->int conversion is UNDEFINED for
+// most of them:
+//
+//   NaN              -> 0
+//   +infinity        -> destination MAX   (2147483647, or 4294967295 unsigned)
+//   -infinity        -> destination MIN   (-2147483648, or 0 unsigned)
+//   everything else  -> truncate toward zero, then WRAP modulo 2^32
+//
+// The wrap is the hard one. `int(1.0e10)` is undefined behaviour in GLSL — the
+// value does not fit — so the modulo has to happen in floating point BEFORE the
+// conversion, and it has to be exact or the answer is silently wrong.
+//
+// EXACTNESS ARGUMENT, which is why the 2^55 branch exists:
+//
+//   * If |x| >= 2^55 the f32 value is a multiple of 2^32 (an f32 has a 24-bit
+//     significand, so at exponent >= 55 its ulp is at least 2^32), and x mod
+//     2^32 is therefore exactly 0. Checked against BinaryBackend at 1e20, 1e30
+//     and 3.0e38 — all 0.
+//   * Below that, |trunc(x)| < 2^55 is exactly representable in a double, so
+//     `tr - floor(tr / 2^32) * 2^32` is computed with no rounding at all:
+//     tr/2^32 < 2^23, its floor is exact, and the product is a multiple of 2^32
+//     below 2^55 which a double holds exactly.
+//
+// Without the branch the large case would compute floor() of a value needing
+// ~29 significant digits and quietly produce garbage.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int DST = 0;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+
+    float x = a[i];
+    bool unsigned_dst = (DST == 1);
+    uint r;
+
+    if (isnan(x)) {
+        r = 0u;
+    } else if (isinf(x)) {
+        // Saturate, not wrap. The only case where the destination's limits show.
+        if (x > 0.0) {
+            r = unsigned_dst ? 0xFFFFFFFFu : 0x7FFFFFFFu;
+        } else {
+            r = unsigned_dst ? 0u : 0x80000000u;
+        }
+    } else if (abs(x) >= 36028797018963968.0) {
+        // 2^55: the value is a multiple of 2^32, so the remainder is exactly 0.
+        r = 0u;
+    } else {
+        double tr = trunc(double(x));
+        double m = tr - floor(tr / 4294967296.0lf) * 4294967296.0lf;
+        // m is now in [0, 2^32); its low 32 bits ARE the answer for both
+        // signedness choices, because two's complement wrapping and unsigned
+        // wrapping agree on the bit pattern.
+        r = uint(m);
+    }
+
+    o[i] = r;
+}

@@ -1115,6 +1115,81 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "as_type float -> integer — three rules, not one" do
+    test "NaN is 0 and the infinities SATURATE to the destination's limits" do
+      for {type, expected} <- [
+            {{:u, 8}, [255, 0, 0]},
+            {{:s, 32}, [2_147_483_647, 0, -2_147_483_648]},
+            {{:u, 32}, [4_294_967_295, 0, 0]}
+          ] do
+        got =
+          assert_parity_and_residency(fn t ->
+            Nx.as_type(t.([:infinity, :nan, :neg_infinity], {:f, 32}), type)
+          end)
+
+        assert Nx.to_flat_list(got) == expected
+      end
+    end
+
+    test "a FINITE out-of-range value WRAPS — it does not saturate" do
+      # The trap: the same conversion saturates for infinity and wraps for 300.0.
+      # An implementation that clamped everything would pass the test above and
+      # fail here, and vice versa.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.as_type(t.([0.0, 1.9, -1.9, 255.0, 256.0, 300.0, -1.0], {:f, 32}), {:u, 8})
+        end)
+
+      assert Nx.to_flat_list(got) == [0, 1, 255, 255, 0, 44, 255]
+
+      got32 =
+        assert_parity_and_residency(fn t ->
+          Nx.as_type(t.([1.0e10, -1.0e10], {:f, 32}), {:s, 32})
+        end)
+
+      assert Nx.to_flat_list(got32) == [1_410_065_408, -1_410_065_408]
+    end
+
+    test "truncation is toward ZERO, not floor" do
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.as_type(t.([0.0, 1.9, -1.9, 2.5, -2.5], {:f, 32}), {:s, 32})
+        end)
+
+      assert Nx.to_flat_list(got) == [0, 1, -1, 2, -2]
+    end
+
+    test "the extremes, where the exactness argument does the work" do
+      # `int(1.0e10)` is UNDEFINED in GLSL, so the modulo happens in floating
+      # point first and has to be exact. Above 2^55 an f32 is already a multiple
+      # of 2^32 and the answer is 0; below it, the double arithmetic is exact.
+      # 1e15 is the one that would break a naive implementation — it is large
+      # enough to need the wrap and small enough that the answer is not 0.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.as_type(t.([1.0e15, 1.0e20, 1.0e30, 3.0e38, -1.0e20], {:f, 32}), {:s, 32})
+        end)
+
+      assert Nx.to_flat_list(got) == [-1_543_503_872, 0, 0, 0, 0]
+    end
+
+    test "a u8 output that is not a multiple of four" do
+      # Packed four results per word, so a tail that does not fill a word is the
+      # case to get wrong.
+      for len <- [1, 2, 3, 5, 7] do
+        assert_parity_and_residency(fn t ->
+          Nx.as_type(t.(Enum.map(1..len, &(&1 * 1.0)), {:f, 32}), {:u, 8})
+        end)
+      end
+    end
+
+    test "casts TO a float still work, and casts we do not have still fall back" do
+      assert_parity_and_residency(fn t -> Nx.as_type(t.([1.5, 2.5], {:f, 32}), {:f, 64}) end)
+      # s32 -> u8 is an integer-to-integer cast; no shader, still the host.
+      assert_parity(fn t -> Nx.as_type(t.([300, -5], {:s, 32}), {:u, 8}) end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension
