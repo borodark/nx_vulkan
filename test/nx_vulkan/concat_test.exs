@@ -124,6 +124,20 @@ defmodule Nx.Vulkan.ConcatTest do
     # with no clause. Four `Nx.mode/2` doctests caught exactly that. The looser
     # gate does not remove a mixed-backend pair, it moves one downstream where
     # this backend cannot fix it.
+    #
+    # RE-RUN 2026-08-23 and it still fails, which is worth recording because the
+    # conditions had changed enough to make it worth asking: `gather/4` now
+    # rotates off-prefix axes instead of refusing them, and `select/4` now
+    # normalises any numeric predicate. Neither helps. Promoting the operands
+    # still produces `FunctionClauseError ... Nx.BinaryBackend.to_binary/1` on
+    # exactly four `Nx.mode/2` doctests, with a resident `s32[1][5][2]` index
+    # tensor as the argument.
+    #
+    # The reason those six `Nx.mode/2` doctests fall back is NOT this gate. It is
+    # `sort/3`, which is allowlisted with no GPU sort and no plan for one
+    # (MISSION §3.2) — everything downstream of it is on the host as a
+    # consequence, and `concatenate/3` is merely where the census first notices.
+    # Closing them needs a GPU sort, not a looser concat.
     test "mixed residency falls back — promoting operands breaks Nx.gather downstream" do
       a = Nx.tensor([[1.0, 2.0]], backend: VulkanoBackend)
       b = Nx.tensor([[3.0, 4.0]], backend: Nx.BinaryBackend)

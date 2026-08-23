@@ -354,7 +354,8 @@ re-measures instead of re-deriving.
 | complex / FFT | 18 | **decided** — the ISA is real-valued |
 | ~~`dot/7`~~ | 0 | **closed** `fda7fc6` `00cfe3b` — general contraction, then batched matmul |
 | `as_type/2` | 12 | **only 6 are closable** — sized below, and it is not "mechanical" |
-| `select/4`, `concatenate/3` | 16 | mixed-backend operands — read the §1.1 note before touching these gates |
+| ~~`select/4`~~ | 0 | **closed** `bd74e9a` — the gate wanted a u8 mask; any numeric predicate is normalised now |
+| `concatenate/3` | 8 | **blocked behind an allowlisted `sort/3`**, not by the concat gate — see below |
 | `window_reduce/6` | 5 | arbitrary fun — the same argument as `reduce/5`, and probably the same answer |
 | `argmax`/`argmin`, `indexed_add` at narrow or float dtypes | 11 | s64/u32 need Int64; float `indexed_add` needs `GL_EXT_shader_atomic_float` — both **decided** |
 | ~~`bitcast/2`~~ | 0 | **closed** `ab0c761` — one line, exactly as sized |
@@ -404,6 +405,27 @@ is itself UB, so even the wrapping branch cannot be written as a plain cast.
 That is why §1.3 used to call this "mechanical" and should not have. The work is
 small; the trap surface is not. Write the differential test before the shader.
 
+#### `concatenate/3`'s 8 are really `sort/3`'s, and the §1.1 gate still bites
+
+Six of the eight are `Nx.mode/2`. They are registered against `concatenate/3`
+because that is where the census first notices, but the cause is upstream:
+`mode` sorts, `sort/3` is allowlisted with no GPU sort and no plan for one
+(`MISSION.md` §3.2), and **everything downstream of a host fallback computes on
+the host**. `argmax/3` falls back in the same trace for the same reason, and it
+has had a shader since W5.
+
+Loosening the concat gate to promote host operands was **re-tried on
+2026-08-23 and still fails**, which was worth checking because the conditions
+had changed: `gather/4` now rotates off-prefix axes and `select/4` now
+normalises any predicate. Neither helps. Four `Nx.mode/2` doctests still die
+with `FunctionClauseError ... Nx.BinaryBackend.to_binary/1`, handed a resident
+`s32[1][5][2]` index tensor — the exact failure §1.1 describes. The pinned test
+in `test/nx_vulkan/concat_test.exs` carries the re-run and its date.
+
+**So these 8 are not a concat problem and should not be attacked as one.** They
+need a GPU sort, which §3.2 declines on the grounds that a GPU sort is a project
+and the host path is correct. Treat the group as decided until that changes.
+
 #### `bitcast/2` — 2 doctests for one line
 
 Nx raises on mismatched bit widths, so this backend only ever sees a same-width
@@ -425,9 +447,10 @@ all; only the batched half needed shaders and a NIF). What is left:
 
 1. **`as_type/2` float→int (6)** — worth doing, but budget for the saturate/wrap
    split above rather than treating it as a port.
-2. **`select/4`, `concatenate/3` (16)** — the largest group left, and the one
-   with a known trap: read §1.1 before touching those gates.
-3. **`window_reduce/6` (5)** — MEASURE first, see below.
+2. **`window_reduce/6` (5)** — MEASURE first, see below.
+3. Nothing else is both closable and cheap. `concatenate/3`'s 8 are blocked
+   behind an allowlisted `sort/3` (above), and the narrow-dtype groups need
+   `Int64` or 8/16-bit storage.
 
 `window_reduce/6` should be MEASURED the way `reduce/5` was —
 `bench/reduce_fold_vs_host.exs` is committed for exactly this — and allowlisted
