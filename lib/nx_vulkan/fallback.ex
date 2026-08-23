@@ -267,8 +267,13 @@ defmodule Nx.Vulkan.Fallback do
        "per step along the reduced axis, evaluating the fun on resident " <>
        "tensors — was prototyped and measured on super-io: 0.97ms vs 0.19ms at " <>
        "reduce_size 8, 39.8 vs 22.0 at 512, and 441ms vs 37ms at 4096. The gap " <>
-       "widens with the axis because the cost is per-dispatch launch overhead, " <>
-       "and no implementation removes it without assuming the fun is " <>
+       "widens with the axis. The mechanism is NOT launch overhead, though this " <>
+       "entry said so until DTrace measured it (docs/DTRACE_VULKAN_PROFILING.md): " <>
+       "dispatches batch 64 to a command buffer, so 4096 of them are ~64 queue " <>
+       "waits, about 11ms against a measured 441ms. What scales is per-dispatch " <>
+       "WORK - descriptor sets, buffer churn, GPU execution. The conclusion is " <>
+       "unchanged; the reason was wrong. No implementation removes it without " <>
+       "assuming the fun is " <>
        "ASSOCIATIVE (a log2-step tree reduce), which Nx.reduce does not " <>
        "guarantee — it is a left fold. Probing the fun to recognise `add` is " <>
        "the other tempting shortcut and is unsound for the same reason: a fun " <>

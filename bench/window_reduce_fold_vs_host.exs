@@ -55,9 +55,26 @@ end
 # Median of 3. Both arms end with the answer on the host, as in
 # examples/w5_kernels_race.exs — without the readback the GPU arm measures
 # ENQUEUE cost, since dispatches batch up to NXV_BATCH_MAX before submission.
+#
+# THE COLLECT IS NOT TIDINESS. The first version of this file interleaved the
+# two arms per case, and the host arm's `Nx.window_reduce` on BinaryBackend
+# allocates so heavily that its GC pressure landed on the NEXT fold measurement:
+# 512x512 with a 3x3 window reported 41.05 ms interleaved against 9.95 ms
+# measured alone, verified at 3, 20 and 400 iterations so it was not warm-up.
+# That is a 4x error, and in the direction that HIDES the trend the benchmark
+# exists to show — it made the fold look flat in the window size when it is
+# close to linear in it. Forcing a collect before each timed run removes it.
 bench = fn f ->
   f.()
-  xs = for _ <- 1..3, do: (fn -> {us, r} = :timer.tc(f); {us / 1000.0, r} end).()
+  :erlang.garbage_collect()
+
+  xs =
+    for _ <- 1..3 do
+      :erlang.garbage_collect()
+      {us, r} = :timer.tc(f)
+      {us / 1000.0, r}
+    end
+
   sorted = xs |> Enum.map(&elem(&1, 0)) |> Enum.sort()
   {Enum.at(sorted, 1), xs |> List.last() |> elem(1)}
 end
@@ -68,7 +85,10 @@ IO.puts(String.pad_trailing("case", 26) <> String.pad_leading("dispatches", 12) 
         String.pad_leading("verdict", 18))
 IO.puts(String.duplicate("-", 78))
 
-for {rows, cols, w} <- [{64, 64, 2}, {256, 256, 2}, {256, 256, 3}, {512, 512, 3}, {512, 512, 5}, {512, 512, 8}] do
+# 512x512 with an 8x8 window is deliberately absent: its HOST arm is ~120 s per
+# iteration, which is six minutes for one row that only restates the trend. The
+# GT 650M number for it is in the DTrace write-up if it is ever wanted.
+for {rows, cols, w} <- [{64, 64, 2}, {256, 256, 2}, {256, 256, 3}, {512, 512, 3}, {512, 512, 5}] do
   o0 = rows - w + 1
   o1 = cols - w + 1
   data = for i <- 1..(rows * cols), do: rem(i, 17)

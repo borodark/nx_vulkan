@@ -1,5 +1,79 @@
 # DTrace for Vulkan Compute Profiling on FreeBSD
 
+> **STALE BELOW THE QUICK START — corrected 2026-08-23.** Every probe name this
+> document originally gave is dead, and its flagship "profile the full dispatch
+> stack" script does not compile. The advice was written against a C++ shim that
+> no longer exists; the NIF is Rust (Rustler + vulkano) now. Section
+> **"Probes that actually work"** immediately below is the current truth. The
+> rest is kept for the technique, not the symbol names.
+
+## Probes that actually work (verified on mac-247, 2026-08-23)
+
+**`nxv_*` is gone.** `nm priv/native/libnx_vulkan_vulkano.so | grep -c nxv_`
+returns 0. So is `timing_get/0` — no such function anywhere in `lib/` or
+`native/`, so this doc's "use it for routine benchmarking" advice is
+unactionable.
+
+**Loader-level Vulkan probes look usable and are not.** `vkQueueSubmit` and
+`vkWaitForFences` exist in `libvulkan.so.1` and appear in `dtrace -l`, so they
+seem probeable — but ash/vulkano resolves driver pointers through
+`vkGetDeviceProcAddr` and calls the ICD directly, bypassing the loader. Probing
+them records **zero events**. They also have no `:return` probes (tail-call
+trampolines), which is why the script further down fails to compile at its first
+line. And the code never waits on a fence at all: it uses `queue.wait_idle()`,
+i.e. `vkQueueWaitIdle`.
+
+Use these instead. All are local `t` symbols — **this works only because the
+release build is unstripped**; the `.so` exports just `nif_init` dynamically, so
+adding `strip = true` to the release profile would delete every probe here.
+
+| phase | probe glob |
+|---|---|
+| record one dispatch | `_ZN17nx_vulkan_vulkano16enqueue_dispatch17h*` (6 monomorphisations) |
+| one submission | `_ZN17nx_vulkan_vulkano15submit_and_wait17h*` |
+| submit + wait pair | `_ZN17nx_vulkan_vulkano17finish_and_disarm17h*` |
+| **submit** | `*CommandBufferExecFuture*5flush17h*` |
+| **queue wait** | `*QueueState9wait_idle17h*` |
+
+Both of the last two have `:entry` and `:return`. `doas dtrace` is passwordless
+on the fleet.
+
+## What the breakdown actually says
+
+Measured on the GT 650M while running `bench/window_reduce_fold_vs_host.exs`:
+
+| per submission | batch=64, 512² 3×3 | batch=0, 512² 3×3 | batch=0, 64² 2×2 |
+|---|---|---|---|
+| dispatches / submission | **18.0** | 1.0 | 1.0 |
+| build cmdbuf | 148.9 µs | 16.8 µs | 15.6 µs |
+| **submit** | 46.7 µs | 11.6 µs | **10.9 µs** |
+| **queue wait** | **7281.6 µs (96.7%)** | **489.8 µs (92.3%)** | **127.2 µs (75.1%)** |
+| total `submit_and_wait` | 7531 µs | 531 µs | **169.5 µs** |
+
+Recording a dispatch *without* submitting costs **4.5 µs**.
+
+**The fixed floor is ~170 µs per submission and it is three-quarters queue-wait.
+But it is charged per SUBMISSION, not per dispatch** — `enqueue_dispatch`
+batches up to `NXV_BATCH_MAX` (64) into one command buffer, and a 3×3 window
+fold's 18 dispatches were measured riding in a single queue wait. Disabling
+batching entirely costs 1.4×, not the order of magnitude a pure launch-overhead
+model predicts.
+
+**That matters because it corrects a recorded belief.** `{:reduce, 5}`'s
+allowlist entry attributes its loss to "per-dispatch launch overhead". At
+`reduce_size` 4096 that would be 4096/64 = 64 submissions ≈ 11 ms of queue wait
+against a measured 441 ms — under 3%. The conclusion stands (the host wins) but
+the mechanism does not: what scales is per-dispatch WORK — descriptor sets,
+buffer churn, GPU execution — not launch cost.
+
+**Two cautions.** DTrace is not free at this rate: probing all six
+`enqueue_dispatch` monomorphisations plus submit and wait took 512² 3×3 from
+10.4 ms to 16.9 ms per fold, about 60%. Aggregates stay sound; wall-clock taken
+*during* tracing does not. And profiling a benchmark that interleaves two arms
+can mislead — see the GC note in `bench/window_reduce_fold_vs_host.exs`.
+
+---
+
 ## Why DTrace
 
 FreeBSD ships DTrace in the base system — no packages, no kernel
@@ -101,6 +175,11 @@ tick-10s { printa(@submit); exit(0); }
 ```
 
 ### Profile the full dispatch stack
+
+> **This script does NOT compile.** `vkQueueSubmit:return` matches no probes
+> (tail-call trampoline), and the `nxv_*` and loader-level entry probes never
+> fire. Kept to show the shape; substitute the working globs from the top of
+> this file.
 
 ```sh
 doas dtrace -p $BEAM_PID -n '
