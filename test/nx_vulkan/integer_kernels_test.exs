@@ -815,6 +815,52 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "stack — routed to concatenate, not a kernel" do
+    test "every axis, including the new trailing one" do
+      m = fn t -> Nx.reshape(t.([1, 2, 3, 4], {:s, 32}), {2, 2}) end
+      n = fn t -> Nx.reshape(t.([5, 6, 7, 8], {:s, 32}), {2, 2}) end
+
+      for axis <- [0, 1, 2] do
+        assert_parity_and_residency(fn t -> Nx.stack([m.(t), n.(t)], axis: axis) end)
+      end
+    end
+
+    test "scalars, vectors and rank 3" do
+      assert_parity_and_residency(fn t ->
+        Nx.stack([t.(1, {:s, 32}), t.(2, {:s, 32}), t.(3, {:s, 32})])
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.stack([t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32})], axis: 1)
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.stack(
+          [
+            Nx.reshape(t.(Enum.to_list(1..8), {:s, 32}), {2, 2, 2}),
+            Nx.reshape(t.(Enum.to_list(9..16), {:s, 32}), {2, 2, 2})
+          ],
+          axis: 1
+        )
+      end)
+    end
+
+    test "more than two operands" do
+      assert_parity_and_residency(fn t ->
+        Nx.stack([t.([1, 2], {:s, 32}), t.([3, 4], {:s, 32}), t.([5, 6], {:s, 32})], axis: 1)
+      end)
+    end
+
+    test "MIXED operand types are coerced on the device" do
+      # Nx merges the types before dispatch, so an operand can arrive narrower
+      # than out.type. coerce_to/2 casts it here rather than sending the whole
+      # stack to the host — the same thing BinaryBackend's own as_type call does.
+      assert_parity_and_residency(fn t ->
+        Nx.stack([t.([1, 2], {:s, 32}), t.([3.0, 4.0], {:f, 32})])
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

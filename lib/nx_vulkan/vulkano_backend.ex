@@ -2224,15 +2224,51 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # everything to BinaryBackend, stack there, return on BinaryBackend.
   # `tensors` is a LIST despite the singular `tensor` in the @callback
   # signature.
+  # stack/3 is `concatenate/3` with a size-1 axis inserted first, and that is not
+  # an approximation — it is exactly what Nx.BinaryBackend does
+  # (`Tuple.insert_at(shape, axis, 1)` then `bin_concatenate`). It arrives here
+  # with the ORIGINAL tensors, so the insert is this backend's job.
+  #
+  # Which makes this pure routing rather than a kernel: `reshape/2` here is
+  # metadata only (same buffer, new shape), and `concatenate/3` has had a shader
+  # since `concat_nd` — a byte append at axis 0, the index-remap kernel above it.
+  # The op was transferring wholesale to the host for want of two lines.
+  #
+  # Types are merged by Nx before dispatch, so an operand can arrive narrower
+  # than `out.type`; `coerce_to/2` casts it on the device, and returns nil when
+  # no cast shader covers the pair, which sends the whole thing to the host.
+  # That mirrors what BinaryBackend does with its own `as_type` call.
   @impl true
-  def stack(out, tensors, axis) do
+  def stack(%T{type: type} = out, tensors, axis) do
+    lifted =
+      Enum.reduce_while(tensors, [], fn t, acc ->
+        t = ensure_on_backend(t)
+
+        case coerce_to(t, type) do
+          %T{shape: shape} = ct ->
+            {:cont, [Nx.reshape(ct, Tuple.insert_at(shape, axis, 1)) | acc]}
+
+          _ ->
+            {:halt, nil}
+        end
+      end)
+
+    case lifted do
+      nil ->
+        stack_host_fallback(out, tensors, axis)
+
+      list ->
+        concatenate(out, Enum.reverse(list), axis)
+    end
+  end
+
+  defp stack_host_fallback(out, tensors, axis) do
     bins =
       Enum.map(tensors, fn t ->
         Nx.backend_transfer(ensure_on_backend(t), Nx.BinaryBackend)
       end)
 
-    result = Nx.stack(bins, axis: axis)
-    host_result(out, result)
+    host_result(out, with_binary_backend(fn -> Nx.stack(bins, axis: axis) end), {:stack, 3})
   end
 
   # gather: pick elements at given index tuples. Underpins take/

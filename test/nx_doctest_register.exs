@@ -16,8 +16,8 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **670 of 833 doctests (80.4%) run with host fallbacks refused**, of which
-  **659 (79.1%) are genuinely device-resident**. The 11-doctest gap is
+  **675 of 833 doctests (81.0%) run with host fallbacks refused**, of which
+  **664 (79.7%) are genuinely device-resident**. The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -27,6 +27,18 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `stack/3` routed to `concatenate/3` — no kernel at all (+5)
+
+  670/833 -> 675/833 for two lines of routing. `Nx.BinaryBackend` implements
+  stack as `Tuple.insert_at(shape, axis, 1)` followed by `bin_concatenate`, and
+  this backend already had both halves: `reshape/2` is metadata only, and
+  `concatenate/3` has had a shader since `concat_nd`. The callback arrives with
+  the ORIGINAL tensors, so inserting the axis is the backend's job — and that was
+  the entire gap.
+
+  Worth remembering when scoring the rest of §1.3: the cheapest item on the board
+  was not a missing capability but an op that never asked for the one it had.
 
   ## `dot` — the s32 matmul, and why W5 T3 was worth 4 rather than 17 (+6)
 
@@ -264,7 +276,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 163 listed ones step aside so the remaining 670
+  `NXV_HOST_FALLBACK=raise` the 158 listed ones step aside so the remaining 675
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -294,7 +306,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 92 doctests, down from 357 before W5.
+  # 87 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -351,7 +363,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.remainder/2", [249]},
     {"Nx.select/3", [336, 337, 338, 339, 344, 345, 346]},
     {"Nx.slice_along_axis/4", [683]},
-    {"Nx.stack/2", [725, 726, 727, 728, 729]},
     {"Nx.subtract/2", [233]},
     {"Nx.sum/2", [466, 467]},
     {"Nx.take/3", [692, 693, 694, 695, 696, 697]},
