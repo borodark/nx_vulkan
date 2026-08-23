@@ -42,6 +42,25 @@ alias Nx.BinaryBackend, as: B
 {:ok, dev, kind} = Nx.Vulkan.NativeV.device_name()
 IO.puts("\ndevice: #{dev} (#{kind})")
 
+# Load average, sampled around every race. A box that is busy with someone
+# else's work produces numbers that look like hardware findings and are not:
+# a first run of this file on mac-247 reported `sum` at 251 ms while `argmax`
+# and `all` — SAME NIF, same shape, same dispatch — came in at 0.9 and 2.4. No
+# hardware story explains that, and the box had an eXMC build on it. Sampling
+# the load makes contamination visible instead of leaving it to be argued about.
+loadavg = fn ->
+  case System.cmd("uptime", []) do
+    {out, 0} ->
+      case Regex.run(~r/average[s]?:\s*([0-9.]+)/, out) do
+        [_, v] -> String.to_float(v)
+        _ -> 0.0
+      end
+
+    _ ->
+      0.0
+  end
+end
+
 host = System.cmd("hostname", ["-s"]) |> elem(0) |> String.trim()
 commit = System.cmd("git", ["rev-parse", "--short", "HEAD"]) |> elem(0) |> String.trim()
 
@@ -72,10 +91,12 @@ end
 
 race = fn label, iters, gpu_thunk, host_thunk ->
   IO.write("  #{label} ... ")
+  load_before = loadavg.()
   {g, gmin, gmax} = bench.(gpu_thunk, iters)
   {h, hmin, hmax} = bench.(host_thunk, iters)
+  load_after = loadavg.()
   spread = if g > 0, do: (gmax - gmin) / g * 100, else: 0.0
-  IO.puts("gpu #{Float.round(g, 2)}ms  host #{Float.round(h, 2)}ms  #{Float.round(h / g, 2)}x")
+  IO.puts("gpu #{Float.round(g, 2)}ms  host #{Float.round(h, 2)}ms  #{Float.round(h / g, 2)}x  load #{load_before}->#{load_after}")
 
   %{
     op: label,
@@ -83,7 +104,9 @@ race = fn label, iters, gpu_thunk, host_thunk ->
     host_ms: Float.round(h, 3),
     speedup: Float.round(h / g, 2),
     gpu_spread_pct: Float.round(spread, 1),
-    host_spread_pct: Float.round((hmax - hmin) / h * 100, 1)
+    host_spread_pct: Float.round((hmax - hmin) / h * 100, 1),
+    load_before: load_before,
+    load_after: load_after
   }
 end
 
@@ -202,9 +225,15 @@ IO.puts(String.pad_trailing("op", 34) <> String.pad_leading("gpu ms", 10) <>
         String.pad_leading("gpu±%", 8) <> String.pad_leading("host±%", 8))
 IO.puts(String.duplicate("-", 81))
 
+busy = Enum.any?(results, &(&1.load_after > 1.5))
+
 for r <- results do
+  # A "regression" measured on a loaded box is not a finding. Say so on the row
+  # rather than letting the word REGRESSION stand unqualified.
   flag = cond do
+    r.speedup < 1.0 and r.load_after > 1.5 -> "  <-- slower, BUT load #{r.load_after} — RE-RUN IDLE"
     r.speedup < 1.0 -> "  <-- REGRESSION"
+    r.gpu_spread_pct > 50.0 -> "  (noisy: ±#{r.gpu_spread_pct}%)"
     r.speedup < 1.5 -> "  (marginal)"
     true -> ""
   end
@@ -223,7 +252,14 @@ path = "bench_results/w5_race_#{host}_#{commit}.json"
 File.write!(path, Jason.encode_to_iodata!(%{
   host: host, commit: commit, device: dev, device_kind: kind,
   replicates: 5, note: "median of 5; both arms end with the answer on the host",
+  box_was_busy: busy,
   results: results
 }, pretty: true))
+
+if busy do
+  IO.puts("\n*** THIS BOX WAS NOT IDLE. Load exceeded 1.5 during the run, so every")
+  IO.puts("*** number above is suspect and any regression is unproven. Re-run when")
+  IO.puts("*** `uptime` is quiet before drawing a conclusion from it.")
+end
 
 IO.puts("\nwrote #{path}")
