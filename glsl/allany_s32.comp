@@ -10,15 +10,21 @@
 // TWO THINGS DIFFER from the reduce shaders it borrows from.
 //
 // The OUTPUT IS u8, not the input type. Nx types `all`/`any` as {:u, 8}
-// whatever went in, so this writes packed u32 words — 4 results per word, the
-// same trick compare_*.comp uses — and ONE THREAD COVERS FOUR OUTPUT SLOTS
-// rather than one. The caller pads the output buffer to a 4-byte multiple.
+// whatever went in, so this writes packed u32 words — 4 results per word — and
+// the caller pads the output buffer to a 4-byte multiple.
 //
-// That makes the dispatch geometry deliberately loose: `reduce_axis/7` launches
-// ceil(outer*inner / 256) threads, which is 4x more than the ceil(nwords / 256)
-// this needs. The surplus threads return at the bounds guard. Reusing the NIF
-// is worth the idle threads; a dedicated one would exist only to divide by
-// four.
+// ONE THREAD PER OUTPUT SLOT, and the packing is done with `atomicOr` rather
+// than by giving each thread four slots. The first version did the latter, on
+// the theory that the wasted threads were cheap. They were not: raced against
+// `sum` and `argmax` on the identical shape (512x512, axis 1, s32, mac-248),
+// this shader took 12.54 ms against their 3.94 and 3.97 — 3.2x slower for the
+// same 262144 elements read. Four slots per thread means 4x the serial work AND
+// a quarter of the parallelism, and both hurt.
+//
+// `atomicOr` is core GLSL 4.30 and needs no extension. The output buffer
+// arrives ZEROED from `buf_alloc`, so a false result writes nothing and only
+// the true bits need setting — no clearing pass, and the four threads sharing a
+// word contend only when they are actually true.
 //
 // Truthiness is `!= 0`, which is what Nx means by it. Note that NaN is
 // therefore TRUTHY — `NaN != 0.0` is true in IEEE and BinaryBackend agrees, so
@@ -28,7 +34,7 @@
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer A { int a[]; };
-layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+layout(std430, binding = 1) buffer O { uint o[]; };
 
 layout(push_constant) uniform Push {
     uint outer;
@@ -42,33 +48,27 @@ bool truthy(uint i) {
 }
 
 void main() {
-    uint word = gl_GlobalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
     uint slots = p.outer * p.inner;
-    uint nwords = (slots + 3u) / 4u;
-    if (word >= nwords) return;
+    if (gid >= slots) return;
 
     bool is_any = (p.op == 1u);
 
-    uint packed = 0u;
-    for (uint j = 0u; j < 4u; ++j) {
-        uint gid = word * 4u + j;
-        if (gid >= slots) break;
+    uint outr = gid / p.inner;
+    uint inr = gid % p.inner;
+    uint base = outr * p.reduce_size * p.inner + inr;
 
-        uint outr = gid / p.inner;
-        uint inr = gid % p.inner;
-        uint base = outr * p.reduce_size * p.inner + inr;
-
-        // `all` starts true and is cleared by a falsy element; `any` starts
-        // false and is set by a truthy one. An empty reduce keeps the seed,
-        // which is the standard identity for both.
-        bool acc = !is_any;
-        for (uint r = 0u; r < p.reduce_size; ++r) {
-            bool v = truthy(base + r * p.inner);
-            acc = is_any ? (acc || v) : (acc && v);
-        }
-
-        packed |= (acc ? 1u : 0u) << (j * 8u);
+    // `all` starts true and is cleared by a falsy element; `any` starts false
+    // and is set by a truthy one. An empty reduce keeps the seed, which is the
+    // standard identity for both.
+    bool acc = !is_any;
+    for (uint r = 0u; r < p.reduce_size; ++r) {
+        bool v = truthy(base + r * p.inner);
+        acc = is_any ? (acc || v) : (acc && v);
     }
 
-    o[word] = packed;
+    // Zeroed buffer, so only a true result has anything to write.
+    if (acc) {
+        atomicOr(o[gid >> 2u], 1u << ((gid & 3u) * 8u));
+    }
 }
