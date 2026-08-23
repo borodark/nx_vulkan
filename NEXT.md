@@ -1,14 +1,14 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-22, against `main` @ `9fc58f5`, with **W5 done and
-pushed** — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
+**Refreshed:** 2026-08-22, against `main` @ `f0d9c96`, with **W5 done, pushed,
+and verified across the whole fleet** (§1.4) — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
 W1–W5 are all closed. §1.2 is the write-up; §1.3 is what to do next and is
 measured against the current tree rather than inherited from `MISSION.md` §7,
 whose ranking W5's own census showed to be built on numbers that do not mean
 what they look like.
 
-**Everything is pushed and the tree is clean.** `origin/main` is at `9fc58f5`.
+**Everything is pushed and the tree is clean.** `origin/main` is at `f0d9c96`.
 The 2026-08-17 reboot came and went without incident: the driver is matched at
 **580.178.04** on both sides and `device_name()` is the 3060 Ti (§5).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
@@ -34,8 +34,9 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `9fc58f5` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany` |
-| `origin/main` | `9fc58f5` | **level — nothing unbacked** |
+| `HEAD` / local `main` | `f0d9c96` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany` |
+| `origin/main` | `f0d9c96` | **level — nothing unbacked** |
+| mac-247, mac-248 | `f0d9c96` | **level — both re-verified, §1.4** |
 | `upstream/main` | `6ab64ac` | **59 behind** |
 
 Push with `git push origin main` — **not** `upstream`, which is the public
@@ -119,12 +120,15 @@ strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
-**The register was portable, and that has not been re-checked since W4.** It was
-measured on super-io (Ampere/Linux) and reproduced byte-identically on mac-247
-(Kepler/FreeBSD) — same 524 at W2, same 496 at W1, same 488 at W3. The gates
-really are dtype/shape logic. **But `concat_nd` and all sixteen of W5's shaders
-have only ever run on Ampere**, which is the largest untested delta the register
-has carried; see §2. The one exception found so far is **llvmpipe**, where
+**The register is portable, and W5 is the hardest test it has passed.** It was
+measured on super-io (Ampere/Linux) and reproduces byte-identically on mac-247
+(Kepler GT 650M) and mac-248 (Kepler GT 750M), both FreeBSD — same 524 at W2,
+496 at W1, 488 at W3, and now **the same 670 / 833 (80.4%) on all three boxes at
+`f0d9c96`**, with pass B failing exactly 163 and the script exiting 0 everywhere.
+Sixteen new shaders, integer wrap semantics, `atomicAdd`, NaN ordering and 16×16
+tiling all reproduce unchanged across two GPU generations and two operating
+systems. The gates really are dtype/shape logic. The one exception found so far
+is **llvmpipe**, where
 `Nx.sum` on `{:u, 8}` returns 0 and three doctests plus three `select` tests fail
 on value; if a run reports one extra fallback, check `device_name()` before
 touching the register.
@@ -355,6 +359,40 @@ re-measures instead of re-deriving.
 `window_reduce/6` should be measured the way `reduce/5` was, and allowlisted if
 it loses. Do not write that kernel on principle.
 
+### 1.4 The fleet re-verification, and the one thing it caught
+
+Run on 2026-08-22 at `f0d9c96`, after W5 had gone nine commits on Ampere alone.
+Both Keplers were rebuilt from scratch (`rm -rf _build`, ~2–4 min for the Rust
+crate) and read **exactly** what super-io does:
+
+| | super-io (RTX 3060 Ti) | mac-247 (GT 650M) | mac-248 (GT 750M) |
+|---|---|---|---|
+| `mix test` | 833 / 589 / 0 | 833 / 589 / 0 | 833 / 589 / 0 |
+| `strict_test.sh` | 0 failures, 237 excluded | same | same |
+| `doctest_residency.sh` | 670 / 833 (80.4%) | same | same |
+
+**It caught one defect, and it was in a test rather than a kernel.**
+`integer_kernels_test.exs` compared every result to `Nx.BinaryBackend` with
+exact list equality. `Nx.sqrt` of an s32 `9` is exactly `3.0` on Ampere and
+`3.000000238418579` on both Keplers — and **neither is wrong**: Vulkan permits
+`sqrt` up to 3 ULP of error, and Kepler spends that budget where Ampere does
+not. The test was asserting a hardware property it had no business asserting.
+
+Fixed in `f0d9c96` by splitting the helper along the line this file actually
+tests against: **integers exact, floats within eps.** On integers there is no
+eps — the GPU and BinaryBackend either agree bit-for-bit or one of them is
+wrong, which is what makes every wrap and sign-convention trap checkable at all.
+On floats the GPU is allowed to differ, and Vulkan says by how much.
+
+Worth generalising, because it is the mirror image of the perf lesson in §5:
+**a float assertion written on one box is a hardware claim until it has run on
+another.** 62 tests passed on super-io, 61 on the Keplers, and the one that did
+not was the suite's fault.
+
+Note both Keplers agreed with each other exactly, including on the sqrt value —
+so this is a *generation* difference, not per-card noise, unlike the ±11–13%
+timing dispersion mac-248 shows on perf work.
+
 ### W4 is done — and it went by routing, not by allowlisting
 
 All 21 `Nx.Block.*` structs in nx 0.13 are now decided. The twelve split
@@ -455,7 +493,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
 | ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| **Re-verify on mac-247** | **now the most overdue item.** Not run since W4 — `concat_nd` and the WHOLE of W5 (16 shaders, 9 commits) are super-io-only measurements. The register has been portable at every previous checkpoint, but 16 new kernels is the largest untested delta it has ever carried | anyone with the Kepler |
+| ~~Re-verify on mac-247~~ | **done 2026-08-22 at `f0d9c96`, and on mac-248 too.** Both Keplers report 670/833 (80.4%), 833/589/0, 237 excluded — identical to super-io. It found one real defect, in a test rather than a kernel: see §1.4 | |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -601,8 +639,8 @@ time.
 
 ```sh
 # suite: 833 doctests, 589 tests, 0 failures.
-# Last measured on super-io at 9fc58f5. mac-247 has NOT been re-run since W4 —
-# the whole of W5 is a super-io-only measurement. See §2.
+# Measured at f0d9c96 on ALL THREE boxes — super-io (Ampere/Linux), mac-247 and
+# mac-248 (Kepler/FreeBSD) — identical to the digit. See §1.4.
 mix test
 
 # strict — did the work stay on the GPU?
