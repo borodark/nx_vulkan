@@ -1,0 +1,171 @@
+{
+  "device": "NVIDIA GeForce GT 650M",
+  "host": "mac",
+  "commit": "8d9d23e",
+  "results": [
+    {
+      "op": "add s32 n=4096",
+      "load_before": 0.69,
+      "load_after": 0.58,
+      "gpu_ms": 71.095,
+      "host_ms": 1.27,
+      "speedup": 0.02,
+      "gpu_spread_pct": 293.5,
+      "host_spread_pct": 2.2
+    },
+    {
+      "op": "add s32 n=262144",
+      "load_before": 0.58,
+      "load_after": 0.85,
+      "gpu_ms": 0.946,
+      "host_ms": 119.412,
+      "speedup": 126.22,
+      "gpu_spread_pct": 32.6,
+      "host_spread_pct": 1.8
+    },
+    {
+      "op": "add s32 n=1048576",
+      "load_before": 0.85,
+      "load_after": 1.33,
+      "gpu_ms": 5.113,
+      "host_ms": 626.608,
+      "speedup": 122.55,
+      "gpu_spread_pct": 21.5,
+      "host_spread_pct": 2.7
+    },
+    {
+      "op": "greater s32 n=262144",
+      "load_before": 1.33,
+      "load_after": 1.46,
+      "gpu_ms": 2.959,
+      "host_ms": 120.538,
+      "speedup": 40.74,
+      "gpu_spread_pct": 11.3,
+      "host_spread_pct": 1.7
+    },
+    {
+      "op": "select s32 n=262144",
+      "load_before": 1.46,
+      "load_after": 1.5,
+      "gpu_ms": 1.158,
+      "host_ms": 115.026,
+      "speedup": 99.34,
+      "gpu_spread_pct": 14.8,
+      "host_spread_pct": 2.0
+    },
+    {
+      "op": "sum s32 512x512 axis 1",
+      "load_before": 1.5,
+      "load_after": 1.62,
+      "gpu_ms": 1.054,
+      "host_ms": 102.864,
+      "speedup": 97.58,
+      "gpu_spread_pct": 6.3,
+      "host_spread_pct": 5.9
+    },
+    {
+      "op": "sum s32 1024x1024 axis 1",
+      "load_before": 1.62,
+      "load_after": 1.69,
+      "gpu_ms": 3.111,
+      "host_ms": 445.682,
+      "speedup": 143.27,
+      "gpu_spread_pct": 6.5,
+      "host_spread_pct": 0.4
+    },
+    {
+      "op": "window_sum f32 512x512 {3,3}",
+      "load_before": 1.69,
+      "load_after": 1.31,
+      "gpu_ms": 243.971,
+      "host_ms": 2818.652,
+      "speedup": 11.55,
+      "gpu_spread_pct": 125.9,
+      "host_spread_pct": 31.0
+    },
+    {
+      "op": "window_sum f32 PADDED :same",
+      "load_before": 1.31,
+      "load_after": 1.47,
+      "gpu_ms": 3.14,
+      "host_ms": 2615.334,
+      "speedup": 832.91,
+      "gpu_spread_pct": 329.5,
+      "host_spread_pct": 2.2
+    },
+    {
+      "op": "indexed_put s32 n=262144 k=8192",
+      "load_before": 1.47,
+      "load_after": 1.47,
+      "gpu_ms": 2.303,
+      "host_ms": 25.387,
+      "speedup": 11.03,
+      "gpu_spread_pct": 50.7,
+      "host_spread_pct": 9.6
+    },
+    {
+      "op": "indexed_add s32 n=262144 k=8192",
+      "load_before": 1.47,
+      "load_after": 1.47,
+      "gpu_ms": 2.646,
+      "host_ms": 29.257,
+      "speedup": 11.06,
+      "gpu_spread_pct": 8.6,
+      "host_spread_pct": 2.7
+    },
+    {
+      "op": "argmax s32 512x512 axis 1",
+      "load_before": 1.47,
+      "load_after": 1.59,
+      "gpu_ms": 4.405,
+      "host_ms": 113.426,
+      "speedup": 25.75,
+      "gpu_spread_pct": 20.3,
+      "host_spread_pct": 3.0
+    },
+    {
+      "op": "all s32 512x512 axis 1",
+      "load_before": 1.59,
+      "load_after": 1.59,
+      "gpu_ms": 4.081,
+      "host_ms": 102.338,
+      "speedup": 25.07,
+      "gpu_spread_pct": 7.6,
+      "host_spread_pct": 2.2
+    },
+    {
+      "op": "dot s32 128x128",
+      "load_before": 1.59,
+      "load_after": 1.61,
+      "gpu_ms": 1.929,
+      "host_ms": 675.48,
+      "speedup": 350.17,
+      "gpu_spread_pct": 31.2,
+      "host_spread_pct": 1.7
+    },
+    {
+      "op": "dot s32 256x256",
+      "load_before": 1.61,
+      "load_after": 1.54,
+      "gpu_ms": 6.916,
+      "host_ms": 9541.647,
+      "speedup": 1379.71,
+      "gpu_spread_pct": 10.9,
+      "host_spread_pct": 19.8
+    },
+    {
+      "op": "dot s32 512x512",
+      "load_before": 1.54,
+      "load_after": 1.73,
+      "gpu_ms": 238.966,
+      "host_ms": 90541.479,
+      "speedup": 378.89,
+      "gpu_spread_pct": 679.4,
+      "host_spread_pct": 7.2
+    }
+  ],
+  "device_kind": "DiscreteGpu",
+  "replicates": 5,
+  "note": "median of 5; both arms end with the answer on the host",
+  "box_was_busy": true
+}
