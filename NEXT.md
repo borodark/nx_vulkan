@@ -1,16 +1,17 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-23, against `main` @ `580e2db`. **W5 is done, pushed and
-verified across the whole fleet** (§1.4), and two follow-on gate widenings —
-`stack/3` routed to `concatenate/3`, `gather/4` rotating its axes — have taken
-residency past 82% — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
+**Refreshed:** 2026-08-23, against `main` @ `00cfe3b`. **W5 is done and five
+follow-on items have landed on top of it** — `stack/3` routing, `gather/4` axis
+rotation, `bitcast/2`, the general contraction and the batched matmul — taking
+residency to **83.9%** and closing `dot/7` entirely. All of it is
+**verified across the whole fleet** (§1.4) — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
 W1–W5 are all closed. §1.2 is the write-up; §1.3 is what to do next and is
 measured against the current tree rather than inherited from `MISSION.md` §7,
 whose ranking W5's own census showed to be built on numbers that do not mean
 what they look like.
 
-**Everything is pushed and the tree is clean.** `origin/main` is at `580e2db`.
+**Everything is pushed and the tree is clean.** `origin/main` is at `00cfe3b`.
 The 2026-08-17 reboot came and went without incident: the driver is matched at
 **580.178.04** on both sides and `device_name()` is the 3060 Ti (§5).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
@@ -36,9 +37,9 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `580e2db` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany`, `stack`, `gather` |
-| `origin/main` | `580e2db` | **level — nothing unbacked** |
-| mac-247, mac-248 | `18f131d` | verified at `f0d9c96`, raced at `18f131d`; §1.4 |
+| `HEAD` / local `main` | `00cfe3b` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany`, `stack`, `gather`, `bitcast`, tensordot |
+| `origin/main` | `00cfe3b` | **level — nothing unbacked** |
+| mac-247, mac-248 | `00cfe3b` | **level — both re-verified at `00cfe3b`, §1.4** |
 | `upstream/main` | `6ab64ac` | **59 behind** |
 
 Push with `git push origin main` — **not** `upstream`, which is the public
@@ -106,20 +107,21 @@ current tree, not from §7's table.
 | **`concat_nd`** — axis > 0 concatenate | **done** `c9b1a31` — not a W item; W4's census found it |
 | **W5** — integer kernels | **done** `828ae14`…`9fc58f5`, nine commits — see §1.2. 47.2% → 80.4% |
 | **`scatter`, `argreduce`, `allany`** | **done** — not W items; W5's census found all three |
-| **`stack`, `gather` rotation** | **done** `1feed9a` `580e2db` — both pure gate widenings, no new shader |
+| **`stack`, `gather`, `bitcast`** | **done** `1feed9a` `580e2db` `ab0c761` — three gate widenings, no new shader between them |
+| **tensordot** | **done** `fda7fc6` `00cfe3b` — general contraction, then batched matmul. **`dot/7` is entirely closed** |
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 687 / 833 (82.5%) run with host fallbacks refused
-#   (676 / 833, 81.2%, device-resident — see §1.2 on the 11-doctest gap)
+#=> doctest Nx residency: 699 / 833 (83.9%) run with host fallbacks refused
+#   (688 / 833, 82.6%, device-resident — see §1.2 on the 11-doctest gap)
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 146 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 134 doctests that still leave the GPU,
 in four reason-bucketed lists; `test_helper.exs` applies it only when fallbacks
 are being refused, so a normal `mix test` still runs and asserts all 833. The
 strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
-518 (`concat_nd`), 237 across W5 and **220** after `stack` and `gather`. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
+518 (`concat_nd`), 237 across W5 and **208** after the follow-on items. CI runs the script as its own step. See `MISSION.md` §2.3 for what was built and the one departure
 from the plan (ExUnit's `doctest :except` is function-granularity; using it
 would have dropped 154 *resident* doctests and reported 165/843).
 
@@ -132,18 +134,19 @@ Sixteen new shaders, integer wrap semantics, `atomicAdd`, NaN ordering and 16×1
 tiling all reproduce unchanged across two GPU generations and two operating
 systems. The gates really are dtype/shape logic.
 
-**`stack` and `gather` have not been through that** — they landed after the fleet
-check and are super-io-only, so the fleet's last agreed figure is 670 and this
-file's headline is 687. Both are pure gate widenings on kernels the Keplers
-already ran, so the risk is lower than W5's sixteen new shaders were; re-verify
-anyway before the next release. The one exception found so far
+**Re-verified again at `00cfe3b`**, after `stack`, `gather`, `bitcast`, the
+general contraction and the batched matmul: both Keplers rebuilt from scratch
+report **699 / 833 (83.9%)**, 833/609/0, 208 excluded — identical to super-io
+and to each other, with the script exiting 0 everywhere. That run carried the
+first new NIF since `scatter` (`matmul_batched/8`), which is why it was rebuilt
+rather than incrementally compiled. The one exception found so far
 is **llvmpipe**, where
 `Nx.sum` on `{:u, 8}` returns 0 and three doctests plus three `select` tests fail
 on value; if a run reports one extra fallback, check `device_name()` before
 touching the register.
 
 **Every item since W2 has been measured with it, and it has worked every time.**
-The rate moved 319 → 347 → 355 → 385 → 398 → 670 → 687, and every time the ratchet
+The rate moved 319 → 347 → 355 → 385 → 398 → 670 → 699, and every time the ratchet
 failed the build on stale entries and named every one — including twice when the
 ordinals renumbered wholesale and the repair was a paste rather than an
 investigation. That is the loop this project was missing.
@@ -343,18 +346,18 @@ re-measures instead of re-deriving.
 
 ### 1.3 What is left, and what it is actually made of
 
-146 doctests still refuse, and **the biggest single group is not work**:
+134 doctests still refuse, and **the biggest single group is not work**:
 
 | group | doctests | state |
 |---|---:|---|
 | f64 transcendentals + `atan2` | 41 | **decided** — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`/`Atan2` |
 | complex / FFT | 18 | **decided** — the ISA is real-valued |
-| `dot/7` batched + higher-rank | 11 | needs a real **tensordot** generalisation; helps floats equally |
+| ~~`dot/7`~~ | 0 | **closed** `fda7fc6` `00cfe3b` — general contraction, then batched matmul |
 | `as_type/2` | 12 | **only 6 are closable** — sized below, and it is not "mechanical" |
 | `select/4`, `concatenate/3` | 16 | mixed-backend operands — read the §1.1 note before touching these gates |
 | `window_reduce/6` | 5 | arbitrary fun — the same argument as `reduce/5`, and probably the same answer |
 | `argmax`/`argmin`, `indexed_add` at narrow or float dtypes | 11 | s64/u32 need Int64; float `indexed_add` needs `GL_EXT_shader_atomic_float` — both **decided** |
-| `bitcast/2` | 2 | **one line** — see below |
+| ~~`bitcast/2`~~ | 0 | **closed** `ab0c761` — one line, exactly as sized |
 | narrow dtypes (s8/s16/s64/u32) elsewhere | ~15 | needs Int64 or 8/16-bit storage; **check the Kepler fleet before assuming** |
 
 #### `as_type/2` sized — 6 closable, not 12, and three traps
@@ -416,12 +419,15 @@ had. Found while sizing `as_type`, which is the argument for sizing.
 
 #### Ranked by value over effort
 
-1. **`bitcast/2` (2)** — one line, no shader. Take it opportunistically.
-2. **`dot/7` tensordot (11)** — the largest closable group, and the last
-   structural gap in the dot path. Batched and higher-rank contractions; helps
-   floats exactly as much as integers.
-3. **`as_type/2` float→int (6)** — worth doing, but budget for the
-   saturate/wrap split above rather than treating it as a port.
+Both of the first two below have since been done — `bitcast` in one line as
+sized, and tensordot in two commits (the general contraction needed no kernel at
+all; only the batched half needed shaders and a NIF). What is left:
+
+1. **`as_type/2` float→int (6)** — worth doing, but budget for the saturate/wrap
+   split above rather than treating it as a port.
+2. **`select/4`, `concatenate/3` (16)** — the largest group left, and the one
+   with a known trap: read §1.1 before touching those gates.
+3. **`window_reduce/6` (5)** — MEASURE first, see below.
 
 `window_reduce/6` should be MEASURED the way `reduce/5` was —
 `bench/reduce_fold_vs_host.exs` is committed for exactly this — and allowlisted
@@ -436,9 +442,27 @@ recurring form is an exact-type-equality or exact-shape guard sitting in front
 of a kernel that could always have done the work. Check for one before reaching
 for GLSL.
 
-### 1.4 The fleet re-verification, and the one thing it caught
+### 1.4 The fleet re-verifications, and the one thing they caught
 
-Run on 2026-08-22 at `f0d9c96`, after W5 had gone nine commits on Ampere alone.
+**Second run, 2026-08-23 at `00cfe3b`**, covering `stack`, `gather`, `bitcast`,
+the general contraction and the batched matmul. Both Keplers rebuilt from
+scratch — necessary rather than tidy, because this was the first new NIF since
+`scatter` — and both read exactly what super-io does:
+
+| | super-io (RTX 3060 Ti) | mac-247 (GT 650M) | mac-248 (GT 750M) |
+|---|---|---|---|
+| `mix test` | 833 / 609 / 0 | 833 / 609 / 0 | 833 / 609 / 0 |
+| `strict_test.sh` | 0 failures, 208 excluded | same | same |
+| `doctest_residency.sh` | 699 / 833 (83.9%) | same | same |
+| `matmul_batched/8` exported | yes | yes | yes |
+
+Nothing to report from it, which is the point: five items including a new NIF
+and three new shaders, and the fleet agrees to the digit. Check
+`function_exported?` for a new NIF rather than trusting a green compile — `mix`
+will print "Generated nx_vulkan app" without rebuilding the crate.
+
+**First run, 2026-08-22 at `f0d9c96`**, after W5 had gone nine commits on Ampere
+alone.
 Both Keplers were rebuilt from scratch (`rm -rf _build`, ~2–4 min for the Rust
 crate) and read **exactly** what super-io does:
 
@@ -570,7 +594,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
 | ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| ~~Re-verify on mac-247~~ | **done 2026-08-22 at `f0d9c96`, and on mac-248 too.** Both Keplers report 670/833 (80.4%), 833/589/0, 237 excluded — identical to super-io. It found one real defect, in a test rather than a kernel: see §1.4 | |
+| ~~Re-verify on the Keplers~~ | **done twice** — 2026-08-22 at `f0d9c96` (found one defect, in a test) and again 2026-08-23 at `00cfe3b` covering the new NIF. Both boxes report 699/833 (83.9%), 833/609/0, 208 excluded, identical to super-io. §1.4 | |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -715,17 +739,17 @@ time.
 `MISSION.md` §8 has the full procedure. The three that matter most:
 
 ```sh
-# suite: 833 doctests, 597 tests, 0 failures.
-# Measured at f0d9c96 on ALL THREE boxes — super-io (Ampere/Linux), mac-247 and
+# suite: 833 doctests, 609 tests, 0 failures.
+# Measured at 00cfe3b on ALL THREE boxes — super-io (Ampere/Linux), mac-247 and
 # mac-248 (Kepler/FreeBSD) — identical to the digit. See §1.4.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 833/597/0, 220 excluded
+sh scripts/strict_test.sh            # 833/609/0, 208 excluded
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 687 / 833 (82.5%), exits 0
-                                     # 676 / 833 (81.2%) device-resident
+sh scripts/doctest_residency.sh      # 699 / 833 (83.9%), exits 0
+                                     # 688 / 833 (82.6%) device-resident
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
