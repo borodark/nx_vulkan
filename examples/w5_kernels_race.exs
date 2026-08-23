@@ -221,8 +221,13 @@ results = results ++
   end
 
 # ---- integer matmul (T3) ------------------------------------------------
+#
+# 512x512 was dropped after the first fleet run: the host arm is 91 SECONDS on
+# the GT 650M, so five replicates of one iteration is over seven minutes for a
+# single row that only restates what 256x256 already shows (1470x there, 3114x
+# at 512). The earlier numbers are in bench_results/W5_RACE.md.
 results = results ++
-  for {m, iters} <- [{128, 5}, {256, 3}, {512, 1}] do
+  for {m, iters} <- [{128, 5}, {256, 3}] do
     a = gt.(seq.(m * m, 1), {m, m}, {:s, 32})
     b = gt.(seq.(m * m, 2), {m, m}, {:s, 32})
     race.("dot s32 #{m}x#{m}", iters, gpu_of.(fn -> Nx.dot(a, b) end), host_of.([a, b], &Nx.dot/2))
@@ -285,9 +290,15 @@ results = results ++
   end
 
 # A rank-3 contraction: reaches the matmul only via transpose + reshape.
+#
+# {32, 32, 8} contracting axis 1 is M=256, N=256, K=32 — about 2M multiply-adds.
+# The first cut used {64, 64, 16}, which is 67M of them, and BinaryBackend is an
+# Elixir loop: that row alone would have run for ~25 minutes. Sizing for the GPU
+# instead of for the host arm is the exact mistake this file's header warns
+# about, made twice.
 results = results ++
-  for {iters} <- [{5}] do
-    a = gt.(seq.(64 * 64 * 16, 1), {64, 64, 16}, {:s, 32})
+  for {iters} <- [{2}] do
+    a = gt.(seq.(32 * 32 * 8, 1), {32, 32, 8}, {:s, 32})
     race.("dot r3 contract axis 1", iters,
       gpu_of.(fn -> Nx.dot(a, [1], [], a, [1], []) end),
       host_of.([a], fn t -> Nx.dot(t, [1], [], t, [1], []) end))
@@ -297,7 +308,7 @@ results = results ++
 # because the z-dimension is the part that has never run on Kepler hardware
 # under measurement.
 results = results ++
-  for {batch, m, iters} <- [{8, 64, 5}, {64, 32, 5}] do
+  for {batch, m, iters} <- [{8, 32, 2}, {64, 16, 2}] do
     a = gt.(seq.(batch * m * m, 1), {batch, m, m}, {:s, 32})
     race.("dot BATCHED b=#{batch} #{m}x#{m}", iters,
       gpu_of.(fn -> Nx.dot(a, [2], [0], a, [1], [0]) end),
