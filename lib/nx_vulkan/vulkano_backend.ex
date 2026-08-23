@@ -1395,6 +1395,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
     f = ensure_on_backend(on_false)
     spv = select_spv(type)
 
+    # The shader reads `pred` as a packed u8 mask, which is what the compare
+    # family emits — so the gate demanded `{:u, 8}` and refused everything else.
+    # But `Nx.select/3` takes ANY numeric predicate and treats nonzero as true,
+    # and its own doctests pass `1`, `0` and `Nx.tensor([0, 1, 0])`: all s32.
+    #
+    # `Nx.not_equal(pred, 0)` IS that normalisation, and it is itself a GPU op
+    # this backend has had since W5 T1 — one compare dispatch against a host
+    # round trip for all three operands. Same shape of fix as `gather`'s axis
+    # rotation: the kernel could always do the work, the encoding was wrong.
+    #
+    # A predicate whose dtype has no compare shader falls back through the
+    # `match?` below rather than being forced, because `not_equal` will have
+    # left it on the host.
+    p = if p.type == {:u, 8}, do: p, else: Nx.not_equal(p, 0)
+
     # Rank 0 dispatches as rank 1 {1} (see gpu_select/5).
     shape_ok? =
       spv != nil and p.type == {:u, 8} and match?(%__MODULE__{}, p.data) and

@@ -1053,6 +1053,68 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
+  describe "select — any numeric predicate, not just a u8 mask" do
+    test "an s32 predicate is normalised rather than refused" do
+      # Nx.select treats nonzero as true and its own doctests pass 1, 0 and
+      # Nx.tensor([0, 1, 0]) — all s32. The shader wants a packed u8 mask, and
+      # `Nx.not_equal(pred, 0)` produces one on the device.
+      assert_parity_and_residency(fn t ->
+        Nx.select(t.([0, 1, 0], {:s, 32}), t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32}))
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.select(t.(1, {:s, 32}), t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32}))
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.select(t.(0, {:s, 32}), t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32}))
+      end)
+    end
+
+    test "NEGATIVE and fractional predicates are true, not just 1" do
+      # `!= 0`, not `== 1`. A predicate normalisation that clamped or compared
+      # against 1 would pass every test above and fail here.
+      got =
+        assert_parity_and_residency(fn t ->
+          Nx.select(t.([-1, 0, 2], {:s, 32}), t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32}))
+        end)
+
+      assert Nx.to_flat_list(got) == [1, 5, 3]
+
+      assert_parity_and_residency(fn t ->
+        Nx.select(t.([0.0, 1.5, 0.0], {:f, 32}), t.([1, 2, 3], {:s, 32}), t.([4, 5, 6], {:s, 32}))
+      end)
+    end
+
+    test "a u8 mask still takes the direct path" do
+      assert_parity_and_residency(fn t ->
+        Nx.select(
+          Nx.greater(t.([2, 4, 6], {:s, 32}), t.([1, 5, 5], {:s, 32})),
+          t.([2, 4, 6], {:s, 32}),
+          t.([1, 3, 5], {:s, 32})
+        )
+      end)
+    end
+
+    test "broadcasting branches, and rank 3" do
+      assert_parity_and_residency(fn t ->
+        Nx.select(
+          t.(0, {:s, 32}),
+          Nx.reshape(t.([1, 2], {:s, 32}), {1, 2}),
+          Nx.reshape(t.([3, 4], {:s, 32}), {2, 1})
+        )
+      end)
+
+      assert_parity_and_residency(fn t ->
+        Nx.select(
+          Nx.reshape(t.([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1], {:s, 32}), {2, 2, 3}),
+          Nx.reshape(t.(Enum.to_list(1..12), {:s, 32}), {2, 2, 3}),
+          Nx.reshape(t.(Enum.to_list(13..24), {:s, 32}), {2, 2, 3})
+        )
+      end)
+    end
+  end
+
   describe "dtypes that must keep falling back" do
     # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
     # kernel for these dtypes would need Int64 or an 8/16-bit storage extension

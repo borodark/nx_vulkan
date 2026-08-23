@@ -16,9 +16,9 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **699 of 833 doctests (83.9%) run with host fallbacks refused**, of which
-  **688 (82.6%) are genuinely device-resident**. **`dot/7` is now entirely
-  closed** — no contraction of any rank, axis count or batching falls back. The 11-doctest gap is
+  **707 of 833 doctests (84.9%) run with host fallbacks refused**, of which
+  **696 (83.6%) are genuinely device-resident**. **`dot/7` and `select/4` are
+  both entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -28,6 +28,18 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `select/4` takes any numeric predicate (+8)
+
+  699/833 -> 707/833, no new shader. The gate demanded `{:u, 8}` because that is
+  what the compare family emits — but `Nx.select/3` accepts ANY numeric
+  predicate and treats nonzero as true, and its own doctests pass `1`, `0` and
+  `Nx.tensor([0, 1, 0])`: all s32. `Nx.not_equal(pred, 0)` is that
+  normalisation, and it has been a GPU op here since W5 T1.
+
+  Note `!= 0`, not `== 1`. A normalisation that compared against 1 would pass
+  every ordinary case and fail on a negative or fractional predicate; both are
+  pinned.
 
   ## batched matmul closes `dot/7` completely (+5)
 
@@ -347,7 +359,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   only when `Nx.Vulkan.Fallback.mode/0` is `:raise`. In a normal `mix test` run
   nothing is excluded: all 843 doctests run and assert their values exactly as
   before, which is what keeps this an API-completeness suite. Under
-  `NXV_HOST_FALLBACK=raise` the 134 listed ones step aside so the remaining 699
+  `NXV_HOST_FALLBACK=raise` the 126 listed ones step aside so the remaining 707
   can assert *where* they computed.
 
   `sh scripts/doctest_residency.sh` prints the rate and fails two ways:
@@ -377,7 +389,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 65 doctests, down from 357 before W5.
+  # 58 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -425,7 +437,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.product/2", [505]},
     {"Nx.quotient/2", [260, 261]},
     {"Nx.remainder/2", [249]},
-    {"Nx.select/3", [336, 337, 338, 339, 344, 345, 346]},
     {"Nx.slice_along_axis/4", [683]},
     {"Nx.subtract/2", [233]},
     {"Nx.sum/2", [466, 467]},
@@ -503,8 +514,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.dot/2", [634]},
     {"Nx.indexed_add/4", [349, 350]},
     {"Nx.remainder/2", [247]},
-    {"Nx.round/1", [440]},
-    {"Nx.select/3", [343]}
+    {"Nx.round/1", [440]}
   ]
 
   @doc """
