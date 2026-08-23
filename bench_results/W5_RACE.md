@@ -41,6 +41,47 @@ arithmetic cost real time on the older part. Still 226x faster than the host, so
 this is a note rather than a problem, but do not assume the padded and unpadded
 paths cost the same.
 
+## The follow-on items — stack, gather, bitcast, tensordot
+
+Raced at `797ef57` (GT 650M, baseline 0.02) and `1e934c5` (GT 750M, baseline
+0.43), both clean. Four of the five are GATE WIDENINGS on kernels that already
+existed, so the question is not "is the shader fast" but whether the
+NORMALISATION each inserts costs less than the host round trip it replaced.
+
+| op | 650M gpu | 650M | 750M gpu | 750M |
+|---|---:|---:|---:|---:|
+| `stack` 2×512×512 axis 0 | 3.06 ms | 6.9x | 2.62 ms | 2.6x |
+| `stack` 2×512×512 axis 1 | 4.31 ms | 3.0x | 4.80 ms | 1.9x |
+| `take` axis 0 (prefix) | 0.80 ms | 8.7x | 0.75 ms | 5.4x |
+| `take` axis 1 (**rotated**) | 2.13 ms | 73.5x | 2.17 ms | 49.7x |
+| `bitcast` n=1048576 | 20.09 ms | 0.99x | 13.73 ms | 1.03x |
+| `dot` r3 contract axis 1 | 3.14 ms | 167.9x | 1.55 ms | 233.4x |
+| `dot` **batched** b=8 32×32 | 0.98 ms | 70.9x | 0.21 ms | 230.8x |
+| `dot` **batched** b=64 16×16 | 0.33 ms | 491.4x | 0.22 ms | 224.6x |
+
+**The rotation pays for itself many times over.** `take` at axis 1 costs ~2.7x
+more GPU time than at axis 0 — that is the transpose, and it is real — but the
+HOST arm costs 22x more at axis 1 than at axis 0, so the widened gate wins 73x
+where refusing would have won nothing. Pricing a normalisation against the
+unrotated GPU path rather than against the host is the mistake to avoid here.
+
+**The batched kernel's third dispatch dimension behaves.** b=64 at 16×16 is the
+adversarial case — many tiny matrices, where a z-dimension occupancy problem
+would show — and it is the FASTEST row in the table on the 650M at 0.33 ms.
+
+**`stack` is the weakest win in the whole suite** at 1.9–3.0x, and that is
+expected: it is a copy either way and `BinaryBackend`'s concatenate is not
+especially slow. It is still positive on both boxes and it keeps the result
+resident, which this harness does not count.
+
+**`bitcast` at ~1.0x is CORRECT, not a regression.** It is a relabel — same
+buffer, new type — so there is nothing for a kernel to be fast at, and both arms
+of this harness are then purely the transfer they both pay. The harness flagged
+it REGRESSION on the first run; that was the harness lying about its own blind
+spot, in the same direction as the load-check bug below, and it is now labelled
+for what it is. The real win is residency, which the header says plainly is not
+counted here.
+
 ## What the race found that no test could
 
 `all`/`any` was **3.2x slower than its own siblings** at the same shape:

@@ -1,0 +1,242 @@
+{
+  "device": "NVIDIA GeForce GT 650M",
+  "host": "mac",
+  "baseline_load": 0.02,
+  "commit": "797ef57",
+  "results": [
+    {
+      "op": "add s32 n=4096",
+      "load_before": 0.02,
+      "load_after": 0.1,
+      "gpu_ms": 0.12,
+      "host_ms": 1.445,
+      "speedup": 12.05,
+      "gpu_spread_pct": 30.8,
+      "host_spread_pct": 7.4
+    },
+    {
+      "op": "add s32 n=262144",
+      "load_before": 0.1,
+      "load_after": 0.17,
+      "gpu_ms": 0.984,
+      "host_ms": 119.016,
+      "speedup": 120.9,
+      "gpu_spread_pct": 25.0,
+      "host_spread_pct": 28.8
+    },
+    {
+      "op": "add s32 n=1048576",
+      "load_before": 0.17,
+      "load_after": 0.49,
+      "gpu_ms": 3.468,
+      "host_ms": 601.58,
+      "speedup": 173.49,
+      "gpu_spread_pct": 39.1,
+      "host_spread_pct": 39.6
+    },
+    {
+      "op": "greater s32 n=262144",
+      "load_before": 0.49,
+      "load_after": 0.49,
+      "gpu_ms": 2.668,
+      "host_ms": 133.247,
+      "speedup": 49.95,
+      "gpu_spread_pct": 6.1,
+      "host_spread_pct": 43.4
+    },
+    {
+      "op": "select s32 n=262144",
+      "load_before": 0.49,
+      "load_after": 0.57,
+      "gpu_ms": 3.65,
+      "host_ms": 161.421,
+      "speedup": 44.23,
+      "gpu_spread_pct": 5.7,
+      "host_spread_pct": 0.4
+    },
+    {
+      "op": "sum s32 512x512 axis 1",
+      "load_before": 0.57,
+      "load_after": 0.6,
+      "gpu_ms": 1.316,
+      "host_ms": 106.989,
+      "speedup": 81.28,
+      "gpu_spread_pct": 13.5,
+      "host_spread_pct": 0.6
+    },
+    {
+      "op": "sum s32 1024x1024 axis 1",
+      "load_before": 0.6,
+      "load_after": 0.67,
+      "gpu_ms": 3.266,
+      "host_ms": 460.397,
+      "speedup": 140.97,
+      "gpu_spread_pct": 0.2,
+      "host_spread_pct": 0.7
+    },
+    {
+      "op": "window_sum f32 512x512 {3,3}",
+      "load_before": 0.67,
+      "load_after": 0.89,
+      "gpu_ms": 3.29,
+      "host_ms": 2788.461,
+      "speedup": 847.64,
+      "gpu_spread_pct": 295.0,
+      "host_spread_pct": 32.5
+    },
+    {
+      "op": "window_sum f32 PADDED :same",
+      "load_before": 0.89,
+      "load_after": 1.03,
+      "gpu_ms": 16.303,
+      "host_ms": 3138.727,
+      "speedup": 192.53,
+      "gpu_spread_pct": 78.6,
+      "host_spread_pct": 21.9
+    },
+    {
+      "op": "indexed_put s32 n=262144 k=8192",
+      "load_before": 1.03,
+      "load_after": 1.03,
+      "gpu_ms": 2.722,
+      "host_ms": 26.237,
+      "speedup": 9.64,
+      "gpu_spread_pct": 39.2,
+      "host_spread_pct": 6.9
+    },
+    {
+      "op": "indexed_add s32 n=262144 k=8192",
+      "load_before": 1.03,
+      "load_after": 1.03,
+      "gpu_ms": 1.593,
+      "host_ms": 27.105,
+      "speedup": 17.01,
+      "gpu_spread_pct": 12.6,
+      "host_spread_pct": 12.6
+    },
+    {
+      "op": "argmax s32 512x512 axis 1",
+      "load_before": 1.03,
+      "load_after": 1.03,
+      "gpu_ms": 3.821,
+      "host_ms": 119.579,
+      "speedup": 31.3,
+      "gpu_spread_pct": 0.5,
+      "host_spread_pct": 0.4
+    },
+    {
+      "op": "all s32 512x512 axis 1",
+      "load_before": 1.03,
+      "load_after": 1.03,
+      "gpu_ms": 4.266,
+      "host_ms": 114.545,
+      "speedup": 26.85,
+      "gpu_spread_pct": 0.8,
+      "host_spread_pct": 0.8
+    },
+    {
+      "op": "dot s32 128x128",
+      "load_before": 1.03,
+      "load_after": 1.02,
+      "gpu_ms": 2.809,
+      "host_ms": 681.907,
+      "speedup": 242.79,
+      "gpu_spread_pct": 45.4,
+      "host_spread_pct": 1.2
+    },
+    {
+      "op": "dot s32 256x256",
+      "load_before": 1.02,
+      "load_after": 1.29,
+      "gpu_ms": 7.207,
+      "host_ms": 9640.214,
+      "speedup": 1337.56,
+      "gpu_spread_pct": 5.0,
+      "host_spread_pct": 29.8
+    },
+    {
+      "op": "stack 2x512x512 axis 0",
+      "load_before": 1.29,
+      "load_after": 1.26,
+      "gpu_ms": 3.062,
+      "host_ms": 21.109,
+      "speedup": 6.89,
+      "gpu_spread_pct": 30.0,
+      "host_spread_pct": 5.4
+    },
+    {
+      "op": "stack 2x512x512 axis 1",
+      "load_before": 1.26,
+      "load_after": 1.26,
+      "gpu_ms": 4.31,
+      "host_ms": 12.802,
+      "speedup": 2.97,
+      "gpu_spread_pct": 9.0,
+      "host_spread_pct": 16.8
+    },
+    {
+      "op": "take axis 0 (prefix)",
+      "load_before": 1.26,
+      "load_after": 1.26,
+      "gpu_ms": 0.801,
+      "host_ms": 6.965,
+      "speedup": 8.69,
+      "gpu_spread_pct": 21.4,
+      "host_spread_pct": 16.8
+    },
+    {
+      "op": "take axis 1 (ROTATED)",
+      "load_before": 1.26,
+      "load_after": 1.22,
+      "gpu_ms": 2.13,
+      "host_ms": 156.507,
+      "speedup": 73.49,
+      "gpu_spread_pct": 346.9,
+      "host_spread_pct": 7.7
+    },
+    {
+      "op": "bitcast s32->f32 n=1048576",
+      "load_before": 1.22,
+      "load_after": 1.22,
+      "gpu_ms": 20.091,
+      "host_ms": 19.857,
+      "speedup": 0.99,
+      "gpu_spread_pct": 5.6,
+      "host_spread_pct": 5.6
+    },
+    {
+      "op": "dot r3 contract axis 1",
+      "load_before": 1.22,
+      "load_after": 1.19,
+      "gpu_ms": 3.138,
+      "host_ms": 526.813,
+      "speedup": 167.91,
+      "gpu_spread_pct": 85.0,
+      "host_spread_pct": 1.0
+    },
+    {
+      "op": "dot BATCHED b=8 32x32",
+      "load_before": 1.19,
+      "load_after": 1.19,
+      "gpu_ms": 0.977,
+      "host_ms": 69.203,
+      "speedup": 70.87,
+      "gpu_spread_pct": 4.0,
+      "host_spread_pct": 1.5
+    },
+    {
+      "op": "dot BATCHED b=64 16x16",
+      "load_before": 1.19,
+      "load_after": 1.19,
+      "gpu_ms": 0.328,
+      "host_ms": 161.181,
+      "speedup": 491.41,
+      "gpu_spread_pct": 30.9,
+      "host_spread_pct": 2.9
+    }
+  ],
+  "device_kind": "DiscreteGpu",
+  "replicates": 5,
+  "note": "median of 5; both arms end with the answer on the host",
+  "box_was_busy": false
+}
