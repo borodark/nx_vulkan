@@ -70,10 +70,24 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
   # built twice, once per backend.
   # `:allow` is deliberate and load-bearing. This helper asserts VALUE parity and
   # makes no residency claim, so it must work for the cases that are supposed to
-  # fall back — s8/s64/u32 arithmetic, `exp` on an integer input. Under
+  # fall back — s8/s64/u32 arithmetic, negative padding, batched dot. Under
   # `sh scripts/strict_test.sh` the whole suite runs with fallbacks refused, and
   # without this scope those tests would raise on precisely the behaviour they
   # exist to pin. Residency is asserted separately, and strictly, below.
+  #
+  # INTEGER results are compared EXACTLY and float results within eps, and the
+  # split is not fussiness — it is the difference between the two bars this file
+  # tests against. On integers there is no eps: the GPU and BinaryBackend either
+  # agree bit-for-bit or one is wrong, which is what makes every wrap and
+  # sign-convention trap here checkable at all. On floats the GPU is allowed to
+  # differ, and Vulkan says by how much.
+  #
+  # This distinction was found the hard way, on mac-247: `Nx.sqrt` of an s32 9
+  # is exactly 3.0 on Ampere and 3.000000238418579 on the Kepler GT 650M. Vulkan
+  # permits `sqrt` up to 3 ULP of error and Kepler spends that budget where
+  # Ampere does not. An exact float comparison here passed on one box and failed
+  # on another, which is the whole argument for running this suite across the
+  # fleet rather than trusting the box it was written on.
   defp assert_parity(fun) do
     got =
       Fallback.strict(:allow, fn -> fun.(&gpu/2) end)
@@ -83,7 +97,18 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
 
     assert Nx.type(got) == Nx.type(expected)
     assert Nx.shape(got) == Nx.shape(expected)
-    assert Nx.to_flat_list(got) == Nx.to_flat_list(expected)
+
+    case Nx.type(got) do
+      {f, _} when f in [:f, :bf] ->
+        assert Nx.to_flat_list(got) == Nx.to_flat_list(expected) or
+                 Nx.to_number(Nx.all_close(got, expected, rtol: 1.0e-5, atol: 1.0e-8)) == 1,
+               "float parity: got #{inspect(Nx.to_flat_list(got))}, " <>
+                 "expected #{inspect(Nx.to_flat_list(expected))}"
+
+      _ ->
+        assert Nx.to_flat_list(got) == Nx.to_flat_list(expected)
+    end
+
     got
   end
 
