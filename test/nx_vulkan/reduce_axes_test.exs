@@ -132,6 +132,13 @@ defmodule Nx.Vulkan.ReduceAxesTest do
     # all/any and argmax/argmin have no rotation of their own, so for them the
     # classifier's refusal IS the op's. Pinned rather than assumed: if either
     # grows a transpose path, this is where it gets noticed.
+    #
+    # TAGGED because the fallback IS the subject. `strict_test.sh` runs the
+    # suite with NXV_HOST_FALLBACK=raise and excludes only this tag, so a test
+    # that deliberately provokes a refusal has to opt out or it turns the strict
+    # run red — which is exactly what it did, and only the Kepler fleet run
+    # noticed, because strict_test.sh had not been re-run since this landed.
+    @tag :host_fallback_expected
     test "all / any and argmax / argmin do fall back there" do
       m = fn b -> Nx.remainder(Nx.iota({2, 3, 4}, backend: b), 3) end
       check(fn b -> Nx.all(m.(b), axes: [0, 2]) end, false)

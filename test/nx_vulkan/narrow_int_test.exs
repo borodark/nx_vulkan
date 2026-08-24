@@ -242,6 +242,10 @@ defmodule Nx.Vulkan.NarrowIntTest do
       check(fn b -> Nx.as_type(Nx.tensor([70000, -5], type: {:s, 32}, backend: b), :u16) end)
     end
 
+    # TAGGED for the same reason as the non-contiguous case in
+    # reduce_axes_test.exs: the REFUSAL is what this test asserts, so under
+    # NXV_HOST_FALLBACK=raise it must opt out or it turns strict_test.sh red.
+    @tag :host_fallback_expected
     test "a FLOAT source is refused, and the reason is not squeamishness" do
       # Nx saturates a non-finite float to the DESTINATION's range: :infinity is
       # 127 at {:s, 8}. Composing float -> s32 -> truncate saturates to

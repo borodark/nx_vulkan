@@ -60,16 +60,16 @@ Current divergence:
 | `HEAD` / local `main` | `d84ed29` | the above + the ninety-percent run (§1.2a) |
 | `origin/main` | `d84ed29` | **level — nothing unbacked** |
 | jetson (192.168.0.250) | `221b8c1` | re-verified there, §1.4 — one commit behind, and that commit is `narrow broadcast` |
-| mac-247, mac-248 | `00cfe3b` | **STALE — eight commits behind, NOT re-verified.** See below |
+| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `f52a67f` |
 | `upstream/main` | `6ab64ac` | **far behind** |
 
-**The two Keplers are the outstanding verification.** Everything in §1.2a has
-been checked on Ampere (super-io) and on Maxwell/ARM (the Jetson), which is a
-genuinely wide spread — but the GT 650M and GT 750M have not seen any of it, and
-they are the boxes that caught the `sqrt` 3-ULP defect. There is a NEW NIF
-(`cast_spec/5`), so both need a full crate rebuild: `rm -rf _build`, and check
-`function_exported?` rather than trusting a green compile — `mix` will print
-"Generated nx_vulkan app" without rebuilding the crate.
+**All four boxes have now seen the ninety-percent run** — Ampere, Maxwell/ARM
+and two Keplers — and they agree on every number. The Kepler run earned its
+keep for the second time: it caught two mistagged tests that turned
+`strict_test.sh` red (§1.4). When re-verifying, remember there is a NEW NIF
+(`cast_spec/5`), so both Keplers needed a full crate rebuild — `rm -rf _build`,
+and check `function_exported?` rather than trusting a green compile, because
+`mix` will print "Generated nx_vulkan app" without rebuilding the crate.
 
 Push with `git push origin main` — **not** `upstream`, which is the public
 release remote and is deliberately behind. Publishing there is a release
@@ -550,6 +550,47 @@ pinned test explaining why the guard had to be there.
 
 ### 1.4 The fleet re-verifications, and the one thing they caught
 
+**Fourth run, 2026-08-23 at `92d56cd`**, on both Keplers — and **it caught a
+defect that `mix test` structurally cannot see.**
+
+| | mac-247 (GT 650M) | mac-248 (GT 750M) | super-io |
+|---|---|---|---|
+| `mix test --seed 0` | 833 / 780 / 0 | 833 / 780 / 0 | same |
+| `doctest_residency.sh` | 751 / 833 (90.2%) | 751 / 833 (90.2%) | same |
+| register exact both ways | 82 == 82 | 82 == 82 | same |
+| `cast_spec/5` exported | yes | yes | yes |
+| **`strict_test.sh`** | **2 failures** | **2 failures** | **2 failures** |
+
+**The two failures were mine, and they were in the tests rather than the
+kernels.** `reduce_axes_test.exs` and `narrow_int_test.exs` each contain a test
+whose SUBJECT is a host fallback — the non-contiguous `all`/`any` case, and the
+float-source `as_type` refusal. Neither carried `@tag :host_fallback_expected`,
+and `strict_test.sh` excludes only that tag, so under `NXV_HOST_FALLBACK=raise`
+both raised.
+
+**Why nothing else caught it.** `mix test` is green: outside strict mode a
+fallback returns a bit-identical result, so the tests pass and assert exactly
+what they mean to. `doctest_residency.sh` is green: it only reads
+`nx_doctest_test.exs` and never sees these files. **Only `strict_test.sh` can
+see this class of mistake, and it was the one check not re-run** — it went once,
+eight commits earlier, and the rest of the run leaned on `mix test` plus
+residency.
+
+The rule that falls out, and it is the third instance of this shape today: **a
+test that deliberately provokes a fallback must opt out of the strict run, and
+the check that would tell you is not the one you are watching.** Run all three
+scripts before calling a run clean, not the two that move.
+
+Fixed in `f52a67f`. Both boxes also confirmed every Kepler-specific risk —
+signed overflow wrapping (`pow(2,32) = 0`, `pow(3,20) = -808182895`), the packed
+sub-word tail, `int(b << 24) >> 24` as an arithmetic shift, `round` ties at
+half-away-from-zero, and dividend-signed `remainder` at all four sign pairs.
+**Three architectures now agree on all of it**: Ampere, Maxwell/ARM, Kepler.
+
+The `sqrt` 3-ULP divergence is still there — `Nx.sqrt(9.0)` is
+`3.000000238418579` on both Keplers — and is now harmless, because
+`integer_kernels_test.exs` stopped asserting exact float equality in `f0d9c96`.
+
 **Third run, 2026-08-23 at `221b8c1`**, on a FOURTH box — the Jetson Nano — and
 it is the first ARM/Tegra verification this project has had.
 
@@ -795,7 +836,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
 | ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| **Re-verify on the Keplers — OPEN AGAIN** | done twice before (2026-08-22 at `f0d9c96`, which found one defect in a test, and 2026-08-23 at `00cfe3b`), but both boxes are now **eight commits behind at `00cfe3b`**. The ninety-percent run has only been seen by super-io and the Jetson. There is a new NIF (`cast_spec/5`), so this needs `rm -rf _build` and a `function_exported?` check | anyone |
+| ~~Re-verify on the Keplers~~ | **done three times** — 2026-08-22 at `f0d9c96`, 2026-08-23 at `00cfe3b`, and again at `92d56cd` covering the ninety-percent run and the new NIF. **Two of the three found a defect**, both times in a test rather than a kernel. §1.4 | |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -946,6 +987,11 @@ time.
 mix test
 
 # strict — did the work stay on the GPU?
+# RUN THIS EVERY TIME, not just at the end. It is the ONLY check that can see a
+# test which provokes a fallback without carrying @tag :host_fallback_expected —
+# `mix test` passes (a fallback is bit-identical) and doctest_residency.sh never
+# reads these files. That exact mistake shipped twice and was caught by the
+# fleet, not here. See §1.4.
 sh scripts/strict_test.sh            # 833/780/0, excluded count moves with the register
 
 # the number that actually means something
