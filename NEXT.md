@@ -585,13 +585,53 @@ down, and Maxwell agrees with Ampere on all of it:
     against is exactly the kind that only appears on hardware you did not write
     the code on.
 
-**Two caveats on the Jetson, and they are environmental rather than results.**
-The OTP there is built `--disable-jit` (the default JIT build ICEs in
-`erts/emulator/asmjit`, almost certainly `cc1plus` running out of memory on 4 GB
-of shared DRAM), and the Rust NIF is built with relaxed LTO
-(`CARGO_PROFILE_RELEASE_LTO=false`, `CODEGEN_UNITS=4`) for the same reason.
-Neither affects correctness; both make the box **unsuitable for timings**, which
-was already the standing verdict on it.
+**Three caveats on the Jetson, all environmental rather than results.** The OTP
+there is built `--disable-jit` (the default JIT build ICEs in
+`erts/emulator/asmjit`, almost certainly `cc1plus` running out of memory), and
+the Rust NIF is built with relaxed LTO (`CARGO_PROFILE_RELEASE_LTO=false`,
+`CODEGEN_UNITS=4`) for the same reason.
+
+The third was found later and explains both: **the box runs `nvpmodel` at 5W
+with only two of its four cores online**, against 3.9 GB of shared DRAM plus
+2×991 MB of zram. That is why compiles are slow and memory-tight, and it is a
+third independent reason the box is **unsuitable for timings** — which was
+already the standing verdict, now for a concrete reason rather than a general
+one. `sudo nvpmodel -m 0` would restore all four cores; it needs root, which
+nobody has there.
+
+#### EXLA on the Jetson — CPU-only is a GO, CUDA is permanently impossible
+
+Researched 2026-08-23. `parity_test.exs` self-skips with "EXLA not available" on
+every box in the fleet, so a second independent reference has never existed. On
+the Jetson it could:
+
+  * `xla` v0.10.0 ships a precompiled **`aarch64-linux-gnu-cpu`** asset, so
+    there is NO Bazel megabuild — only EXLA's own NIF (6 C++ files) compiles.
+  * The ABI fits **with zero margin**: the binary's highest requirement is
+    `GLIBC_2.27` and the box has exactly 2.27. It contains **no LSE atomics**,
+    so it is safe on the A57's ARMv8.0, and its dot-product/bf16 kernels sit
+    behind runtime cpuinfo dispatch the A57 never selects.
+  * The target auto-detects to `aarch64-linux-gnu-cpu` with no env vars —
+    `infer_xla_target/0` matches only CUDA `release 12.`/`13.`, and the box has
+    10.2.
+
+**CUDA is dead three ways** and not for the reason one would guess. Compute
+capability 5.3 is NOT the blocker for the cuda12 build. The blockers are that
+the Nano is capped at JetPack 4.6.x / CUDA 10.2 permanently (CUDA 11 first
+shipped in JetPack 5.0, which dropped this board), that the prebuilts come only
+in cuda12/cuda13 flavours, and that cuDNN is 8.2.1 where XLA wants 9. cuda13
+additionally raised the floor to SM 7.5.
+
+**The one unverified risk is the NIF compile OOMing**, which is recoverable —
+retry, or free memory — unlike a source build. `schedulers_online` is 2, so
+EXLA's default job count computes to `-j1`: serial, slow, RAM-friendly.
+
+Worth doing, because XLA's CPU backend is a genuinely INDEPENDENT implementation
+(LLVM codegen, different accumulation orders, different fast-math choices)
+rather than a second pure-Elixir reference — it catches a different bug class,
+which is the whole point of a parity suite. Note this is the OPPOSITE conclusion
+from the standing "EXLA is unbuildable" note, which is about the OSS `exmc` repo
+and not about this hardware.
 
 **The unified memory finding.** Tegra shares one physical DRAM between CPU and
 GPU, and the memory types confirm it: type 2 is
