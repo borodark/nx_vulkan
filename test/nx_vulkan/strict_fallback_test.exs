@@ -279,16 +279,26 @@ defmodule Nx.Vulkan.StrictFallbackTest do
       # __CALLER__.function capture blamed the helper, so a refusal said
       # `reduce_op_host_fallback/4` and named no Nx op at all.
       #
-      # This used to reduce a u8 mask with `sum`, which T12 has since made
-      # native (reduce_axis_u8_to_u32). The pin broke because the fix worked —
-      # which is the point of pinning at an exact value rather than "> 0".
-      # `reduce_max` on a mask is still a host reduce: Nx keeps its output at
-      # {:u, 8}, which would need a byte-packed writer rather than a word one.
-      mask = Nx.greater(t({4, 5}), 0.0)
+      # THE SUBJECT HAS NOW MOVED TWICE, and the second time is the lesson.
+      #
+      # It first reduced a u8 mask with `sum`, which reduce_axis_u8_to_u32 made
+      # native. It was then rewritten to `reduce_max` on the same mask, "which
+      # would need a byte-packed writer rather than a word one" — and
+      # cast_s32_to_narrow.comp is now that writer, so it broke again for
+      # exactly the reason its own comment predicted.
+      #
+      # A test ABOUT ATTRIBUTION should not be anchored to a gap someone is
+      # trying to close. {:s, 64} is anchored to a decided one: the reduce
+      # shaders accumulate in 32 bits and Int64 is a device capability this
+      # backend does not require (MISSION.md 3.2). If that ever changes, this
+      # test should be re-pointed rather than "fixed" — the assertion it exists
+      # to make is that the refusal names `reduce_max/3` and not the shared
+      # helper `reduce_op_host_fallback/4`.
+      wide = Nx.tensor([[1, 2], [3, 4]], type: {:s, 64}, backend: VulkanoBackend)
 
       {_r, counts} =
         Fallback.count(fn ->
-          Fallback.strict(:allow, fn -> Nx.reduce_max(mask, axes: [1]) end)
+          Fallback.strict(:allow, fn -> Nx.reduce_max(wide, axes: [1]) end)
         end)
 
       assert counts == %{{:reduce_max, 3} => 1},

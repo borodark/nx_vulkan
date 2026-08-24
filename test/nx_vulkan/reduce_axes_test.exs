@@ -117,14 +117,29 @@ defmodule Nx.Vulkan.ReduceAxesTest do
     end
   end
 
-  describe "the runs that are NOT contiguous still fall back" do
+  describe "the runs that are NOT contiguous" do
     # [0, 2] over a rank-3 shape cannot be expressed as one (outer, run, inner)
-    # slab: axis 1 sits between the two reduced axes. Rotating it out is the
-    # `gather/4` fix and is a separate piece of work — until then this must
-    # host-fall-back rather than compute the wrong slab.
-    test "axes [0, 2] of a rank-3 tensor" do
-      check(fn b -> Nx.sum(Nx.iota({2, 3, 4}, backend: b), axes: [0, 2]) end, false)
-      check(fn b -> Nx.reduce_max(Nx.iota({2, 3, 4}, backend: b), axes: [0, 2]) end, false)
+    # slab: axis 1 sits between the two reduced axes. `classify_reduce_axes/2`
+    # refuses it — but that is not the same as the OP refusing it.
+    # `do_reduce/5` has a second path, `reduce_via_transpose/5`, which rotates
+    # the kept axes to the front and re-enters as a trailing-suffix reduce.
+    test "sum / reduce_max stay resident — reduce_via_transpose picks them up" do
+      check(fn b -> Nx.sum(Nx.iota({2, 3, 4}, backend: b), axes: [0, 2]) end)
+      check(fn b -> Nx.reduce_max(Nx.iota({2, 3, 4}, backend: b), axes: [0, 2]) end)
+      check(fn b -> Nx.sum(Nx.iota({2, 3, 4, 5}, type: {:f, 32}, backend: b), axes: [0, 2]) end)
+    end
+
+    # all/any and argmax/argmin have no rotation of their own, so for them the
+    # classifier's refusal IS the op's. Pinned rather than assumed: if either
+    # grows a transpose path, this is where it gets noticed.
+    test "all / any and argmax / argmin do fall back there" do
+      m = fn b -> Nx.remainder(Nx.iota({2, 3, 4}, backend: b), 3) end
+      check(fn b -> Nx.all(m.(b), axes: [0, 2]) end, false)
+      check(fn b -> Nx.any(m.(b), axes: [0, 2]) end, false)
+
+      assert Nx.Vulkan.Fallback.count_total(fn ->
+               Nx.all(m.(VulkanoBackend), axes: [0, 2])
+             end) > 0
     end
   end
 

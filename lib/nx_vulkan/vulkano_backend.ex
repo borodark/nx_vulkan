@@ -1040,13 +1040,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp reduce_spv(_from, _to), do: nil
 
   @impl true
-  def sum(out, t, opts), do: do_reduce(out, t, opts, 0)
+  def sum(out, t, opts), do: do_reduce(out, t, opts, 0, :sum)
 
   @impl true
-  def reduce_max(out, t, opts), do: do_reduce(out, t, opts, 1)
+  def reduce_max(out, t, opts), do: do_reduce(out, t, opts, 1, :reduce_max)
 
   @impl true
-  def reduce_min(out, t, opts), do: do_reduce(out, t, opts, 2)
+  def reduce_min(out, t, opts), do: do_reduce(out, t, opts, 2, :reduce_min)
 
   # Resolves the (outer, reduce_size, inner) virtual shape from `opts[:axes]`.
   # Any CONTIGUOUS run of axes maps to one slab — see classify_reduce_axes/2.
@@ -1055,7 +1055,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
          %T{shape: out_shape, type: type} = out,
          %T{shape: in_shape} = tensor,
          opts,
-         op_code
+         op_code,
+         op
        ) do
     axes = Keyword.get(opts, :axes) || all_axes(in_shape)
 
@@ -1099,7 +1100,51 @@ defmodule Nx.Vulkan.VulkanoBackend do
         reduce_via_transpose(out, tensor, axes, op_code, spv)
 
       true ->
-        reduce_op_host_fallback(op_code, out, tensor, opts)
+        narrow_reduce(op, out, tensor, opts) ||
+          reduce_op_host_fallback(op_code, out, tensor, opts)
+    end
+  end
+
+  # Reducing a narrow int. Same widen/truncate pair as narrow_binary/5, and the
+  # same reason it needs no kernel: BinaryBackend reduces in full precision and
+  # applies the destination's width at the end.
+  #
+  # The destination is NOT always narrow, and that is why this cannot just wrap
+  # the input. Nx widens `sum` and `product` on a narrow int to a 32-bit
+  # accumulator ({:s, 8} -> {:s, 32}) but does NOT widen `reduce_max` or
+  # `reduce_min`, which keep {:s, 8}. Both land here: a 32-bit destination
+  # retypes the widened buffer in place, a narrow one truncates it.
+  #
+  # u8 `sum` never reaches this — reduce_axis_u8_to_u32 already covers
+  # ({:u, 8} -> {:u, 32}) and `reduce_spv/2` is keyed on the PAIR. u8
+  # `reduce_max`/`reduce_min` do, and they used to be pinned as permanent
+  # fallbacks on the grounds that a {:u, 8} output "would need a byte-PACKED
+  # writer rather than a word one". It does — `cast_s32_to_narrow.comp` is that
+  # writer.
+  defp narrow_reduce(op, %T{type: to} = out, t, opts) do
+    if narrow_int?(t.type) and match?(%__MODULE__{}, t.data) do
+      case widen_to_s32(t, :signed) do
+        %T{} = wide ->
+          reduced = apply(Nx, op, [wide, opts])
+
+          cond do
+            not match?(%__MODULE__{}, reduced.data) ->
+              nil
+
+            narrow_int?(to) ->
+              narrow_from_s32(out, reduced)
+
+            match?({i, 32} when i in [:s, :u], to) ->
+              %__MODULE__{ref: ref} = reduced.data
+              put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: to})
+
+            true ->
+              nil
+          end
+
+        _ ->
+          nil
+      end
     end
   end
 
@@ -1182,9 +1227,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # behind it. Found by censusing the refused ops rather than the failing
   # doctests — the doctests said "argmax", the refusals said "every reducer".
   #
-  # NON-contiguous axes still fall back. [0, 2] of a rank-3 shape has axis 1
-  # sitting between the two reduced axes, so no single slab expresses it;
-  # rotating it out the way `gather/4` rotates its axes is separate work.
+  # NON-contiguous axes are refused HERE and not necessarily by the op. [0, 2]
+  # of a rank-3 shape has axis 1 sitting between the two reduced axes, so no
+  # single slab expresses it — but `do_reduce/5` has a second path,
+  # `reduce_via_transpose/5`, which rotates the kept axes to the front and
+  # re-enters as a trailing-suffix reduce. `sum`/`reduce_max`/`reduce_min`/
+  # `product` therefore stay resident on any axis set; `all`/`any` and
+  # `argmax`/`argmin` have no such rotation and do fall back.
   defp classify_reduce_axes(in_shape, axes) do
     dims = Tuple.to_list(in_shape)
     sorted = Enum.sort(axes)
@@ -1426,6 +1475,61 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp coerce_to(_t, _to), do: nil
 
+  # `as_type` across the narrow integers, using the same widen/truncate pair the
+  # arithmetic uses. Returns nil when the pair is not covered.
+  #
+  # Every case here is an INTEGER source or an integer destination, and Nx's
+  # integer-to-integer rule is truncation: `300` at s32 becomes `44` at u8, and
+  # `-1` at s8 becomes `255` at u8. Widening is the source's own signedness —
+  # `u8 200` widens to `200`, `s8 -1` widens to `-1`, whose bits ARE u32
+  # `4294967295`, which is what Nx answers.
+  #
+  # A FLOAT SOURCE IS DELIBERATELY EXCLUDED, and this is the trap worth naming.
+  # Nx saturates a non-finite float to the DESTINATION's range, so `:infinity`
+  # at s8 is `127`. Routing it through s32 first saturates to `2147483647` and
+  # then truncates to `-1`. u8 is the one width where the composition happens to
+  # agree (255, and `:neg_infinity` lands on 0 either way) — an accident, not a
+  # rule, and relying on it would put a wrong answer one dtype away. Float
+  # sources keep `cast_to_int_spv/2`'s direct shaders, which implement the real
+  # rule.
+  defp narrow_as_type(%T{type: to} = out, %T{type: from} = t) do
+    cond do
+      not match?(%__MODULE__{}, t.data) ->
+        nil
+
+      narrow_int?(from) ->
+        # Widen once, then land it wherever `to` is.
+        case {widen_to_s32(t, :signed), to} do
+          {nil, _} ->
+            nil
+
+          {%T{} = wide, {int, 32}} when int in [:s, :u] ->
+            %__MODULE__{ref: ref} = wide.data
+            put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: to})
+
+          {%T{} = wide, _} ->
+            if narrow_int?(to) do
+              narrow_from_s32(out, wide)
+            else
+              # f32/f64 destinations reuse the s32 cast shaders.
+              case coerce_to(wide, to) do
+                %T{data: %__MODULE__{ref: ref}} ->
+                  put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: to})
+
+                _ ->
+                  nil
+              end
+            end
+        end
+
+      narrow_int?(to) and match?({i, 32} when i in [:s, :u], from) ->
+        narrow_from_s32(out, t)
+
+      true ->
+        nil
+    end
+  end
+
   @impl true
   def as_type(
         %T{type: type} = out,
@@ -1434,6 +1538,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
     cond do
       type == source_type ->
         put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
+
+      narrow_as_type(out, tensor) != nil ->
+        narrow_as_type(out, tensor)
 
       cast_to_int_spv(source_type, type) != nil ->
         gpu_cast_to_int(out, ref, cast_to_int_spv(source_type, type))
@@ -2670,7 +2777,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # was an unconditional host fallback at EVERY dtype before that, f32 included,
   # which is why it did not appear in W5's dtype-gated census bucket.
   @impl true
-  def product(out, t, opts), do: do_reduce(out, t, opts, 3)
+  def product(out, t, opts), do: do_reduce(out, t, opts, 3, :product)
 
   # reverse: reverse along given axes. Composes from slice in some
   # cases but a direct callback handles general patterns.

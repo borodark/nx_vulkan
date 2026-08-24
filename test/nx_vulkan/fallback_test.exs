@@ -716,15 +716,27 @@ defmodule Nx.Vulkan.FallbackTest do
   end
 
   describe "known fallbacks — pinned so promoting one is noticed" do
-    @tag :host_fallback_expected
-    test "u8 reduce_max/reduce_min still fall back — Nx types those {:u, 8}" do
-      # sum of a u8 is {:u, 32} and reduce_axis_u8_to_u32 handles it. max/min
-      # keep the {:u, 8} output type, which would need a byte-PACKED writer
-      # rather than a word one. No workload has asked; the host path is right.
+    test "u8 reduce_max/reduce_min are RESIDENT — the packed writer arrived" do
+      # This asserted the opposite. Its reasoning was sound and its conclusion
+      # expired: sum of a u8 is {:u, 32} and reduce_axis_u8_to_u32 handles it,
+      # while max/min keep the {:u, 8} output type, "which would need a
+      # byte-PACKED writer rather than a word one".
+      #
+      # It does, and cast_s32_to_narrow.comp is that writer. The narrow-integer
+      # pair widens the mask to s32, reduces with the existing kernel and packs
+      # the result back down, so no {:u, 8} reduce kernel was needed either.
+      #
+      # Unlike the middle-axis pin below, this one was not defending a mistake —
+      # it named a real missing capability. It is kept because a pin whose
+      # premise has been satisfied should say so out loud.
       m = mask_of(VulkanoBackend)
       assert Nx.type(Nx.reduce_max(m)) == {:u, 8}
-      assert Fallback.count_total(fn -> Nx.reduce_max(m) end) > 0
-      assert Fallback.count_total(fn -> Nx.reduce_min(m) end) > 0
+      assert Fallback.count_total(fn -> Nx.reduce_max(m) end) == 0
+      assert Fallback.count_total(fn -> Nx.reduce_min(m) end) == 0
+
+      host = Nx.backend_transfer(m, Nx.BinaryBackend)
+      assert Nx.to_number(Nx.reduce_max(m)) == Nx.to_number(Nx.reduce_max(host))
+      assert Nx.to_number(Nx.reduce_min(m)) == Nx.to_number(Nx.reduce_min(host))
     end
 
     test "a MIDDLE-axis u8 sum is RESIDENT — this pin was wrong, and how" do

@@ -218,6 +218,80 @@ defmodule Nx.Vulkan.NarrowIntTest do
     end
   end
 
+  describe "as_type across the narrow widths" do
+    test "narrow -> 32-bit widens by the SOURCE's signedness" do
+      check(fn b -> Nx.as_type(Nx.tensor([200, 255, 1], type: {:u, 8}, backend: b), :s32) end)
+      check(fn b -> Nx.as_type(Nx.tensor([-1, 127, -128], type: {:s, 8}, backend: b), :s32) end)
+      # s8 -1 sign-extends to s32 -1, whose BITS are u32 4294967295 — which is
+      # what Nx answers. Zero-extending would give 255.
+      check(fn b -> Nx.as_type(Nx.tensor([-1], type: {:s, 8}, backend: b), :u32) end)
+      check(fn b -> Nx.as_type(Nx.tensor([-1, 200], type: {:s, 16}, backend: b), :f32) end)
+      check(fn b -> Nx.as_type(Nx.tensor([-1, 200], type: {:s, 16}, backend: b), :f64) end)
+    end
+
+    test "32-bit -> narrow TRUNCATES" do
+      check(fn b -> Nx.as_type(Nx.tensor([300, -5, 1], backend: b), :u8) end)
+      check(fn b -> Nx.as_type(Nx.tensor([300, -5, 1], backend: b), :s8) end)
+      check(fn b -> Nx.as_type(Nx.tensor([70000, -5, 1], backend: b), :s16) end)
+    end
+
+    test "narrow -> narrow round-trips through s32" do
+      check(fn b -> Nx.as_type(Nx.tensor([-1, 127], type: {:s, 8}, backend: b), :u8) end)
+      check(fn b -> Nx.as_type(Nx.tensor([200, 255], type: {:u, 8}, backend: b), :s8) end)
+      check(fn b -> Nx.as_type(Nx.tensor([-1, 127], type: {:s, 8}, backend: b), :s16) end)
+      check(fn b -> Nx.as_type(Nx.tensor([70000, -5], type: {:s, 32}, backend: b), :u16) end)
+    end
+
+    test "a FLOAT source is refused, and the reason is not squeamishness" do
+      # Nx saturates a non-finite float to the DESTINATION's range: :infinity is
+      # 127 at {:s, 8}. Composing float -> s32 -> truncate saturates to
+      # 2147483647 and then truncates to -1. u8 is the one width where the
+      # composition happens to agree, which is an accident and not a rule — so
+      # narrow_as_type/2 refuses float sources outright and leaves them to
+      # cast_to_int_spv/2's direct shaders.
+      nf = fn b -> Nx.tensor([:infinity, :nan, :neg_infinity], backend: b) end
+
+      for {type, expected} <- [
+            {:u8, [255, 0, 0]},
+            {:s8, [127, 0, -128]},
+            {:s16, [32767, 0, -32768]},
+            {:u16, [65535, 0, 0]}
+          ] do
+        assert Nx.to_flat_list(Nx.as_type(nf.(VulkanoBackend), type)) == expected
+      end
+    end
+  end
+
+  describe "reductions over a narrow int" do
+    for type <- @types do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} sum / product widen, reduce_max / reduce_min do NOT" do
+        {as, _} = operands(unquote(type))
+        t = fn b -> Nx.tensor(as, type: unquote(type), backend: b) end
+
+        # Nx widens sum and product to a 32-bit accumulator but keeps the narrow
+        # type for max/min. Both destinations have to work: one retypes the
+        # widened buffer, the other truncates it.
+        check(fn b -> Nx.sum(t.(b)) end)
+        check(fn b -> Nx.product(t.(b)) end)
+        check(fn b -> Nx.reduce_max(t.(b)) end)
+        check(fn b -> Nx.reduce_min(t.(b)) end)
+
+        assert Nx.type(Nx.reduce_max(t.(VulkanoBackend))) == unquote(type)
+      end
+    end
+
+    test "over an axis of a rank-3 narrow tensor" do
+      t = fn b -> Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4}) end
+
+      for axis <- 0..2 do
+        check(fn b -> Nx.sum(t.(b), axes: [axis]) end)
+        check(fn b -> Nx.reduce_max(t.(b), axes: [axis]) end)
+      end
+    end
+  end
+
   describe "multi-dimensional" do
     test "{:s, 8} rank 3, and the result is still resident" do
       check(fn b ->

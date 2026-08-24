@@ -16,10 +16,11 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **735 of 833 doctests (88.2%) run with host fallbacks refused**, of which
-  **724 (86.9%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **741 of 833 doctests (89.0%) run with host fallbacks refused**, of which
+  **730 (87.6%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
-  `multiply/2`, `subtract/2` and `negate/1` are all entirely closed.** The 11-doctest gap is
+  `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2` and
+  `linspace/3` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -70,6 +71,42 @@ defmodule Nx.Vulkan.NxDoctestRegister do
       correction is `- (32 - bits)` and it is exact at 0 too, where clz32 is 32
       and the narrow answer is the width. `population_count(-1)` is 8 at
       `{:s, 8}`; sign-extending would answer 32.
+
+  The same pair then took `as_type` and the reductions, for six more (735 ->
+  741): `sum/2`, `product/2`, `all/2` and `linspace/3` close outright.
+
+    * **`as_type`.** Narrow -> 32-bit widens by the SOURCE's signedness, 32-bit
+      -> narrow truncates, narrow -> narrow does both. **A FLOAT SOURCE IS
+      REFUSED ON PURPOSE.** Nx saturates a non-finite float to the DESTINATION's
+      range, so `:infinity` is `127` at `{:s, 8}`; composing float -> s32 ->
+      truncate saturates to `2147483647` and truncates to `-1`. u8 is the one
+      width where the composition happens to agree — an accident, not a rule,
+      and relying on it would put a wrong answer one dtype away.
+    * **Reductions.** The destination is not always narrow, which is the whole
+      difficulty. Nx widens `sum` and `product` on a narrow int to a 32-bit
+      accumulator but does NOT widen `reduce_max`/`reduce_min`, which keep the
+      narrow type. A 32-bit destination retypes the widened buffer in place; a
+      narrow one truncates it.
+
+  **THREE PINNED TESTS BROKE, and they are worth reading together.**
+
+    * `fallback_test.exs` asserted a middle-axis u8 sum falls back because the
+      case "rotates kept axes to the front" and transpose has no u8 path. There
+      is no rotation. The premise was false and the pin defended it.
+    * `fallback_test.exs` asserted u8 `reduce_max`/`reduce_min` fall back because
+      a `{:u, 8}` output "would need a byte-PACKED writer rather than a word
+      one". True, and `cast_s32_to_narrow.comp` is that writer. A correct pin
+      whose premise got satisfied.
+    * `strict_fallback_test.exs` pinned reduce ATTRIBUTION — that a host reduce
+      names `reduce_max/3` and not the shared helper — and had already been
+      re-pointed once, from u8 `sum` to u8 `reduce_max`, with a comment
+      explaining the byte-packed writer it was now anchored to. It broke again
+      for exactly the reason it had written down. It is now anchored to
+      `{:s, 64}`, which is decided rather than merely unbuilt.
+
+  The rule that falls out: a test about a MECHANISM must not be anchored to a
+  GAP someone is trying to close, and a pin should record a measured limit
+  rather than a belief about why the limit exists.
 
   **u32 is deliberately excluded.** It cannot round-trip through s32 — 3e9 has
   no s32 image — so it needs its own `uint` shaders rather than this trick.
@@ -528,7 +565,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 30 doctests, down from 357 before W5.
+  # 24 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -553,7 +590,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   # — what actually gated them was the axis > 0 concatenate, not the dtype, so
   # they left this bucket without W5 touching it.
   @integer_dtype [
-    {"Nx.all/2", [446]},
     {"Nx.as_type/2", [87, 90]},
     {"Nx.count_leading_zeros/1", [430]},
     {"Nx.fill/3", [821]},
@@ -561,14 +597,11 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
-    {"Nx.linspace/3", [804, 806]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
     {"Nx.pow/2", [241, 242, 244]},
-    {"Nx.product/2", [505]},
     {"Nx.quotient/2", [261]},
     {"Nx.remainder/2", [249]},
     {"Nx.slice_along_axis/4", [683]},
-    {"Nx.sum/2", [466, 467]},
     {"Nx.take/3", [697]},
     {"Nx.tril/2", [23]},
     {"Nx.triu/2", [27]}
