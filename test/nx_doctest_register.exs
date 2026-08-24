@@ -16,9 +16,9 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **714 of 833 doctests (85.7%) run with host fallbacks refused**, of which
-  **703 (84.4%) are genuinely device-resident**. **`dot/7` and `select/4` are
-  both entirely closed.** The 11-doctest gap is
+  **722 of 833 doctests (86.7%) run with host fallbacks refused**, of which
+  **711 (85.4%) are genuinely device-resident**. **`dot/7`, `select/4` and
+  `argmax`/`argmin` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -28,6 +28,45 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `classify_reduce_axes/2` — the MIDDLE axis (+8)
+
+  714/833 -> 722/833, and **`argmax`/`argmin` close entirely**. No shader, no
+  NIF, no new dtype: one predicate, replacing three clauses with the one shape
+  they were all special cases of.
+
+  The reduce shaders push `(outer, reduce_size, inner)` and index
+  `base = o * reduce_size * inner + i`, striding by `inner`. That layout is a
+  CONTIGUOUS RUN of axes over a row-major buffer — dims before the run multiply
+  into `outer`, the run into `reduce_size`, dims after into `inner`. The
+  classifier admitted only three runs: all axes, a leading prefix, a trailing
+  suffix. It left out the run in the middle, which is not an exotic case at all:
+  it is what `axis: 1` means on any rank >= 3.
+
+  One classifier serves four op families, so the gate cost `sum`/`reduce_max`/
+  `reduce_min`, `all`/`any` and `argmax`/`argmin` at once. Only `argmax` and
+  `argmin` show up in this register because only their doctests happen to reduce
+  a middle axis — the count understates the fix by a wide margin.
+
+  **A pinned test was defending the gate.** `fallback_test.exs` asserted that a
+  middle-axis u8 sum falls back, on the reasoning that the case "rotates kept
+  axes to the front", that the rotation is a transpose, and that `transpose_nd`
+  has no u8 path. Every step after the first is sound; the first is false. There
+  is no rotation. The pin recorded a belief about the implementation rather than
+  a measured limit, and a belief defends itself — that entry is now inverted and
+  carries the post-mortem.
+
+  Packed u8 needed no special case either, which was worth asserting rather than
+  arguing: `byte_at(i)` in `reduce_axis_u8_to_u32.comp` takes an ELEMENT index
+  and does the word/byte extraction internally, so its stride arithmetic is in
+  the same units as the s32 shader's. A packed reader that strided in WORDS
+  would have read every fourth element and returned plausible numbers.
+
+  Non-contiguous axes still fall back. `[0, 2]` of a rank-3 shape has axis 1
+  between the two reduced axes and no single slab expresses it; rotating it out
+  the way `gather/4` rotates its axes is separate work.
+  `test/nx_vulkan/reduce_axes_test.exs` covers every contiguous run of a rank-4
+  shape with distinct dims, so a wrong `outer`/`inner` split cannot coincide.
 
   ## `window_reduce/6` — the fold that WON (+5)
 
@@ -438,7 +477,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 51 doctests, down from 357 before W5.
+  # 43 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -465,8 +504,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   @integer_dtype [
     {"Nx.all/2", [446]},
     {"Nx.all_close/3", [460]},
-    {"Nx.argmax/2", [532, 534, 535, 536]},
-    {"Nx.argmin/2", [543, 545, 546, 547]},
     {"Nx.as_type/2", [87, 90]},
     {"Nx.bitwise_not/1", [418, 419]},
     {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},

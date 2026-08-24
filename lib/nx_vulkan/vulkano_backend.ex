@@ -909,10 +909,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @impl true
   def reduce_min(out, t, opts), do: do_reduce(out, t, opts, 2)
 
-  # Resolves the (outer, reduce_size, inner) virtual shape from
-  # `opts[:axes]`. Supports all-axes (collapse to scalar) and
-  # single-axis cases that map cleanly to contiguous slabs. More
-  # exotic patterns fall back to BinaryBackend transfer.
+  # Resolves the (outer, reduce_size, inner) virtual shape from `opts[:axes]`.
+  # Any CONTIGUOUS run of axes maps to one slab — see classify_reduce_axes/2.
+  # Non-contiguous axis sets fall back to BinaryBackend transfer.
   defp do_reduce(
          %T{shape: out_shape, type: type} = out,
          %T{shape: in_shape} = tensor,
@@ -1023,33 +1022,52 @@ defmodule Nx.Vulkan.VulkanoBackend do
   #   - All axes      → outer=1, reduce=product(shape), inner=1
   #   - Leading axes  → outer=1, reduce=product(reduced), inner=product(remaining)
   #   - Trailing axes → outer=product(remaining), reduce=product(reduced), inner=1
+  # The reduce shaders push (outer, reduce_size, inner) and index
+  #
+  #     base = o * reduce_size * inner + i        stride = inner
+  #
+  # which IS a CONTIGUOUS RUN of axes over a row-major buffer: the dims before
+  # the run multiply into `outer`, the run itself into `reduce_size`, the dims
+  # after it into `inner`. Output slot `o * inner + i` is then exactly Nx's
+  # row-major index into the contracted shape.
+  #
+  # This used to be three clauses — all axes, a leading prefix, a trailing
+  # suffix — and every one of them is a special case of that single run. What
+  # they left out was the run in the MIDDLE, which is not exotic: it is what
+  # `axis: 1` means on any rank >= 3. `Nx.argmax(t, axis: 1)` on a rank-3
+  # tensor host-fell-back to a kernel that could always have run it, and so did
+  # `sum`/`reduce_max`/`reduce_min` and `all`/`any`, because all four families
+  # share this one classifier.
+  #
+  # Textbook narrow gate (skill 1b): the `if` was narrower than the shader
+  # behind it. Found by censusing the refused ops rather than the failing
+  # doctests — the doctests said "argmax", the refusals said "every reducer".
+  #
+  # NON-contiguous axes still fall back. [0, 2] of a rank-3 shape has axis 1
+  # sitting between the two reduced axes, so no single slab expresses it;
+  # rotating it out the way `gather/4` rotates its axes is separate work.
   defp classify_reduce_axes(in_shape, axes) do
-    rank = tuple_size(in_shape)
-    sorted = Enum.sort(axes)
     dims = Tuple.to_list(in_shape)
+    sorted = Enum.sort(axes)
+    prod = fn list -> Enum.reduce(list, 1, &Kernel.*/2) end
 
-    cond do
-      sorted == Enum.to_list(0..(rank - 1)//1) ->
-        {:ok, {1, Enum.reduce(dims, 1, &Kernel.*/2), 1}}
+    case sorted do
+      # Reducing no axes at all. Kept because the prefix clause used to accept
+      # it (`0..-1//1` is the EMPTY range, so `[] == []` matched) and a rank-0
+      # tensor arrives here: `all_axes({})` is `[]`.
+      [] ->
+        {:ok, {1, 1, prod.(dims)}}
 
-      sorted == Enum.to_list(0..(length(sorted) - 1)//1) ->
-        reduced = Enum.take(dims, length(sorted))
-        remaining = Enum.drop(dims, length(sorted))
-        outer = 1
-        reduce_size = Enum.reduce(reduced, 1, &Kernel.*/2)
-        inner = Enum.reduce(remaining, 1, &Kernel.*/2)
-        {:ok, {outer, reduce_size, inner}}
+      _ ->
+        lo = hd(sorted)
+        hi = List.last(sorted)
 
-      sorted == Enum.to_list((rank - length(sorted))..(rank - 1)) ->
-        kept = Enum.take(dims, rank - length(sorted))
-        reduced = Enum.drop(dims, rank - length(sorted))
-        outer = Enum.reduce(kept, 1, &Kernel.*/2)
-        reduce_size = Enum.reduce(reduced, 1, &Kernel.*/2)
-        inner = 1
-        {:ok, {outer, reduce_size, inner}}
-
-      true ->
-        :fallback
+        if sorted == Enum.to_list(lo..hi//1) do
+          {:ok, {prod.(Enum.take(dims, lo)), prod.(Enum.slice(dims, lo..hi)),
+           prod.(Enum.drop(dims, hi + 1))}}
+        else
+          :fallback
+        end
     end
   end
 

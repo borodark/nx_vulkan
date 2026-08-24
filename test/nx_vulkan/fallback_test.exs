@@ -727,15 +727,31 @@ defmodule Nx.Vulkan.FallbackTest do
       assert Fallback.count_total(fn -> Nx.reduce_min(m) end) > 0
     end
 
-    @tag :host_fallback_expected
-    test "a MIDDLE-axis u8 sum still falls back" do
-      # The middle-axis case rotates kept axes to the front and reduces the
-      # trailing block — but that rotation is a transpose, and transpose_nd has
-      # no u8 path, so routing a mask through it would trade one fallback for
-      # another. Deliberately excluded; trailing/leading-axis u8 sums are native.
+    test "a MIDDLE-axis u8 sum is RESIDENT — this pin was wrong, and how" do
+      # This test used to assert the opposite, on this reasoning:
+      #
+      #   "The middle-axis case rotates kept axes to the front and reduces the
+      #    trailing block — but that rotation is a transpose, and transpose_nd
+      #    has no u8 path, so routing a mask through it would trade one
+      #    fallback for another."
+      #
+      # The premise is false. A middle-axis reduction needs NO rotation: the
+      # shaders push (outer, reduce_size, inner) and stride by `inner`, which
+      # already expresses a run of axes sitting anywhere in the shape. Nothing
+      # had to be transposed; `classify_reduce_axes/2` simply refused to emit
+      # the slab. See its comment and test/nx_vulkan/reduce_axes_test.exs.
+      #
+      # Worth keeping as a test rather than deleting, because the failure mode
+      # is instructive: a pin that records a BELIEF about the implementation
+      # rather than a measured limit will defend the belief. This one held a
+      # narrow gate shut across four op families for as long as it was trusted.
       i = Nx.iota({2, 3, 4}, type: {:f, 32}, backend: VulkanoBackend)
       m = Nx.greater(i, Nx.tensor(2.0, type: {:f, 32}, backend: VulkanoBackend))
-      assert Fallback.count_total(fn -> Nx.sum(m, axes: [1]) end) > 0
+
+      assert Fallback.count_total(fn -> Nx.sum(m, axes: [1]) end) == 0
+
+      assert Nx.to_flat_list(Nx.sum(m, axes: [1])) ==
+               Nx.to_flat_list(Nx.sum(Nx.backend_transfer(m, Nx.BinaryBackend), axes: [1]))
     end
 
     test "OVERLAPPING pooling backward still falls back" do
