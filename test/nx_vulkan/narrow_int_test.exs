@@ -358,6 +358,27 @@ defmodule Nx.Vulkan.NarrowIntTest do
     end
   end
 
+  describe "broadcast — a WORD copy cannot address a byte" do
+    test "a packed narrow tensor broadcasts by widening first" do
+      for type <- @types do
+        check(fn b -> Nx.broadcast(Nx.tensor([1, 0, 3], type: type, backend: b), {2, 3}) end)
+        check(fn b -> Nx.broadcast(Nx.tensor([[1], [2]], type: type, backend: b), {2, 4}) end)
+        check(fn b -> Nx.broadcast(Nx.tensor(7, type: type, backend: b), {2, 3, 4}) end)
+      end
+    end
+
+    test "tril / triu, which is what needed it" do
+      # Nx.tri/3 builds a u8 mask and broadcasts it to the tensor's shape. That
+      # broadcast was the whole fallback — the multiply that consumes the mask
+      # has been resident since T12, so the op was leaving the device to move
+      # bytes it never computed on.
+      check(fn b -> Nx.triu(Nx.iota({2, 3, 4}, backend: b)) end)
+      check(fn b -> Nx.tril(Nx.iota({2, 3, 4}, backend: b)) end)
+      check(fn b -> Nx.triu(Nx.iota({3, 3}, backend: b), k: 1) end)
+      check(fn b -> Nx.tril(Nx.iota({3, 3}, backend: b), k: -1) end)
+    end
+  end
+
   describe "multi-dimensional" do
     test "{:s, 8} rank 3, and the result is still resident" do
       check(fn b ->

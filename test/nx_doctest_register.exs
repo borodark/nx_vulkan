@@ -16,12 +16,13 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **748 of 833 doctests (89.8%) run with host fallbacks refused**, of which
-  **737 (88.5%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **751 of 833 doctests (90.2%) run with host fallbacks refused**, of which
+  **740 (88.8%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
   `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
   `linspace/3`, `pow/2`, `round/1`,
-  `remainder/2` and `divide/2` are all entirely closed.** The 11-doctest gap is
+  `remainder/2`, `divide/2`, `tril/2`,
+  `triu/2` and `fill/3` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -31,6 +32,25 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## narrow `broadcast` — a word copy cannot address a byte (+3)
+
+  748/833 -> 751/833, past ninety percent. `tril/2`, `triu/2` and `fill/3`
+  close.
+
+  `broadcast_nd.comp` is a WORD copy, so a packed narrow tensor could not ride
+  it. Widening first makes it word-copyable and truncating after puts it back,
+  and the answer is unchanged because broadcast only ever MOVES values — it
+  never computes on them, so there is nothing for the round trip to lose.
+
+  `Nx.tri/3` builds a u8 mask and broadcasts it to the tensor's shape. That
+  broadcast was the entire fallback in `tril`/`triu`: the multiply that consumes
+  the mask has been resident since T12, so the op was leaving the device to move
+  bytes it never computed on.
+
+  Three dispatches instead of one, against a host round trip for the whole
+  tensor. The same trade every other narrow route makes, and the same one
+  `reduce_via_transpose/5` already made for non-contiguous axes.
 
   ## the narrow pair again — MIXED operands and `coerce_to` (+2)
 
@@ -647,7 +667,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 20 doctests, down from 357 before W5.
+  # 17 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -674,7 +694,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   @integer_dtype [
     {"Nx.as_type/2", [87, 90]},
     {"Nx.count_leading_zeros/1", [430]},
-    {"Nx.fill/3", [821]},
     {"Nx.indexed_add/4", [351]},
     {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
@@ -682,9 +701,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
     {"Nx.quotient/2", [261]},
     {"Nx.slice_along_axis/4", [683]},
-    {"Nx.take/3", [697]},
-    {"Nx.tril/2", [23]},
-    {"Nx.triu/2", [27]}
+    {"Nx.take/3", [697]}
   ]
 
   # 37 doctests. GLSL.std.450 defines its transcendentals for 32-bit floats

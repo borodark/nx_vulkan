@@ -2494,12 +2494,38 @@ defmodule Nx.Vulkan.VulkanoBackend do
     out_rank = tuple_size(shape)
     in_rank = tuple_size(t.shape)
 
-    if word_copyable?(type) and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
-         match?(%__MODULE__{}, t.data) and t.type == type do
-      gpu_broadcast(out, t, shape, axes, @broadcast_nd_spv)
-    else
-      t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
-      host_result(out, Nx.broadcast(t_bin, shape, axes: axes))
+    cond do
+      word_copyable?(type) and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
+          match?(%__MODULE__{}, t.data) and t.type == type ->
+        gpu_broadcast(out, t, shape, axes, @broadcast_nd_spv)
+
+      true ->
+        narrow_broadcast(out, t, shape, axes) ||
+          (
+            t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
+            host_result(out, Nx.broadcast(t_bin, shape, axes: axes))
+          )
+    end
+  end
+
+  # `broadcast_nd` is a WORD copy, so a packed narrow tensor cannot ride it —
+  # a word copy cannot address a byte. Widening first makes it word-copyable,
+  # and truncating after puts it back; the answer is the same because broadcast
+  # only ever moves values, never computes on them.
+  #
+  # This is what `Nx.tril/2` and `Nx.triu/2` needed. `Nx.tri/3` builds a u8
+  # mask, and broadcasting that mask to the tensor's shape was the whole
+  # fallback — the multiply that consumes it has been resident since T12.
+  #
+  # Three dispatches instead of one, against a host round trip for the whole
+  # tensor. The same trade every other narrow route makes.
+  defp narrow_broadcast(%T{type: type} = out, t, shape, axes) do
+    if narrow_int?(type) and t.type == type and match?(%__MODULE__{}, t.data) and
+         tuple_size(shape) >= 1 and tuple_size(shape) <= 4 and tuple_size(t.shape) <= 4 do
+      case widen_to_s32(t, :signed) do
+        %T{} = wide -> narrow_from_s32(out, Nx.broadcast(wide, shape, axes: axes))
+        _ -> nil
+      end
     end
   end
 
