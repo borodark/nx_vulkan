@@ -353,8 +353,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
     # exponent gate reads the exponent, and here the exponent is a NARROW
     # tensor: widening it first to ask the question would spend the dispatch
     # this route exists to save, and pow on a narrow int has no caller.
+    # The operands need NOT share `type`, or even each other's. Nx promotes a
+    # mixed narrow pair to a third narrow type — `Nx.remainder(-11 :: s8,
+    # 10 :: u8)` is {:s, 16} — and each side then has to widen by its OWN
+    # signedness before the s32 kernel sees it. Requiring all three types equal
+    # refused exactly that case.
     if narrow_int?(type) and code != 4 and binary_spv({:s, 32}, code) != nil and
-         a.type == type and b.type == type do
+         narrow_int?(a.type) and narrow_int?(b.type) do
       case {widen_to_s32(a, :signed), widen_to_s32(b, :signed)} do
         {%T{} = wa, %T{} = wb} -> narrow_from_s32(out, apply(Nx, op, [wa, wb]))
         _ -> nil
@@ -1544,7 +1549,31 @@ defmodule Nx.Vulkan.VulkanoBackend do
     |> Nx.backend_transfer(__MODULE__)
   end
 
-  defp coerce_to(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
+  # A narrow int (s8/u8/s16/u16) coerced to anything the s32 path can reach.
+  # Widening is lossless — every narrow value fits in s32 — so this composes
+  # with the existing s32 -> f32/f64 casts and adds no shader.
+  #
+  # This is what `Nx.divide(s8, s8)` needs: Nx types integer division as f32, so
+  # the OUTPUT is float while both operands are s8, and `cast_spv/2` had no
+  # entry for the pair. The whole thing went to the host to reach a cast that
+  # already existed one widening away.
+  defp coerce_to(%T{type: from} = t, to) when from != to do
+    if narrow_int?(from) do
+      case widen_to_s32(t, :signed) do
+        nil ->
+          nil
+
+        %T{} = wide ->
+          if to == {:s, 32}, do: wide, else: coerce_to(wide, to)
+      end
+    else
+      coerce_to_cast(t, to)
+    end
+  end
+
+  defp coerce_to(t, to), do: coerce_to_cast(t, to)
+
+  defp coerce_to_cast(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
     case cast_spv(from, to) do
       nil ->
         nil
@@ -1557,7 +1586,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  defp coerce_to(_t, _to), do: nil
+  defp coerce_to_cast(_t, _to), do: nil
 
   # `as_type` across the narrow integers, using the same widen/truncate pair the
   # arithmetic uses. Returns nil when the pair is not covered.

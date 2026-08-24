@@ -16,12 +16,12 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **746 of 833 doctests (89.6%) run with host fallbacks refused**, of which
-  **735 (88.2%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **748 of 833 doctests (89.8%) run with host fallbacks refused**, of which
+  **737 (88.5%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
   `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
-  `linspace/3`, `pow/2`, `round/1` and
-  `remainder/2` are all entirely closed.** The 11-doctest gap is
+  `linspace/3`, `pow/2`, `round/1`,
+  `remainder/2` and `divide/2` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -31,6 +31,28 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## the narrow pair again — MIXED operands and `coerce_to` (+2)
+
+  746/833 -> 748/833, and `divide/2` closes. Two gates, both narrower than the
+  primitive already sitting behind them.
+
+    * **Mixed narrow operands.** `narrow_binary/5` required the two operands and
+      the output to share one type. Nx promotes a mixed narrow pair to a THIRD
+      narrow type — `Nx.remainder(-11 :: s8, 10 :: u8)` is `{:s, 16}`, and that
+      is Nx's own doctest, not a corner case invented for the docs. Each side
+      widens by its OWN signedness, which `widen_to_s32/2` already did
+      per-tensor; only the guard said no.
+    * **`coerce_to/2` had no narrow entry.** `Nx.divide(s8, s8)` is `{:f, 32}`,
+      so the OUTPUT is float while both operands are narrow, and `cast_spv/2`
+      has no `{:s, 8} -> {:f, 32}` pair. The whole op went to the host to reach
+      a cast that already existed one widening away. Widening is lossless — every
+      narrow value fits in s32 — so this composes with the s32 -> f32/f64 casts
+      and adds no shader.
+
+  The second one is the more useful of the two: it is not about `divide`. Any
+  mixed narrow/float op — a u8 mask times an f32 tensor, an s8 count subtracted
+  from an f64 total — was leaving the device for the same reason.
 
   ## two missing float op codes — `round` and `remainder` (+2)
 
@@ -625,7 +647,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 21 doctests, down from 357 before W5.
+  # 20 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -659,7 +681,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.is_nan/1", [406]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
     {"Nx.quotient/2", [261]},
-    {"Nx.remainder/2", [249]},
     {"Nx.slice_along_axis/4", [683]},
     {"Nx.take/3", [697]},
     {"Nx.tril/2", [23]},
@@ -730,7 +751,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.as_type/2", [86, 89, 92]},
     {"Nx.atan2/2", [262, 263, 264]},
     {"Nx.concatenate/2", [719]},
-    {"Nx.divide/2", [254]},
     {"Nx.dot/2", [634]},
     {"Nx.indexed_add/4", [349, 350]}
   ]

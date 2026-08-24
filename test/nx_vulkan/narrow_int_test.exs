@@ -292,6 +292,72 @@ defmodule Nx.Vulkan.NarrowIntTest do
     end
   end
 
+  describe "MIXED narrow operands — each side widens by its OWN signedness" do
+    test "s8 % u8 -> s16, which is Nx's own doctest" do
+      # Nx promotes a mixed narrow pair to a THIRD narrow type. Requiring all
+      # three types to be equal refused exactly this, and it is not a corner
+      # case Nx invented for the docs — any two narrow tensors of different
+      # width or signedness land here.
+      check(fn b ->
+        Nx.remainder(
+          Nx.tensor(-11, type: {:s, 8}, backend: b),
+          Nx.tensor(10, type: {:u, 8}, backend: b)
+        )
+      end)
+
+      assert Nx.type(
+               Nx.remainder(
+                 Nx.tensor(-11, type: {:s, 8}, backend: VulkanoBackend),
+                 Nx.tensor(10, type: {:u, 8}, backend: VulkanoBackend)
+               )
+             ) == {:s, 16}
+    end
+
+    test "every mixed pair of the four widths" do
+      for ta <- @types, tb <- @types, ta != tb do
+        check(fn b ->
+          Nx.add(
+            Nx.tensor([1, 2, 100], type: ta, backend: b),
+            Nx.tensor([3, 4, 100], type: tb, backend: b)
+          )
+        end)
+      end
+    end
+  end
+
+  describe "coerce_to — a narrow operand against a FLOAT output" do
+    test "s8 / s8 is f32, which is Nx's divide doctest" do
+      # Nx types integer division as a float, so the OUTPUT is f32 while both
+      # operands are s8. cast_spv/2 had no entry for that pair and the whole op
+      # went to the host — to reach a cast that already existed one widening
+      # away.
+      check(fn b ->
+        Nx.divide(
+          Nx.tensor([[1], [2]], type: {:s, 8}, backend: b),
+          Nx.tensor([[10, 20]], type: {:s, 8}, backend: b)
+        )
+      end)
+    end
+
+    test "a narrow tensor against a float tensor" do
+      for type <- @types do
+        check(fn b ->
+          Nx.multiply(
+            Nx.tensor([1, 2, 3], type: type, backend: b),
+            Nx.tensor([1.5, 2.5, 0.5], type: {:f, 32}, backend: b)
+          )
+        end)
+
+        check(fn b ->
+          Nx.subtract(
+            Nx.tensor([10, 20, 30], type: type, backend: b),
+            Nx.tensor([1.5, 2.5, 0.5], type: {:f, 64}, backend: b)
+          )
+        end)
+      end
+    end
+  end
+
   describe "multi-dimensional" do
     test "{:s, 8} rank 3, and the result is still resident" do
       check(fn b ->
