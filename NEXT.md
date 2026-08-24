@@ -60,7 +60,7 @@ Current divergence:
 | `HEAD` / local `main` | `d84ed29` | the above + the ninety-percent run (§1.2a) |
 | `origin/main` | `d84ed29` | **level — nothing unbacked** |
 | jetson (192.168.0.250) | `221b8c1` | re-verified there, §1.4 — one commit behind, and that commit is `narrow broadcast` |
-| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `f52a67f` |
+| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `235f99c` |
 | `upstream/main` | `6ab64ac` | **far behind** |
 
 **All four boxes have now seen the ninety-percent run** — Ampere, Maxwell/ARM
@@ -581,7 +581,7 @@ test that deliberately provokes a fallback must opt out of the strict run, and
 the check that would tell you is not the one you are watching.** Run all three
 scripts before calling a run clean, not the two that move.
 
-Fixed in `f52a67f`. Both boxes also confirmed every Kepler-specific risk —
+Fixed in `235f99c`. Both boxes also confirmed every Kepler-specific risk —
 signed overflow wrapping (`pow(2,32) = 0`, `pow(3,20) = -808182895`), the packed
 sub-word tail, `int(b << 24) >> 24` as an arithmetic shift, `round` ties at
 half-away-from-zero, and dividend-signed `remainder` at all four sign pairs.
