@@ -1,17 +1,37 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-23, against `main` @ `00cfe3b`. **W5 is done and five
-follow-on items have landed on top of it** — `stack/3` routing, `gather/4` axis
-rotation, `bitcast/2`, the general contraction and the batched matmul — taking
-residency to **83.9%** and closing `dot/7` entirely. All of it is
-**verified across the whole fleet** (§1.4) — nine commits taking `doctest Nx` residency from **47.2% to 80.4%**.
-W1–W5 are all closed. §1.2 is the write-up; §1.3 is what to do next and is
-measured against the current tree rather than inherited from `MISSION.md` §7,
-whose ranking W5's own census showed to be built on numbers that do not mean
-what they look like.
+**Refreshed:** 2026-08-23, against `main` @ `d84ed29`. W1–W5 are all closed and
+**residency has crossed ninety percent: 751 of 833 (90.2%)**, up from 714
+(85.7%) at the start of the day.
 
-**Everything is pushed and the tree is clean.** `origin/main` is at `00cfe3b`.
+**Eight commits got there and NOT ONE of them was a new arithmetic kernel.**
+Two new `.comp` files landed, both pure format conversion; everything else was a
+gate that was narrower than the shader already behind it. §1.2a is the write-up.
+
+| | doctests | what it actually was |
+|---|---:|---|
+| `classify_reduce_axes/2` | +8 | the middle axis of a reduce. Three clauses replaced by the one shape they were all special cases of |
+| narrow ints (s8/u8/s16/u16) | +13 | widen → the EXISTING s32 kernel → truncate. No arithmetic shader |
+| narrow `as_type` + reductions | +6 | the same pair, applied where narrow ints still left the device |
+| integer `pow` | +3 | one arm, and a gate that reads the DATA |
+| `round` + `remainder` | +2 | two missing float op codes, and three DEAD ones deleted |
+| mixed narrow + `coerce_to` | +2 | operands need not share a type |
+| narrow `broadcast` | +3 | a word copy cannot address a byte |
+
+Closed outright along the way: `argmax`/`argmin`, `bitwise_not/1`,
+`population_count/1`, `max/2`, `min/2`, `multiply/2`, `subtract/2`, `negate/1`,
+`sum/2`, `product/2`, `all/2`, `linspace/3`, `pow/2`, `round/1`, `remainder/2`,
+`divide/2`, `tril/2`, `triu/2`, `fill/3`.
+
+**Verified on a fourth box** — the Jetson Nano, ARM/Tegra X1, Maxwell — which
+matches super-io to the digit and reproduces all 80 `.spv` byte-for-byte (§1.4).
+
+§1.3 is what to do next and is measured against the current tree rather than
+inherited from `MISSION.md` §7, whose ranking W5's own census showed to be built
+on numbers that do not mean what they look like.
+
+**Everything is pushed and the tree is clean.** `origin/main` is at `d84ed29`.
 The 2026-08-17 reboot came and went without incident: the driver is matched at
 **580.178.04** on both sides and `device_name()` is the 3060 Ti (§5).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
@@ -37,10 +57,19 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `00cfe3b` | W1–W5 + `concat_nd`, `scatter`, `argreduce`, `allany`, `stack`, `gather`, `bitcast`, tensordot |
-| `origin/main` | `00cfe3b` | **level — nothing unbacked** |
-| mac-247, mac-248 | `00cfe3b` | **level — both re-verified at `00cfe3b`, §1.4** |
-| `upstream/main` | `6ab64ac` | **59 behind** |
+| `HEAD` / local `main` | `d84ed29` | the above + the ninety-percent run (§1.2a) |
+| `origin/main` | `d84ed29` | **level — nothing unbacked** |
+| jetson (192.168.0.250) | `221b8c1` | re-verified there, §1.4 — one commit behind, and that commit is `narrow broadcast` |
+| mac-247, mac-248 | `00cfe3b` | **STALE — eight commits behind, NOT re-verified.** See below |
+| `upstream/main` | `6ab64ac` | **far behind** |
+
+**The two Keplers are the outstanding verification.** Everything in §1.2a has
+been checked on Ampere (super-io) and on Maxwell/ARM (the Jetson), which is a
+genuinely wide spread — but the GT 650M and GT 750M have not seen any of it, and
+they are the boxes that caught the `sqrt` 3-ULP defect. There is a NEW NIF
+(`cast_spec/5`), so both need a full crate rebuild: `rm -rf _build`, and check
+`function_exported?` rather than trusting a green compile — `mix` will print
+"Generated nx_vulkan app" without rebuilding the crate.
 
 Push with `git push origin main` — **not** `upstream`, which is the public
 release remote and is deliberately behind. Publishing there is a release
@@ -109,15 +138,16 @@ current tree, not from §7's table.
 | **`scatter`, `argreduce`, `allany`** | **done** — not W items; W5's census found all three |
 | **`stack`, `gather`, `bitcast`** | **done** `1feed9a` `580e2db` `ab0c761` — three gate widenings, no new shader between them |
 | **tensordot** | **done** `fda7fc6` `00cfe3b` — general contraction, then batched matmul. **`dot/7` is entirely closed** |
+| **the ninety-percent run** | **done** `27bd82c`…`d84ed29`, eight commits — see §1.2a. 85.7% → 90.2%, and **not one new arithmetic kernel** |
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 699 / 833 (83.9%) run with host fallbacks refused
-#   (688 / 833, 82.6%, device-resident — see §1.2 on the 11-doctest gap)
+#=> doctest Nx residency: 751 / 833 (90.2%) run with host fallbacks refused
+#   (740 / 833, 88.8%, device-resident — see §1.2 on the 11-doctest gap)
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 134 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 82 doctests that still leave the GPU,
 in four reason-bucketed lists; `test_helper.exs` applies it only when fallbacks
 are being refused, so a normal `mix test` still runs and asserts all 833. The
 strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
@@ -344,128 +374,236 @@ probe is. Trading +11 residency for a 12× regression is the 0.2.0 mistake in
 miniature. `bench/reduce_fold_vs_host.exs` is committed so the next person
 re-measures instead of re-deriving.
 
+### 1.2a The ninety-percent run — 714 to 751, and how it was found
+
+Eight commits, `27bd82c` through `d84ed29`. **The thing worth carrying forward
+is not the number; it is the method that produced it.**
+
+#### Census the REFUSED OP, not the failing doctest
+
+`doctest_residency.sh` prints the doctests that fall back. Every previous pass
+over this list read it as a work queue — "argmax has 8, go write argmax" — and
+NEXT.md has already recorded four times that this reads the OP and not the GAP.
+This run stopped reading it that way. The strict error carries the refused
+callback and the output shape/type:
+
+```sh
+awk '/host fallback refused:/{op=$0; sub(/.*refused: /,"",op);
+     getline; getline; sig=$0; gsub(/^ +/,"",sig); print op"  "sig}' pass_b.log \
+  | sort | uniq -c | sort -rn
+```
+
+The doctests said `argmax`. **The refusals said `argmax/3`, and the fix was in
+`classify_reduce_axes/2`, which four op families share.** One predicate, +8
+doctests, and `sum`/`reduce_max`/`reduce_min` and `all`/`any` came along
+uncounted because their doctests happen not to reduce a middle axis. Run that
+awk before writing anything.
+
+#### Test the PREMISE of a "decided" verdict before believing it
+
+§1.3 filed s8/s16/u8/u16 under "needs Int64 or 8/16-bit storage" and this file
+called them decided. **Both halves of that were wrong**, and one probe found it:
+
+```
+s8 create   OK  resident=true  {:s, 8} [1, 2, -3, 4]
+s8 add      FALLBACK: host fallback refused: add/3
+```
+
+Storage already worked. And a second probe — comparing `Nx.BinaryBackend`
+against "widen to s32, compute, truncate" across every binary op — came back
+`MATCHES` on all of them, because BinaryBackend computes narrow integers in full
+precision and applies the width at the end. So the arithmetic never needed the
+storage extension either. Thirteen doctests, no arithmetic shader.
+
+**A "decided" verdict is a claim about the world, and claims can be tested. The
+cheap test is worth more than the reasoning that produced the verdict.**
+
+#### A pin that records a BELIEF will defend it
+
+Three pinned tests broke this run, and the three are worth reading together:
+
+  * `fallback_test.exs` asserted a middle-axis u8 sum falls back because the
+    case "rotates kept axes to the front" and transpose has no u8 path. **There
+    is no rotation.** The premise was false and the pin had been defending it
+    since it was written.
+  * `fallback_test.exs` asserted u8 `reduce_max`/`reduce_min` fall back because
+    a `{:u, 8}` output "would need a byte-PACKED writer rather than a word one".
+    True — and `cast_s32_to_narrow.comp` is now that writer. A correct pin whose
+    premise got satisfied.
+  * `strict_fallback_test.exs` pinned reduce ATTRIBUTION and had **already been
+    re-pointed once**, from u8 `sum` to u8 `reduce_max`, with a comment naming
+    the byte-packed writer it was now anchored to. It broke again for exactly
+    the reason it had written down.
+
+The rule: **a test about a MECHANISM must not be anchored to a GAP someone is
+trying to close.** The attribution test is now anchored to `{:s, 64}`, which is
+decided rather than merely unbuilt. And a pin should record a MEASURED limit,
+never a belief about why the limit exists — the belief outlives its truth and
+argues on its own behalf.
+
+#### Dead code that disagrees with the live table is worse than missing code
+
+`elementwise_binary_f64.comp` defined codes 7/8/9 as equal/less/greater, left
+from before `compare_f64.comp` existed. Unreachable under
+`binary_spv({:f, 64}, code) when code <= 6` — but `@binary_ops` says 8 is
+`remainder`, so **widening that cap by one, which is exactly what adding
+`remainder` does, would have returned a comparison mask.** Correct-looking,
+silently wrong, invisible to a value assertion.
+
+#### A gate may need to read the DATA
+
+Integer `pow` is the one that could not be settled by type. `Nx.BinaryBackend`
+RAISES on a negative integer exponent, and a shader cannot raise — it would
+answer something plausible where the reference errors. So the exponent is proved
+non-negative first: four bytes for a rank-0 exponent, one `reduce_min` plus
+those four bytes otherwise. **Both are cheaper than the host fallback they
+replace**, which moves both operands off the device and the result back.
+
+The consequence for readers: `binary_spv/2` can no longer be read as the whole
+gate for code 4.
+
+#### What the two new shaders actually are
+
+`cast_narrow_to_s32.comp` and `cast_s32_to_narrow.comp`. Neither computes
+anything — they convert between packed sub-word storage and 32-bit words. Every
+narrow-integer op in this run is `widen → an existing kernel → truncate`, which
+is why one pair unlocked arithmetic, `as_type`, the reductions, mixed-type
+operands, `coerce_to` and `broadcast` in turn. **Three dispatches against a host
+round trip for the whole tensor is the trade, and it is the same one
+`reduce_via_transpose/5` already made.**
+
 ### 1.3 What is left, and what it is actually made of
 
-134 doctests still refuse, and **the biggest single group is not work**:
+**82 doctests still refuse**, measured at `d84ed29`. Re-derived from the REFUSED
+OP census (§1.2a) and grouped by REASON, not by op name — which is the whole
+point of §1.2a and is why this table looks nothing like the one it replaces.
 
 | group | doctests | state |
 |---|---:|---|
-| f64 transcendentals + `atan2` | 41 | **decided** — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`/`Atan2` |
-| complex / FFT | 18 | **decided** — the ISA is real-valued |
-| ~~`dot/7`~~ | 0 | **closed** `fda7fc6` `00cfe3b` — general contraction, then batched matmul |
-| `as_type/2` | 12 | **only 6 are closable** — sized below, and it is not "mechanical" |
-| ~~`select/4`~~ | 0 | **closed** `bd74e9a` — the gate wanted a u8 mask; any numeric predicate is normalised now |
-| `concatenate/3` | 8 | **blocked behind an allowlisted `sort/3`**, not by the concat gate — see below |
-| `window_reduce/6` | 5 | arbitrary fun — the same argument as `reduce/5`, and probably the same answer |
-| `argmax`/`argmin`, `indexed_add` at narrow or float dtypes | 11 | s64/u32 need Int64; float `indexed_add` needs `GL_EXT_shader_atomic_float` — both **decided** |
-| ~~`bitcast/2`~~ | 0 | **closed** `ab0c761` — one line, exactly as sized |
-| narrow dtypes (s8/s16/s64/u32) elsewhere | ~15 | needs Int64 or 8/16-bit storage; **check the Kepler fleet before assuming** |
+| f64 transcendentals + `atan2` | 40 | **decided** — GLSL.std.450 has no f64 `Sin`/`Log1p`/`Erf`/`Atan2` |
+| complex — `fft`/`ifft` (16), `conv` (1), `as_type` (2), `is_nan`/`is_infinity` (2) | 21 | **decided** — the ISA is real-valued |
+| `concatenate/3` | 8 | **blocked behind an allowlisted `sort/3`**, not by the concat gate |
+| s64 — `as_type` (2), `indexed_add`, `indexed_put`, `clz` | 5 | **decided** — needs Int64, a device capability this backend does not require |
+| float `indexed_add` | 2 | **decided** — needs `GL_EXT_shader_atomic_float` |
+| f16 / bf16 `as_type` | 2 | **decided** — needs 16-bit float storage |
+| **u32 `quotient`** | 1 | **OPEN, and far bigger than its doctest** — see below |
+| `slice/5`, `indexed_put/5` at s32, `dot/7` | 3 | **unexamined** — three separate one-offs, each needs its own probe |
 
-#### `as_type/2` sized — 6 closable, not 12, and three traps
+Eighty percent of what is left is genuinely decided. The honest reading is that
+**doctest residency is close to its ceiling** and further work should be judged
+on residency in real workloads rather than on this number.
 
-Measured at `580e2db`. The register's 12 split by what each actually needs:
+#### `u32` is the one real remaining gap, and it is understated by its doctest
 
-| what | doctests | verdict |
-|---|---:|---|
-| float → `{:u, 8}` | 5 | **closable** |
-| float → `{:s, 32}` | 1 | **closable** |
-| complex, either direction | 3 | decided |
-| `f32 → {:s, 64}` | 1 | needs `Int64` |
-| `f32 → f16` / `bf16` | 2 | needs 16-bit float storage |
+Exactly one doctest — `Nx.quotient/2` — but **no u32 arithmetic runs on the
+device at all**. `binary_spv/2`, `unary_spv/2` and `compare_spv/1` have no u32
+entry, so `add`, `multiply`, `bitwise_and` and everything else host-fall-back on
+a full-word dtype.
 
-Current coverage is **8 of 20 pairs** across `{u8, s32, u32, f32, f64}`, and every
-one of the eight goes *to* float — nothing converts *to* an integer:
+**It cannot use the narrow-int trick.** Widening works for s8/u8/s16/u16 because
+every value has an s32 image; `3_000_000_000` does not. So u32 needs its own
+shaders — `int` → `uint` copies of `elementwise_binary_s32`,
+`elementwise_binary_bcast_s32`, `elementwise_unary_s32` and `compare_s32`.
 
-```
-from\to     u8      s32     u32     f32     f64
-u8         same    host    host    GPU     GPU
-s32        host    same    host    GPU     GPU
-u32        host    host    same    GPU     GPU
-f32        host    host    host    same    GPU
-f64        host    host    host    GPU     same
-```
+Partial reuse is possible and is a TRAP worth naming. Two's-complement `add`,
+`subtract`, `multiply`, the bitwise family and `left_shift` are bit-identical
+between s32 and u32, so the existing shader could serve those codes. But
+`max`, `min`, `quotient`, `remainder`, `right_shift` and every comparison
+DIFFER, and getting the code list wrong yields plausible wrong numbers rather
+than an error. Four `uint` shaders with no per-code exceptions is the safer
+shape.
 
-Grouped by STORAGE class (packed-u8 / 32-bit word / f64) rather than by dtype,
-filling the matrix is **4-6 new `.comp` files**; the six doctests alone need
-**two**. The u8 output needs packed-byte writes, but `compare_*` and `allany_*`
-already have that idiom.
+Effort: four near-mechanical shader copies plus selector entries. Doctest yield:
+1. Residency yield for anyone using u32: total.
 
-**Three conversion rules, not one, and they disagree:**
+#### `concatenate/3`'s 8 are still `sort/3`'s
 
-| case | `Nx.BinaryBackend` | rule |
-|---|---|---|
-| `:infinity`/`:nan`/`:neg_infinity` → int | `255` / `0` / `0` at u8 | **saturate** to the destination's range, NaN to 0 |
-| `300.0` / `-5.0` / `1.0e10` → u8 | `44` / `251` / `0` | **wrap** mod 2^width, after truncating toward zero |
-| `300` / `-5` (s32) → u8 | `44` / `251` | **wrap**, same as above but from an integer source |
+Unchanged and re-confirmed. Six of the eight are `Nx.mode/2`, which sorts;
+`sort/3` is allowlisted with no GPU sort and no plan for one (`MISSION.md` §3.2),
+and everything downstream of a host fallback computes on the host. Loosening the
+concat gate was re-tried on 2026-08-23 and still fails. **Treat as decided until
+a GPU sort exists.**
 
-So a finite out-of-range float wraps while a non-finite one saturates, in the
-same conversion. And **GLSL's `int(float)` is UNDEFINED out of range** — `int(1.0e10)`
-is itself UB, so even the wrapping branch cannot be written as a plain cast.
+#### The three one-offs, unexamined
 
-That is why §1.3 used to call this "mechanical" and should not have. The work is
-small; the trap surface is not. Write the differential test before the shader.
-
-#### `concatenate/3`'s 8 are really `sort/3`'s, and the §1.1 gate still bites
-
-Six of the eight are `Nx.mode/2`. They are registered against `concatenate/3`
-because that is where the census first notices, but the cause is upstream:
-`mode` sorts, `sort/3` is allowlisted with no GPU sort and no plan for one
-(`MISSION.md` §3.2), and **everything downstream of a host fallback computes on
-the host**. `argmax/3` falls back in the same trace for the same reason, and it
-has had a shader since W5.
-
-Loosening the concat gate to promote host operands was **re-tried on
-2026-08-23 and still fails**, which was worth checking because the conditions
-had changed: `gather/4` now rotates off-prefix axes and `select/4` now
-normalises any predicate. Neither helps. Four `Nx.mode/2` doctests still die
-with `FunctionClauseError ... Nx.BinaryBackend.to_binary/1`, handed a resident
-`s32[1][5][2]` index tensor — the exact failure §1.1 describes. The pinned test
-in `test/nx_vulkan/concat_test.exs` carries the re-run and its date.
-
-**So these 8 are not a concat problem and should not be attacked as one.** They
-need a GPU sort, which §3.2 declines on the grounds that a GPU sort is a project
-and the host path is correct. Treat the group as decided until that changes.
-
-#### `bitcast/2` — 2 doctests for one line
-
-Nx raises on mismatched bit widths, so this backend only ever sees a same-width
-reinterpretation of the same bytes. That is metadata, exactly like `reshape/2`:
-
-```elixir
-def bitcast(%T{type: type} = out, %T{data: %__MODULE__{ref: ref}}),
-  do: put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: type})
-```
-
-Same species as `stack/3`: an op that never asked for a capability it already
-had. Found while sizing `as_type`, which is the argument for sizing.
+`slice/5` at `{1, 5} {:s, 32}`, `indexed_put/5` at `{1, 2, 3} {:s, 32}`, and
+`dot/7` at `{1, 1, 2, 2} {:f, 32}`. Each is a single doctest on an op
+that already has a GPU path, which by this run's own evidence usually means a
+gate rather than a kernel — but none has been probed. **Probe before scoping**;
+that is the whole lesson of §1.2a.
 
 #### Ranked by value over effort
 
-Both of the first two below have since been done — `bitcast` in one line as
-sized, and tensordot in two commits (the general contraction needed no kernel at
-all; only the batched half needed shaders and a NIF). What is left:
+1. **u32 shaders** — 1 doctest, but the only remaining dtype where a whole
+   arithmetic family leaves the device. Do this if anyone uses u32.
+2. **The three one-offs** — cheap to probe, unknown to fix. Half an hour of
+   probing tells you whether any is worth an hour of work.
+3. **Nothing else.** The rest is decided, and saying so is more useful than
+   leaving it looking like a backlog.
 
-1. **`as_type/2` float→int (6)** — worth doing, but budget for the saturate/wrap
-   split above rather than treating it as a port.
-2. **`window_reduce/6` (5)** — MEASURE first, see below.
-3. Nothing else is both closable and cheap. `concatenate/3`'s 8 are blocked
-   behind an allowlisted `sort/3` (above), and the narrow-dtype groups need
-   `Int64` or 8/16-bit storage.
-
-`window_reduce/6` should be MEASURED the way `reduce/5` was —
-`bench/reduce_fold_vs_host.exs` is committed for exactly this — and allowlisted
-if it loses. Do not write that kernel on principle; the last arbitrary-fun op
-lost to the host at every size and by 12x at `reduce_size` 4096.
-
-**The pattern that has paid best is not writing kernels.** Of the ~110 doctests
-closed after W5 T3, roughly two thirds came from widening a gate that was
-narrower than the shader behind it — unary coercion, window padding, scatter
-operand promotion, rank-1 `dot`, `stack` routing, `gather` axis rotation. The
-recurring form is an exact-type-equality or exact-shape guard sitting in front
-of a kernel that could always have done the work. Check for one before reaching
-for GLSL.
+**The pattern that has paid best is still not writing kernels.** Of the 37
+doctests closed in the ninety-percent run, ZERO came from a new arithmetic
+shader. Two `.comp` files landed and both are format conversion. The recurring
+form is an exact-type-equality or exact-shape guard sitting in front of a kernel
+that could always have done the work — and, twice this run, a comment or a
+pinned test explaining why the guard had to be there.
 
 ### 1.4 The fleet re-verifications, and the one thing they caught
+
+**Third run, 2026-08-23 at `221b8c1`**, on a FOURTH box — the Jetson Nano — and
+it is the first ARM/Tegra verification this project has had.
+
+| | super-io (RTX 3060 Ti, Ampere) | jetson (Tegra X1, Maxwell) |
+|---|---|---|
+| `mix test --seed 0` | 833 / 774 / 0 | 833 / 774 / 0 |
+| `doctest_residency.sh` | 746 / 833 (89.6%) | 746 / 833 (89.6%) |
+| register exact both ways | 87 == 87 | 87 == 87 |
+| shaders reproducible | — | **80 / 80 byte-identical** |
+
+Zero divergence, and the shader reproducibility check is new: all 80 `.spv` were
+recompiled from `.comp` with a locally-built glslang 15.1.0 and came out
+byte-identical to the committed binaries. That closes a question nobody had
+asked out loud — whether the checked-in SPIR-V is a build artifact of one
+machine.
+
+**Three things this run pinned that only a second driver generation could.** The
+commits it covered lean on behaviour the Vulkan/GLSL specs do not fully nail
+down, and Maxwell agrees with Ampere on all of it:
+
+  * **Signed integer overflow wraps mod 2^32.** `ipow` chains up to 31 `int`
+    multiplies and must give `pow(2, 32) == 0` and `pow(3, 20) == -808182895`.
+    It does, on both.
+  * **`int(b << 24) >> 24` is an ARITHMETIC shift**, which the narrow-integer
+    widening depends on: 200 as u8 must sign-extend to -56 under the signed
+    variant. Confirmed on the Tegra driver.
+  * **`round` at a tie.** GLSL's built-in `round()` is implementation-defined
+    and may round to even; the shader spells out half-away-from-zero instead.
+    Had it trusted the built-in and this driver picked round-to-even, the tie
+    vector would read `[0, -0, 2, -2, 2, -2, 4, -4]` instead of
+    `[1, -1, 2, -2, 3, -3, 4, -4]`. **This is the strongest evidence yet that
+    pinning a formula beats trusting a built-in** — the divergence it guards
+    against is exactly the kind that only appears on hardware you did not write
+    the code on.
+
+**Two caveats on the Jetson, and they are environmental rather than results.**
+The OTP there is built `--disable-jit` (the default JIT build ICEs in
+`erts/emulator/asmjit`, almost certainly `cc1plus` running out of memory on 4 GB
+of shared DRAM), and the Rust NIF is built with relaxed LTO
+(`CARGO_PROFILE_RELEASE_LTO=false`, `CODEGEN_UNITS=4`) for the same reason.
+Neither affects correctness; both make the box **unsuitable for timings**, which
+was already the standing verdict on it.
+
+**The unified memory finding.** Tegra shares one physical DRAM between CPU and
+GPU, and the memory types confirm it: type 2 is
+`DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`. The load-bearing consequence is
+the negative one — **there is no memory type that is HOST_VISIBLE but NOT
+DEVICE_LOCAL.** An allocator hunting for a separate non-device-local staging
+type finds nothing here. This backend already allocates with
+`PREFER_DEVICE | HOST_SEQUENTIAL_WRITE` and uses no staging buffers, so nothing
+needed changing — but a future staging path would have to notice. Also worth
+knowing: type 3 is host-visible WITHOUT `HOST_COHERENT`, so anything that ever
+selects it needs explicit flush/invalidate.
+
 
 **Second run, 2026-08-23 at `00cfe3b`**, covering `stack`, `gather`, `bitcast`,
 the general contraction and the batched matmul. Both Keplers rebuilt from
