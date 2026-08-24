@@ -219,15 +219,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp binary_spv({:f, 64}, code) when code <= 6, do: @elementwise_binary_f64_spv
   defp binary_spv({:f, 32}, code) when code <= 6, do: @elementwise_binary_f32_spv
 
-  # 3 (divide) and 4 (pow) are the two codes the INTEGER shader lacks, and both
-  # have to be named here rather than assumed unreachable. `Nx.divide` on two
-  # integers really does return {:f, 32}, so 3 never arrives — but `Nx.pow(2, 4)`
-  # is s32 in, s32 out, and it does. The first cut of this clause matched every
-  # code, sent pow to a shader with no case 4, and the `default:` arm returned
-  # `s32 0` instead of 16. That is the exact silent-zero the float clauses above
-  # are guarded against; the integer side needs the same guard.
+  # 3 (divide) is the one code the INTEGER shader lacks, and it has to be named
+  # here rather than assumed unreachable. `Nx.divide` on two integers really
+  # does return {:f, 32}, so 3 never arrives — but `Nx.pow(2, 4)` is s32 in, s32
+  # out, and it does. The first cut of this clause matched every code, sent pow
+  # to a shader with no case 4, and the `default:` arm returned `s32 0` instead
+  # of 16. That is the exact silent-zero the float clauses above are guarded
+  # against; the integer side needs the same guard.
+  #
+  # 4 (pow) has a shader now, but it is NOT admitted by type alone — it needs a
+  # non-negative exponent, which is a property of the DATA. See
+  # `pow_exponent_nonneg?/1` and the pow clause in the dispatch below.
   defp binary_spv({:s, 32}, code) when code != 3 and code != 4,
     do: @elementwise_binary_s32_spv
+
+  defp binary_spv({:s, 32}, 4), do: @elementwise_binary_s32_spv
 
   defp binary_spv(_type, _code), do: nil
 
@@ -330,7 +336,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # If the widened op could itself fall back, the inner call would count a
   # fallback of its own and the census would double-count one op.
   defp narrow_binary(op, code, %T{type: type} = out, a, b) do
-    if narrow_int?(type) and binary_spv({:s, 32}, code) != nil and
+    # Code 4 (pow) is excluded even though the s32 kernel now has it. The
+    # exponent gate reads the exponent, and here the exponent is a NARROW
+    # tensor: widening it first to ask the question would spend the dispatch
+    # this route exists to save, and pow on a narrow int has no caller.
+    if narrow_int?(type) and code != 4 and binary_spv({:s, 32}, code) != nil and
          a.type == type and b.type == type do
       case {widen_to_s32(a, :signed), widen_to_s32(b, :signed)} do
         {%T{} = wa, %T{} = wb} -> narrow_from_s32(out, apply(Nx, op, [wa, wb]))
@@ -391,7 +401,57 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp bcast_binary_spv({:s, 32}, code) when code != 3 and code != 4,
     do: @bcast_binary_s32_spv
 
+  defp bcast_binary_spv({:s, 32}, 4), do: @bcast_binary_s32_spv
+
   defp bcast_binary_spv(_type, _code), do: nil
+
+  # `pow` at an INTEGER type is admitted by the DATA, not by the type.
+  #
+  # `Nx.BinaryBackend` raises ArithmeticError on a negative integer exponent —
+  # `Nx.pow(2, -1)` is an error, not a number — and a compute shader cannot
+  # raise. Admitting one would return a plausible value where the reference
+  # returns an error, which is the same class of failure as the silent zero
+  # `binary_spv/2` guards against, only quieter: nothing downstream would look
+  # wrong.
+  #
+  # So the exponent has to be PROVED non-negative, cheaply:
+  #
+  #   * rank 0 — four bytes. Reading it back is the trade `coerce_to/2` already
+  #     makes for a rank-0 constant: one small round trip against moving the
+  #     whole base tensor.
+  #   * anything else — one `reduce_min` dispatch and then those same four
+  #     bytes. Still strictly cheaper than the host fallback it replaces, which
+  #     transfers BOTH operands off the device and the result back.
+  #
+  # The reduce is only taken when an s32 reduce shader exists, so this cannot
+  # trade one refused fallback for a nested one.
+  defp nonneg_exponent?(%T{shape: {}} = b) do
+    b |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_number() |> Kernel.>=(0)
+  end
+
+  defp nonneg_exponent?(%T{type: {:s, 32}} = b) do
+    if match?(%__MODULE__{}, b.data) and reduce_spv({:s, 32}, {:s, 32}) != nil do
+      Nx.to_number(Nx.reduce_min(b)) >= 0
+    else
+      false
+    end
+  end
+
+  defp nonneg_exponent?(_b), do: false
+
+  # The same-shape path. Float `pow` is unconditional — GLSL.std.450 `Pow` is
+  # defined for negative exponents and the f64 shader has its own arm.
+  defp pow_ok_direct?(_type, code, _b) when code != 4, do: true
+  defp pow_ok_direct?({:f, _}, 4, _b), do: true
+  defp pow_ok_direct?(_type, 4, b), do: nonneg_exponent?(b)
+
+  # The broadcasting path. Floats stay out of it, as they always have: the f64
+  # bcast shader has no `pow` arm at all, so admitting code 4 there would hit
+  # its `default:`. Integers ride the same data gate as above.
+  defp pow_ok_bcast?(_type, code, _b) when code != 4, do: true
+  defp pow_ok_bcast?({:s, 32}, 4, b), do: nonneg_exponent?(b)
+  defp pow_ok_bcast?(_type, 4, _b), do: false
+
 
   for {op, code} <- @binary_ops do
     @impl true
@@ -404,7 +464,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
         a_v.shape == b_v.shape and a_v.shape == shape and a_v.type == b_v.type and
           a_v.type == type
 
-      if spv != nil and shape_match do
+      if spv != nil and shape_match and pow_ok_direct?(type, unquote(code), b_v) do
         %T{data: %__MODULE__{ref: a_ref}} = a_v
         %T{data: %__MODULE__{ref: b_ref}} = b_v
         n = byte_size_of(shape)
@@ -418,7 +478,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
       else
         bspv = bcast_binary_spv(type, unquote(code))
 
-        if bspv != nil and unquote(code) != 4 and bcast_shape_ok?(a_v, b_v, out) do
+        if bspv != nil and pow_ok_bcast?(type, unquote(code), b_v) and
+             bcast_shape_ok?(a_v, b_v, out) do
           # coerce mismatched-dtype operands (e.g. f32 scalar with f64 tensor)
           # to the output type on the GPU, else fall back.
           case {coerce_to(a_v, type), coerce_to(b_v, type)} do

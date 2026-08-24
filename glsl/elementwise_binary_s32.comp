@@ -7,10 +7,11 @@
 //   7=quotient 8=remainder 9=bitwise_and 10=bitwise_or 11=bitwise_xor
 //   12=left_shift 13=right_shift
 //
-// Codes 3 and 4 are UNREACHABLE here and are left out deliberately rather than
-// guessed at. `Nx.divide` on two integers returns {:f, 32}, so an integer
-// divide never reaches this shader; `pow` is refused by its gate. Falling into
-// `default` is the honest answer for both — a wrong one would be silent.
+// Code 3 is UNREACHABLE here and is left out deliberately rather than guessed
+// at: `Nx.divide` on two integers returns {:f, 32}, so an integer divide never
+// reaches this shader. Falling into `default` is the honest answer — a wrong
+// one would be silent. Code 4 (pow) DOES arrive, but only with a non-negative
+// exponent; see `ipow` below.
 //
 // Wrapping is the contract. Nx.BinaryBackend computes s32 arithmetic modulo
 // 2^32 (2e9 + 2e9 -> -294967296), and GLSL signed int overflow wraps the same
@@ -46,6 +47,30 @@ int trunc_div(int x, int y) {
     return ((x < 0) != (y < 0)) ? -q : q;
 }
 
+// Integer exponentiation by squaring. The gate guarantees `e >= 0`, and that
+// guarantee is not free — see the comment on `pow_exponent_nonneg?/1` in
+// vulkano_backend.ex. Nx.BinaryBackend raises `ArithmeticError` on a negative
+// integer exponent, and a shader cannot raise, so admitting one here would
+// trade a correct error for a plausible number.
+//
+// Wrapping is the contract, same as everywhere else in this file:
+// BinaryBackend gives pow(2, 32) = 0 and pow(3, 20) = -808182895, both modulo
+// 2^32, and `int` multiplication wraps identically. A wider accumulator would
+// produce the mathematically nicer answers and the wrong ones.
+//
+// At most 31 iterations: `n` is shifted right each pass.
+int ipow(int base, int e) {
+    int r = 1;
+    int bb = base;
+    uint n = uint(e);
+    while (n != 0u) {
+        if ((n & 1u) != 0u) r *= bb;
+        bb *= bb;
+        n >>= 1u;
+    }
+    return r;
+}
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= p.n) return;
@@ -57,6 +82,7 @@ void main() {
         case 0:  r = x + y; break;
         case 1:  r = x * y; break;
         case 2:  r = x - y; break;
+        case 4:  r = ipow(x, y); break;
         case 5:  r = max(x, y); break;
         case 6:  r = min(x, y); break;
         case 7:  r = trunc_div(x, y); break;

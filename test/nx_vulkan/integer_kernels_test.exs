@@ -1277,16 +1277,72 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
     end
   end
 
-  describe "dtypes that must keep falling back" do
-    # Each of these is a decision, not an oversight: T1 is a 32-bit job, and a
-    # kernel for these dtypes would need Int64 or an 8/16-bit storage extension
-    # that the Kepler fleet does not guarantee. Value parity is still asserted —
-    # the host path is correct, which is the whole point of having one.
-    test "s64, u32, s16 and s8 arithmetic is correct on the host" do
-      for type <- [{:s, 64}, {:u, 32}, {:s, 16}, {:s, 8}] do
+  describe "the other dtypes" do
+    # This used to read "dtypes that must keep falling back", and named an
+    # 8/16-bit storage extension as the reason s16 and s8 could not be done.
+    # They needed no extension — see test/nx_vulkan/narrow_int_test.exs — and
+    # they are resident now. s64 and u32 still are not, for two DIFFERENT
+    # reasons that the old grouping hid:
+    #
+    #   * s64 needs Int64, a device capability this backend does not require.
+    #   * u32 needs its own `uint` shaders. It cannot borrow the s32 ones the
+    #     way s8/s16 do, because 3e9 has no s32 image to round-trip through.
+    #
+    # Value parity is asserted either way — the host path is correct, which is
+    # the whole point of having one.
+    test "s64 and u32 arithmetic is correct on the host" do
+      for type <- [{:s, 64}, {:u, 32}] do
         assert_parity(fn t -> Nx.add(t.([1, 2, 3], type), t.([10, 20, 30], type)) end)
         assert_parity(fn t -> Nx.max(t.([1, 9, 3], type), t.([5, 5, 5], type)) end)
       end
+    end
+
+    test "s16 and s8 arithmetic is correct AND resident" do
+      for type <- [{:s, 16}, {:s, 8}] do
+        assert_parity(fn t -> Nx.add(t.([1, 2, 3], type), t.([10, 20, 30], type)) end)
+        assert_parity(fn t -> Nx.max(t.([1, 9, 3], type), t.([5, 5, 5], type)) end)
+      end
+    end
+  end
+
+  describe "integer pow — admitted by the DATA, not the type" do
+    test "the value, and the wrapping" do
+      # BinaryBackend computes integer pow modulo 2^32, so 2^32 is 0 and 3^20 is
+      # -808182895. `ipow` accumulates in `int` and wraps identically; a wider
+      # accumulator would give the mathematically nicer answers and the wrong
+      # ones — the same argument reduce_axis_s32.comp makes for its accumulator.
+      assert_parity(fn t -> Nx.pow(t.([2, 3, 2, 0, -2, -2], {:s, 32}), t.([4, 20, 32, 0, 3, 2], {:s, 32})) end)
+      assert_parity(fn t -> Nx.pow(t.([1, 2, 3], {:s, 32}), 2) end)
+    end
+
+    test "broadcasting, which is the doctest's shape" do
+      assert_parity(fn t ->
+        Nx.pow(Nx.reshape(t.([2, 3], {:s, 32}), {2, 1}), Nx.reshape(t.([4, 5], {:s, 32}), {1, 2}))
+      end)
+    end
+
+    test "a NEGATIVE exponent still raises, and that is the point of the gate" do
+      # `Nx.pow(2, -1)` is an ArithmeticError on BinaryBackend, not a number. A
+      # compute shader cannot raise, so it would answer something plausible and
+      # nothing downstream would look wrong. The gate proves the exponent
+      # non-negative before dispatching — four bytes for a rank-0 exponent, one
+      # reduce_min plus four bytes otherwise — and hands the rest to the host,
+      # which raises correctly.
+      base = Nx.tensor([2, 3], backend: VulkanoBackend)
+
+      assert_raise ArithmeticError, fn -> Nx.pow(base, -1) end
+
+      assert_raise ArithmeticError, fn ->
+        Nx.pow(base, Nx.tensor([2, -1], backend: VulkanoBackend))
+      end
+
+      # And the mixed tensor case still WORKS when every exponent is fine, so
+      # the gate is not simply refusing all tensor exponents.
+      assert Nx.to_flat_list(Nx.pow(base, Nx.tensor([2, 3], backend: VulkanoBackend))) == [4, 27]
+    end
+
+    test "float pow is untouched, negative exponents included" do
+      assert_parity(fn t -> Nx.pow(t.([2.0, 4.0], {:f, 32}), t.([0.5, -1.0], {:f, 32})) end)
     end
   end
 end

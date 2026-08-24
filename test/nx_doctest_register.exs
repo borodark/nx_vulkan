@@ -16,11 +16,11 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **741 of 833 doctests (89.0%) run with host fallbacks refused**, of which
-  **730 (87.6%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **744 of 833 doctests (89.3%) run with host fallbacks refused**, of which
+  **733 (88.0%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
-  `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2` and
-  `linspace/3` are all entirely closed.** The 11-doctest gap is
+  `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
+  `linspace/3` and `pow/2` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -30,6 +30,38 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## integer `pow` — admitted by the DATA, not the type (+3)
+
+  741/833 -> 744/833, and `pow/2` closes.
+
+  `ipow` is exponentiation by squaring in `int`, which wraps exactly as
+  BinaryBackend does — `pow(2, 32)` is 0 and `pow(3, 20)` is -808182895. Same
+  argument `reduce_axis_s32.comp` makes for its accumulator: a wider one would
+  give the mathematically nicer answers and the wrong ones.
+
+  **The interesting part is the gate, not the kernel.** `Nx.BinaryBackend`
+  RAISES `ArithmeticError` on a negative integer exponent — `Nx.pow(2, -1)` is
+  an error, not a number — and a compute shader cannot raise. Dispatching one
+  anyway would return something plausible where the reference returns an error,
+  which is the silent-zero failure class one level quieter: nothing downstream
+  would look wrong.
+
+  So the exponent is PROVED non-negative before dispatch, cheaply:
+
+    * rank 0 — four bytes, the same trade `coerce_to/2` already makes for a
+      rank-0 constant;
+    * otherwise — one `reduce_min` dispatch and then those same four bytes,
+      still strictly cheaper than the host fallback it replaces, which moves
+      BOTH operands off the device and the result back.
+
+  That third doctest (`Nx.pow([[2],[3]], [[4,5]])`) is the one that made the
+  reduce worth writing rather than settling for scalar exponents.
+
+  `binary_spv/2`'s guard on codes 3 and 4 is now a guard on 3 alone. Code 4 is
+  no longer refused by TYPE, which means the type selector can no longer be read
+  as the whole gate — the data check sits in the dispatch and `narrow_binary/5`
+  has to exclude code 4 itself.
 
   ## narrow integers — s8/u8/s16/u16 without a narrow ALU (+13)
 
@@ -565,7 +597,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 24 doctests, down from 357 before W5.
+  # 21 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -598,7 +630,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
-    {"Nx.pow/2", [241, 242, 244]},
     {"Nx.quotient/2", [261]},
     {"Nx.remainder/2", [249]},
     {"Nx.slice_along_axis/4", [683]},

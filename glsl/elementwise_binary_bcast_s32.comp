@@ -3,8 +3,8 @@
 // Broadcasting s32 elementwise binary op (rank <= 4). The integer twin of
 // elementwise_binary_bcast_f32.comp: identical index arithmetic, identical
 // params layout [rank, out[4], a[4], b[4]], and the same spec-constant op codes
-// as elementwise_binary_s32.comp — see that file for why 3 and 4 are absent and
-// why wrapping is the correct contract.
+// as elementwise_binary_s32.comp — see that file for why 3 is absent, why 4
+// requires a non-negative exponent, and why wrapping is the correct contract.
 //
 // This is the arm that carries `Nx.add(tensor, 1)`. Nx materialises literals as
 // {:s, 32}, so a scalar integer against an s32 tensor arrives here as a rank-0
@@ -29,6 +29,30 @@ int trunc_div(int x, int y) {
     uint uy = uint(abs(y));
     int q = int(ux / uy);
     return ((x < 0) != (y < 0)) ? -q : q;
+}
+
+// Integer exponentiation by squaring. The gate guarantees `e >= 0`, and that
+// guarantee is not free — see the comment on `pow_exponent_nonneg?/1` in
+// vulkano_backend.ex. Nx.BinaryBackend raises `ArithmeticError` on a negative
+// integer exponent, and a shader cannot raise, so admitting one here would
+// trade a correct error for a plausible number.
+//
+// Wrapping is the contract, same as everywhere else in this file:
+// BinaryBackend gives pow(2, 32) = 0 and pow(3, 20) = -808182895, both modulo
+// 2^32, and `int` multiplication wraps identically. A wider accumulator would
+// produce the mathematically nicer answers and the wrong ones.
+//
+// At most 31 iterations: `n` is shifted right each pass.
+int ipow(int base, int e) {
+    int r = 1;
+    int bb = base;
+    uint n = uint(e);
+    while (n != 0u) {
+        if ((n & 1u) != 0u) r *= bb;
+        bb *= bb;
+        n >>= 1u;
+    }
+    return r;
 }
 
 void main() {
@@ -66,6 +90,7 @@ void main() {
         case 0:  r = x + y; break;
         case 1:  r = x * y; break;
         case 2:  r = x - y; break;
+        case 4:  r = ipow(x, y); break;
         case 5:  r = max(x, y); break;
         case 6:  r = min(x, y); break;
         case 7:  r = trunc_div(x, y); break;
