@@ -755,7 +755,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
 | ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| ~~Re-verify on the Keplers~~ | **done twice** — 2026-08-22 at `f0d9c96` (found one defect, in a test) and again 2026-08-23 at `00cfe3b` covering the new NIF. Both boxes report 699/833 (83.9%), 833/609/0, 208 excluded, identical to super-io. §1.4 | |
+| **Re-verify on the Keplers — OPEN AGAIN** | done twice before (2026-08-22 at `f0d9c96`, which found one defect in a test, and 2026-08-23 at `00cfe3b`), but both boxes are now **eight commits behind at `00cfe3b`**. The ninety-percent run has only been seen by super-io and the Jetson. There is a new NIF (`cast_spec/5`), so this needs `rm -rf _build` and a `function_exported?` check | anyone |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -906,11 +906,11 @@ time.
 mix test
 
 # strict — did the work stay on the GPU?
-sh scripts/strict_test.sh            # 833/609/0, 208 excluded
+sh scripts/strict_test.sh            # 833/780/0, excluded count moves with the register
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 699 / 833 (83.9%), exits 0
-                                     # 688 / 833 (82.6%) device-resident
+sh scripts/doctest_residency.sh      # 751 / 833 (90.2%), exits 0
+                                     # 740 / 833 (88.8%) device-resident
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
