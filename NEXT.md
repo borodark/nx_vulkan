@@ -640,7 +640,85 @@ already the standing verdict, now for a concrete reason rather than a general
 one. `sudo nvpmodel -m 0` would restore all four cores; it needs root, which
 nobody has there.
 
-#### EXLA on the Jetson — CPU-only is a GO, CUDA is permanently impossible
+#### EXLA on the Jetson — INSTALLED, and the fleet finally has a second reference
+
+Built 2026-08-24. `parity_test.exs` had self-skipped on every box since it was
+written; the Jetson is now the first box in the project's history to run it.
+
+**The blocker was the C++ compiler, not any of the three risks that were sized.**
+EXLA 0.13 depends on `fine`, whose header needs CTAD to deduce an EMPTY
+parameter pack from `return fine::Ok();`. GCC <= 8 cannot, and an explicit
+deduction guide does not rescue it. Ubuntu 18.04 ships g++ 7.5 and the box also
+had 8.4 — `g++-8` fixed all the absl/XLA header errors and left exactly that
+one. **`g++-13` from `ppa:ubuntu-toolchain-r/test` fixed it outright** (that PPA
+carries 9 through 16 for bionic/arm64; 13 was chosen because it is the version
+super-io runs and was empirically confirmed to compile the failing construct
+before anyone spent a `sudo` on it). Note `add-apt-repository` is broken on that
+box — its `softwareproperties` Python module is missing — so the repo has to be
+added by hand.
+
+**Memory was never the problem, and the prediction about WHICH unit was wrong.**
+Peak 3222 MB used / 1005 MB available, and zram was never touched. The worst
+translation unit was `exla.cc` — the one that used to fail — not the
+template-heavy `exla_mlir.cc`, which came third CHEAPEST. 11m20s at `-j1`.
+
+**Two previously untested claims are now tested facts.** The prebuilt
+`libxla_extension.so` needs `GLIBC_2.27` and the box has exactly 2.27 — zero
+margin, and it loads. And the no-LSE-atomics reading of the disassembly is
+confirmed by execution: an LSE instruction on this ARMv8.0 A57 would have
+trapped in `Nx.dot`. Both were static arguments until something actually ran.
+
+##### The parity result — 18 pass, 0 fail, `parity_score: 1.0`
+
+**Seventeen of eighteen fixtures agree with XLA to the BIT** (`max_err` exactly
+0.0): `sum`, `product`, all four `cumulative_*`, `sort`, `argsort`, `reverse`,
+`determinant` at f64, the boolean family, and `dot` at f64 both 8x8 and
+16x32 @ 32x8.
+
+The single non-zero is **`dot` at f32, 8x8: `9.5367431640625e-7`** — exactly
+2^-20, about 1 ULP at that magnitude, against a 1e-6 tolerance. It does NOT
+appear in the f64 path, so it is FMA/accumulation-order in the f32 matmul and
+not a defect. Same species as the Ampere/Kepler `sqrt` divergence in §1.4.
+
+The two skips are `fft` and `conv`, both marked `expected_status: :skip`. `fft`
+is the one genuine capability divergence: EXLA computes it, this backend raises,
+which is the standing decision that the ISA is real-valued.
+
+##### Enabling EXLA changes none of the numbers
+
+All three acceptance scripts, both configurations, on the Jetson at `a950c9f`:
+
+| | with `NXV_WITH_EXLA=1` | without |
+|---|---|---|
+| `mix test` | 833 / 780 / 0 | 833 / 780 / 0 |
+| `strict_test.sh` | 0 failures, 156 excluded | 0 failures, 156 excluded |
+| `doctest_residency.sh` | 751 / 833 (90.2%), 82 == 82 | 751 / 833 (90.2%), 82 == 82 |
+
+##### TOGGLING THE FLAG POISONS `_build`, IN EITHER DIRECTION
+
+The one real trap, and it is worth knowing before it costs someone an hour.
+`mix` bakes the resolved dependency list into
+`_build/<env>/lib/nx_vulkan/ebin/nx_vulkan.app` and does NOT regenerate it when
+only the environment changed, because no SOURCE changed. A flagged build leaves
+`exla` in that file's `applications` list, and the next unflagged run aborts
+before a single test:
+
+```
+** (Mix) Could not start application exla: could not find application file: exla.app
+```
+
+```sh
+rm -f _build/test/lib/nx_vulkan/ebin/nx_vulkan.app \
+      _build/test/lib/nx_vulkan/.mix/compile.app_cache
+```
+
+No recompile, nothing tracked touched. `rm -rf _build` is equally safe and costs
+nothing: the 11-minute NIF build lands in `deps/exla/cache/` and `_build` only
+symlinks to it — a re-flag after clearing took 14.7s.
+
+#### The original research, for reference — and where it was wrong
+
+##### The pre-attempt research said GO, and was right about everything except the compiler
 
 Researched 2026-08-23. `parity_test.exs` self-skips with "EXLA not available" on
 every box in the fleet, so a second independent reference has never existed. On

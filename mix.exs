@@ -89,6 +89,24 @@ defmodule Nx.Vulkan.MixProject do
   # The flag is needed for BOTH — `deps/0` is evaluated every time, so a build
   # without it simply does not see the dependency.
   #
+  # TOGGLING THE FLAG POISONS `_build`, IN EITHER DIRECTION. `mix` bakes the
+  # resolved dependency list into `_build/<env>/lib/nx_vulkan/ebin/nx_vulkan.app`
+  # and does not regenerate it when only the environment changed, because no
+  # SOURCE changed. So a flagged build leaves `exla` in that file's
+  # `applications` list, and the next unflagged run aborts before a single test:
+  #
+  #     ** (Mix) Could not start application exla:
+  #        could not find application file: exla.app
+  #
+  # Clear the two stale artifacts — no recompile, and nothing tracked is
+  # touched:
+  #
+  #     rm -f _build/test/lib/nx_vulkan/ebin/nx_vulkan.app \
+  #           _build/test/lib/nx_vulkan/.mix/compile.app_cache
+  #
+  # `rm -rf _build` is equally safe and costs nothing here: the 11-minute NIF
+  # build lands in `deps/exla/cache/`, and `_build` only symlinks to it.
+  #
   # Known-good targets: super-io (linux x86_64) and the Jetson
   # (linux aarch64, CPU only — its CUDA is 10.2 and permanently so, while the
   # prebuilts start at CUDA 12). See NEXT.md §1.4.
