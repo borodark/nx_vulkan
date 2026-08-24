@@ -1,0 +1,62 @@
+#version 450
+
+// Narrow a full s32 word back to a PACKED narrow integer (s8/u8/s16/u16).
+// The inverse of cast_narrow_to_s32.comp; see that file for why the pair
+// exists and why truncation is the correct rule rather than saturation.
+//
+// Truncation is what `Nx.BinaryBackend` does: a narrow integer result is the
+// low `width` bits of the full-precision answer, so 127 + 2 at {:s, 8} is -127
+// and not 127. Only the SOURCE's signedness matters when widening; on the way
+// back down the destination's signedness is irrelevant, because the low bits
+// are the same either way. `kind` is still carried in full so the two shaders
+// can share one selector and one spec-constant encoding.
+//
+// ONE INVOCATION PER OUTPUT WORD, not per element, so nothing atomic is needed:
+// each thread owns its whole word and assembles all four bytes (or both
+// halfwords) itself. allany_*.comp went the other way — one thread per slot
+// with atomicOr — because there each slot ran a whole reduction loop and
+// four-per-thread serialised four reductions. Here a lane is a single load, so
+// the packing is free and the atomics are not worth their cost.
+//
+// The dispatch is still sized by ELEMENT count `n`, which over-dispatches by
+// 4x (or 2x); the surplus threads return on the `w >= words` guard. Sizing it
+// by words would need a second NIF entry point for no measurable gain — these
+// casts are bracketing an arithmetic dispatch, not standing alone.
+//
+// The tail lane is written as 0 rather than left alone: `outp` is writeonly and
+// a partial word must still be fully defined, or the padding bytes of the last
+// word would be whatever the allocator left there.
+
+layout(local_size_x = 256) in;
+
+// 0 = u8, 1 = s8, 2 = u16, 3 = s16
+layout(constant_id = 0) const int kind = 0;
+
+layout(std430, binding = 0) readonly buffer In { int inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint outp[]; };
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint per = (kind < 2) ? 4u : 2u;
+    uint words = (p.n + per - 1u) / per;
+    if (w >= words) return;
+
+    uint acc = 0u;
+
+    if (per == 4u) {
+        for (uint k = 0u; k < 4u; ++k) {
+            uint idx = w * 4u + k;
+            uint b = (idx < p.n) ? (uint(inp[idx]) & 0xFFu) : 0u;
+            acc |= b << (k * 8u);
+        }
+    } else {
+        for (uint k = 0u; k < 2u; ++k) {
+            uint idx = w * 2u + k;
+            uint h = (idx < p.n) ? (uint(inp[idx]) & 0xFFFFu) : 0u;
+            acc |= h << (k * 16u);
+        }
+    }
+
+    outp[w] = acc;
+}

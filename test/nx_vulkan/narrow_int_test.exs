@@ -1,0 +1,229 @@
+defmodule Nx.Vulkan.NarrowIntTest do
+  @moduledoc """
+  s8 / u8 / s16 / u16 elementwise arithmetic, without a narrow-integer ALU.
+
+  `Nx.BinaryBackend` computes every narrow integer op in full precision and
+  truncates the result to the destination width, so
+
+      widen -> the existing s32 kernel -> truncate
+
+  reproduces it exactly. `cast_narrow_to_s32.comp` and `cast_s32_to_narrow.comp`
+  are that pair; nothing else was written.
+
+  The register filed this family under "needs 8/16-bit storage", which was wrong
+  twice over. Storage already worked — a `{:s, 8}` tensor has always been
+  device-resident, packed the same way a u8 mask is. And the arithmetic never
+  needed the storage extension: it needed two casts and a routing decision.
+
+  **The values are the easy half.** A host fallback returns a bit-identical
+  answer, so every value assertion below would pass with the whole feature
+  reverted. `assert_resident/1` is the half that can see anything.
+
+  The cases that actually discriminate:
+
+    * **Overflow.** `127 + 2` at `{:s, 8}` is `-127`, not `127`. Truncation, not
+      saturation — the opposite of the rule `as_type` applies to a non-finite
+      float, in the same backend.
+    * **Sign extension.** `200` at `{:u, 8}` must widen to `200`, not `-56`.
+    * **Width-dependent unaries.** `count_leading_zeros(1)` is 7 at `{:s, 8}`
+      and 31 at `{:s, 32}`; `population_count(-1)` is 8 at `{:s, 8}`. Both are
+      defined on the declared width's BITS, so both must zero-extend where
+      arithmetic sign-extends.
+    * **The packed tail.** A length that is not a multiple of 4 (or 2) leaves a
+      partial final word, and the shader must define all of it.
+  """
+  use ExUnit.Case, async: false
+
+  alias Nx.Vulkan.VulkanoBackend
+
+  setup_all do
+    {:ok, _} = Application.ensure_all_started(:nx_vulkan)
+    :ok
+  end
+
+  defp assert_resident(t) do
+    assert match?(%VulkanoBackend{}, t.data),
+           "expected the result to stay on the GPU, got #{inspect(t.data.__struct__)}"
+
+    t
+  end
+
+  defp check(build) do
+    got = build.(VulkanoBackend) |> assert_resident()
+    ref = build.(Nx.BinaryBackend)
+    assert Nx.type(got) == Nx.type(ref)
+    assert Nx.shape(got) == Nx.shape(ref)
+    assert Nx.to_flat_list(got) == Nx.to_flat_list(ref)
+  end
+
+  # Deliberately awkward: the extremes of each width, values that overflow when
+  # combined, negatives, and a LENGTH THAT IS NOT A MULTIPLE OF 4 so the packed
+  # tail word is exercised.
+  defp operands({:s, 8}), do: {[127, -128, 100, -100, 3, -3, 0, 1, 42], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
+  defp operands({:u, 8}), do: {[0, 1, 200, 255, 128, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
+  defp operands({:s, 16}), do: {[32767, -32768, 300, -300, 3, -3, 0, 1, 999], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
+  defp operands({:u, 16}), do: {[0, 1, 60000, 65535, 32768, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
+
+  @types [{:s, 8}, {:u, 8}, {:s, 16}, {:u, 16}]
+
+  # `divide` and `pow` are absent on purpose: Nx types `divide` on integers as a
+  # float, and the s32 kernel has no `pow` — so neither can reach a narrow
+  # integer output, and narrow_binary/5 refuses both codes explicitly.
+  @binary [:add, :subtract, :multiply, :max, :min, :quotient, :remainder,
+           :bitwise_and, :bitwise_or, :bitwise_xor]
+
+  describe "elementwise binary, same shape" do
+    for type <- @types, op <- @binary do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} #{op}" do
+        {as, bs} = operands(unquote(type))
+        op = unquote(op)
+
+        check(fn b ->
+          apply(Nx, op, [
+            Nx.tensor(as, type: unquote(type), backend: b),
+            Nx.tensor(bs, type: unquote(type), backend: b)
+          ])
+        end)
+      end
+    end
+  end
+
+  describe "the shifts — the count must be in range for every element" do
+    for type <- @types do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} left_shift / right_shift" do
+        {as, _} = operands(unquote(type))
+        shifts = Enum.map(1..length(as), &rem(&1, 4))
+
+        for op <- [:left_shift, :right_shift] do
+          check(fn b ->
+            apply(Nx, op, [
+              Nx.tensor(as, type: unquote(type), backend: b),
+              Nx.tensor(shifts, type: unquote(type), backend: b)
+            ])
+          end)
+        end
+      end
+    end
+  end
+
+  describe "broadcasting — a scalar operand rides the s32 bcast kernel" do
+    for type <- @types do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} tensor + scalar" do
+        {as, _} = operands(unquote(type))
+
+        check(fn b ->
+          Nx.add(
+            Nx.tensor(as, type: unquote(type), backend: b),
+            Nx.tensor(3, type: unquote(type), backend: b)
+          )
+        end)
+      end
+    end
+  end
+
+  describe "elementwise unary" do
+    for type <- @types, op <- [:negate, :abs, :sign, :bitwise_not] do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} #{op}" do
+        {as, _} = operands(unquote(type))
+        op = unquote(op)
+        check(fn b -> apply(Nx, op, [Nx.tensor(as, type: unquote(type), backend: b)]) end)
+      end
+    end
+  end
+
+  describe "the width-dependent unaries" do
+    for type <- @types do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} count_leading_zeros / population_count" do
+        {as, _} = operands(unquote(type))
+
+        for op <- [:count_leading_zeros, :population_count] do
+          check(fn b -> apply(Nx, op, [Nx.tensor(as, type: unquote(type), backend: b)]) end)
+        end
+      end
+    end
+
+    test "clz is counted at the DECLARED width, not at 32" do
+      # The assertion that would have caught a missing `- (32 - bits)`: the same
+      # value, four widths, four different answers.
+      one = fn t, b -> Nx.count_leading_zeros(Nx.tensor([1], type: t, backend: b)) end
+
+      for {type, expected} <- [{{:s, 8}, 7}, {{:u, 8}, 7}, {{:s, 16}, 15}, {{:u, 16}, 15}] do
+        assert Nx.to_flat_list(one.(type, VulkanoBackend)) == [expected]
+      end
+
+      # And zero, where the 32-bit answer is 32 and the narrow one is the width.
+      zero = fn t, b -> Nx.count_leading_zeros(Nx.tensor([0], type: t, backend: b)) end
+
+      for {type, expected} <- [{{:s, 8}, 8}, {{:u, 8}, 8}, {{:s, 16}, 16}, {{:u, 16}, 16}] do
+        assert Nx.to_flat_list(zero.(type, VulkanoBackend)) == [expected]
+      end
+    end
+
+    test "population_count reads the BITS, so a negative is not sign-extended" do
+      # -1 at {:s, 8} has eight set bits, not thirty-two. Sign-extending on the
+      # way up would answer 32 and look entirely plausible.
+      assert Nx.to_flat_list(
+               Nx.population_count(Nx.tensor([-1, -128, 127], type: {:s, 8}, backend: VulkanoBackend))
+             ) == [8, 1, 7]
+    end
+  end
+
+  describe "overflow truncates — it does NOT saturate" do
+    test "{:s, 8} addition wraps at 127" do
+      a = Nx.tensor([127, 127, -128], type: {:s, 8}, backend: VulkanoBackend)
+      b = Nx.tensor([1, 2, -1], type: {:s, 8}, backend: VulkanoBackend)
+      assert Nx.to_flat_list(Nx.add(a, b)) == [-128, -127, 127]
+    end
+
+    test "{:u, 8} multiplication wraps at 255" do
+      a = Nx.tensor([200, 16, 255], type: {:u, 8}, backend: VulkanoBackend)
+      b = Nx.tensor([2, 16, 255], type: {:u, 8}, backend: VulkanoBackend)
+      assert Nx.to_flat_list(Nx.multiply(a, b)) == [144, 0, 1]
+    end
+
+    test "an unsigned narrow value widens by ZERO extension" do
+      # 200 at {:u, 8} must widen to 200. Sign-extending would make it -56, and
+      # then `min(200, 100)` would answer 200 instead of 100 — a wrong answer
+      # that is still in range and still looks like a plausible minimum.
+      a = Nx.tensor([200, 255, 128], type: {:u, 8}, backend: VulkanoBackend)
+      b = Nx.tensor([100, 100, 100], type: {:u, 8}, backend: VulkanoBackend)
+      assert Nx.to_flat_list(Nx.min(a, b)) == [100, 100, 100]
+      assert Nx.to_flat_list(Nx.max(a, b)) == [200, 255, 128]
+      assert Nx.to_flat_list(Nx.quotient(a, b)) == [2, 2, 1]
+    end
+  end
+
+  describe "the packed tail" do
+    for {type, per_word} <- [{{:s, 8}, 4}, {{:u, 8}, 4}, {{:s, 16}, 2}, {{:u, 16}, 2}] do
+      type = Macro.escape(type)
+
+      test "#{inspect(type)} at every length around a word boundary" do
+        for n <- 1..(unquote(per_word) * 2 + 1) do
+          check(fn b ->
+            t = Nx.tensor(Enum.map(1..n, &rem(&1 * 37, 100)), type: unquote(type), backend: b)
+            Nx.add(t, t)
+          end)
+        end
+      end
+    end
+  end
+
+  describe "multi-dimensional" do
+    test "{:s, 8} rank 3, and the result is still resident" do
+      check(fn b ->
+        t = Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4})
+        Nx.multiply(t, t)
+      end)
+    end
+  end
+end

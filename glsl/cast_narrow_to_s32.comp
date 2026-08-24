@@ -1,0 +1,53 @@
+#version 450
+
+// Widen a PACKED narrow integer (s8/u8/s16/u16) to a full s32 word.
+//
+// This is half of the pair that makes narrow-integer arithmetic possible
+// without a narrow-integer ALU. `Nx.BinaryBackend` computes every narrow
+// integer op in full precision and truncates the result to the destination
+// width, so
+//
+//     widen -> run the EXISTING s32 kernel -> truncate
+//
+// reproduces it exactly, for add/subtract/multiply/max/min/quotient/remainder/
+// the bitwise family/the shifts. That was verified against BinaryBackend before
+// either shader was written, not assumed: see test/nx_vulkan/narrow_int_test.exs.
+//
+// So s8 and s16 need no new arithmetic. They need this, its inverse, and a
+// routing decision. The register filed the whole family under "needs 8/16-bit
+// storage", which was wrong twice over — storage already worked (a {:s, 8}
+// tensor has always been device-resident), and the arithmetic never needed the
+// storage extension at all.
+//
+// STORAGE. Narrow tensors are packed: at width 8 element i is byte i%4 of word
+// i/4, at width 16 it is halfword i%2 of word i/2 — the same packing
+// cast_u8_to_f32.comp reads and cast_f32_to_u8.comp writes. The buffer is
+// padded to a 4-byte multiple and robust_buffer_access makes a read past the
+// tail return 0, which is harmless: only the valid lane of each word is used.
+//
+// SIGN EXTENSION is the whole reason `kind` distinguishes signed from unsigned
+// rather than just carrying a width. `int(b << 24) >> 24` sign-extends because
+// GLSL's `>>` on a signed operand is an ARITHMETIC shift; the unsigned arm must
+// not do it, or 200 as a u8 would widen to -56.
+
+layout(local_size_x = 256) in;
+
+// 0 = u8, 1 = s8, 2 = u16, 3 = s16
+layout(constant_id = 0) const int kind = 0;
+
+layout(std430, binding = 0) readonly buffer In { uint inp[]; };
+layout(std430, binding = 1) writeonly buffer Out { int outp[]; };
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+
+    if (kind < 2) {
+        uint b = (inp[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu;
+        outp[i] = (kind == 1) ? (int(b << 24u) >> 24) : int(b);
+    } else {
+        uint h = (inp[i >> 1u] >> ((i & 1u) * 16u)) & 0xFFFFu;
+        outp[i] = (kind == 3) ? (int(h << 16u) >> 16) : int(h);
+    }
+}

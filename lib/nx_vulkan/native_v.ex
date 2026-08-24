@@ -119,6 +119,18 @@ defmodule Nx.Vulkan.NativeV do
   def cast(_out, _a, _n, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  A cast whose shader has a VARIANT, selected by `op_code` as a spec constant.
+
+  `cast/4` cannot carry one and `apply_unary/5` cannot change the buffer size —
+  it asserts `a.n_bytes == out.n_bytes`, which is right for every elementwise
+  unary and wrong for a widening cast. The narrow-integer pair
+  (`cast_narrow_to_s32`, `cast_s32_to_narrow`) needs both at once.
+
+  Bindings a, out at 0, 1. Push: uint n. Workgroup: 256 threads.
+  """
+  def cast_spec(_out, _a, _n, _op_code, _spv_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Strided slice (type-generic u32-word copy). Bindings in/out/params; params is
   [rank, ews, S[4], O[4], start[4], stride[4]] int32 (ews = element_bytes/4);
   `n` = output element count. Keeps static-start slices on the GPU.

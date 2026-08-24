@@ -1692,6 +1692,50 @@ fn cast<'a>(
     }
 }
 
+/// A cast whose SHADER HAS A VARIANT, selected by `op_code` as a spec constant.
+///
+/// `cast` above cannot carry one (it passes `None`) and `apply_unary` below
+/// cannot change the buffer size (it asserts `a.n_bytes == out.n_bytes`, which
+/// is right for every elementwise unary and wrong for a widening cast). The
+/// narrow-integer pair needs both at once: `cast_narrow_to_s32` reads a packed
+/// byte buffer and writes four times as many bytes, and its spec constant picks
+/// the source width and signedness.
+#[rustler::nif(schedule = "DirtyIo")]
+fn cast_spec<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    a_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    op_code: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let cached = get_or_create_pipeline(&spv_path, Some(op_code as i32))?;
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            cached.layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, a_ref.buf.clone()),
+                WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 /// Elementwise unary op. `op_code` selects:
 ///   0=exp 1=log 2=sqrt 3=abs 4=neg 5=sigmoid 6=tanh 7=relu
 ///   8=ceil 9=floor 10=sign 11=reciprocal 12=square

@@ -231,6 +231,143 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp binary_spv(_type, _code), do: nil
 
+  # ------------------------------------------------- narrow integers (s8/u8/s16/u16)
+  #
+  # These need NO arithmetic shader. `Nx.BinaryBackend` computes every narrow
+  # integer op in full precision and truncates to the destination width, so
+  #
+  #     widen -> the EXISTING s32 kernel -> truncate
+  #
+  # reproduces it exactly. That was measured against BinaryBackend before a line
+  # of this was written — add, subtract, multiply, max, min, quotient,
+  # remainder, the bitwise family and the shifts all agree — and the check is
+  # pinned in test/nx_vulkan/narrow_int_test.exs so it stays measured.
+  #
+  # The register filed this whole family under "needs 8/16-bit storage". That
+  # was wrong twice. Storage already worked: a {:s, 8} tensor has always been
+  # device-resident, packed the same way u8 masks are. And the arithmetic never
+  # needed the storage extension at all — it needed a pair of casts and a
+  # routing decision. Same species as every other win in this backend: the gate
+  # was narrower than the kernel behind it, and the stated reason for the gate
+  # described a limit that was not there.
+  #
+  # u32 is deliberately NOT here. It cannot round-trip through s32 — 3e9 has no
+  # s32 image — so it needs its own `uint` shaders rather than this trick.
+  @cast_narrow_to_s32_spv Path.expand("../../priv/shaders/cast_narrow_to_s32.spv", __DIR__)
+  @cast_s32_to_narrow_spv Path.expand("../../priv/shaders/cast_s32_to_narrow.spv", __DIR__)
+
+  defp narrow_int?({int, bits}) when int in [:s, :u] and bits in [8, 16], do: true
+  defp narrow_int?(_), do: false
+
+  # Widen a packed narrow int to a resident s32 tensor.
+  #
+  # `extend` is the one parameter that matters and the one that is easy to get
+  # wrong. :signed widens the VALUE, which is what arithmetic wants. :zero
+  # widens the BITS, which is what `count_leading_zeros` and `population_count`
+  # want — both are defined on the declared width's bit pattern, so
+  # `population_count(-1 :: s8)` is 8 and sign-extending would make it 32.
+  defp widen_to_s32(%T{type: {sign, bits} = type, shape: shape} = t, extend)
+       when bits in [8, 16] do
+    case t.data do
+      %__MODULE__{ref: ref} ->
+        signed? = extend == :signed and sign == :s
+
+        kind =
+          case {bits, signed?} do
+            {8, false} -> 0
+            {8, true} -> 1
+            {16, false} -> 2
+            {16, true} -> 3
+          end
+
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(max(n, 1) * 4)
+        :ok = Nx.Vulkan.NativeV.cast_spec(out_ref, ref, n, kind, @cast_narrow_to_s32_spv)
+
+        _ = type
+        %{t | type: {:s, 32}, data: %__MODULE__{ref: out_ref, shape: shape, type: {:s, 32}}}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp widen_to_s32(_t, _extend), do: nil
+
+  # Truncate a resident s32 tensor back into `out`'s packed narrow type. Only
+  # the WIDTH matters on the way down: the low bits are the same whether the
+  # destination is signed or not.
+  defp narrow_from_s32(%T{type: {sign, bits} = type, shape: shape} = out, %T{} = wide) do
+    case wide.data do
+      %__MODULE__{ref: ref} ->
+        kind =
+          case {bits, sign} do
+            {8, :u} -> 0
+            {8, :s} -> 1
+            {16, :u} -> 2
+            {16, :s} -> 3
+          end
+
+        n = byte_size_of(shape)
+        {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(div(n * div(bits, 8) + 3, 4) * 4)
+        :ok = Nx.Vulkan.NativeV.cast_spec(out_ref, ref, n, kind, @cast_s32_to_narrow_spv)
+        put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
+
+      _ ->
+        nil
+    end
+  end
+
+  # Narrow-int elementwise binary. Returns nil when the route does not apply, so
+  # the caller can fall back; never returns a host result itself.
+  #
+  # The widened call goes back through `Nx`, which re-enters this backend with
+  # s32 operands and so picks up BOTH the same-shape and the broadcasting s32
+  # kernels without duplicating either. It cannot recurse: an s32 output is not
+  # narrow, so this clause does not fire a second time.
+  #
+  # `binary_spv({:s, 32}, code)` is checked up front rather than after the fact.
+  # If the widened op could itself fall back, the inner call would count a
+  # fallback of its own and the census would double-count one op.
+  defp narrow_binary(op, code, %T{type: type} = out, a, b) do
+    if narrow_int?(type) and binary_spv({:s, 32}, code) != nil and
+         a.type == type and b.type == type do
+      case {widen_to_s32(a, :signed), widen_to_s32(b, :signed)} do
+        {%T{} = wa, %T{} = wb} -> narrow_from_s32(out, apply(Nx, op, [wa, wb]))
+        _ -> nil
+      end
+    end
+  end
+
+  # Narrow-int elementwise unary. Same shape of argument as narrow_binary/5,
+  # plus the two ops whose answer depends on the DECLARED WIDTH rather than the
+  # value:
+  #
+  #   * `count_leading_zeros` at {:s, 8} counts within 8 bits, so clz(1) is 7 and
+  #     not 31. Zero-extending puts the narrow value in the low bits, and the
+  #     32-bit answer is then exactly `32 - bits` too large — including for 0,
+  #     where clz32 is 32 and the correct narrow answer is `bits`.
+  #   * `population_count` needs the same zero-extension and no correction.
+  #
+  # Every other unary here is a plain widen/truncate.
+  defp narrow_unary(op, code, %T{type: {_, bits} = type} = out, a) do
+    width_op? = op in [:count_leading_zeros, :population_count]
+    extend = if width_op?, do: :zero, else: :signed
+
+    if narrow_int?(type) and unary_spv({:s, 32}, code) != nil and a.type == type do
+      case widen_to_s32(a, extend) do
+        %T{} = wa ->
+          wide = apply(Nx, op, [wa])
+          wide = if op == :count_leading_zeros, do: Nx.subtract(wide, 32 - bits), else: wide
+          narrow_from_s32(out, wide)
+
+        _ ->
+          nil
+      end
+    end
+  end
+
+
   # Broadcasting elementwise binary (rank <= 4) — keeps bias-add / scaling /
   # relu-via-max on the GPU instead of host-falling-back.
   @bcast_binary_f64_spv Path.expand(
@@ -289,7 +426,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
             _ -> binary_op_host_fallback(unquote(op), out, a_v, b_v)
           end
         else
-          binary_op_host_fallback(unquote(op), out, a_v, b_v)
+          narrow_binary(unquote(op), unquote(code), out, a_v, b_v) ||
+            binary_op_host_fallback(unquote(op), out, a_v, b_v)
         end
       end
     end
@@ -448,7 +586,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
           put_in(out.data, %__MODULE__{ref: out_ref, shape: shape, type: type})
 
         _ ->
-          unary_op_host_fallback(unquote(op), out, a_v)
+          narrow_unary(unquote(op), unquote(code), out, a_v) ||
+            unary_op_host_fallback(unquote(op), out, a_v)
       end
     end
   end

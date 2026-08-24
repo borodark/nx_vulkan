@@ -16,9 +16,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **722 of 833 doctests (86.7%) run with host fallbacks refused**, of which
-  **711 (85.4%) are genuinely device-resident**. **`dot/7`, `select/4` and
-  `argmax`/`argmin` are all entirely closed.** The 11-doctest gap is
+  **735 of 833 doctests (88.2%) run with host fallbacks refused**, of which
+  **724 (86.9%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
+  `multiply/2`, `subtract/2` and `negate/1` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -28,6 +29,56 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## narrow integers — s8/u8/s16/u16 without a narrow ALU (+13)
+
+  722/833 -> 735/833, and it closes `bitwise_not/1`, `population_count/1`,
+  `max/2`, `min/2`, `multiply/2`, `subtract/2` and `negate/1` outright.
+
+  **This bucket said these needed 8/16-bit storage. That was wrong twice.**
+
+  Storage already worked. A `{:s, 8}` tensor has always been device-resident,
+  packed one byte per element exactly as a u8 mask is — only the OPS fell back.
+  And the arithmetic never needed the storage extension either, because
+  `Nx.BinaryBackend` computes every narrow integer op in full precision and
+  truncates to the destination width. So
+
+      widen -> the EXISTING s32 kernel -> truncate
+
+  reproduces it exactly. That was measured against BinaryBackend before either
+  shader was written: add, subtract, multiply, max, min, quotient, remainder,
+  the bitwise family and the shifts all agree, and the check is pinned in
+  `test/nx_vulkan/narrow_int_test.exs` so it stays measured rather than
+  remembered.
+
+  What landed is two casts — `cast_narrow_to_s32.comp` and
+  `cast_s32_to_narrow.comp` — plus a routing decision. No arithmetic shader, and
+  every s32 kernel including the BROADCASTING one comes along for free, because
+  the widened call re-enters through `Nx` rather than duplicating the dispatch.
+
+  Three things the tests pin that a value assertion alone could never see:
+
+    * **Overflow TRUNCATES.** `127 + 2` at `{:s, 8}` is `-127`. That is the
+      opposite of the rule `as_type` applies to a non-finite float in this same
+      backend, which saturates — two conversion rules, one module.
+    * **Unsigned narrows must ZERO-extend.** `200` at `{:u, 8}` widens to `200`,
+      not `-56`. Sign-extending would make `min(200, 100)` answer `200` — in
+      range, plausible, wrong.
+    * **`clz` and `population_count` are defined on the DECLARED WIDTH**, not
+      the value, so they alone must zero-extend where arithmetic sign-extends.
+      `count_leading_zeros(1)` is 7 at `{:s, 8}` and 31 at `{:s, 32}`; the
+      correction is `- (32 - bits)` and it is exact at 0 too, where clz32 is 32
+      and the narrow answer is the width. `population_count(-1)` is 8 at
+      `{:s, 8}`; sign-extending would answer 32.
+
+  **u32 is deliberately excluded.** It cannot round-trip through s32 — 3e9 has
+  no s32 image — so it needs its own `uint` shaders rather than this trick.
+  `Nx.quotient/2` (261) and every u32 elementwise op stay here for that reason,
+  and that IS a real gap: no u32 arithmetic runs on the device today.
+
+  One new NIF, `cast_spec/5`. `cast/4` carries no spec constant and
+  `apply_unary/5` asserts `a.n_bytes == out.n_bytes` — right for every
+  elementwise unary, wrong for a widening cast. This needs both at once.
 
   ## `classify_reduce_axes/2` — the MIDDLE axis (+8)
 
@@ -477,7 +528,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 43 doctests, down from 357 before W5.
+  # 30 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -503,28 +554,20 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   # they left this bucket without W5 touching it.
   @integer_dtype [
     {"Nx.all/2", [446]},
-    {"Nx.all_close/3", [460]},
     {"Nx.as_type/2", [87, 90]},
-    {"Nx.bitwise_not/1", [418, 419]},
-    {"Nx.count_leading_zeros/1", [430, 431, 432, 433]},
+    {"Nx.count_leading_zeros/1", [430]},
     {"Nx.fill/3", [821]},
     {"Nx.indexed_add/4", [351]},
     {"Nx.indexed_put/4", [361, 364]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
     {"Nx.linspace/3", [804, 806]},
-    {"Nx.max/2", [270]},
-    {"Nx.min/2", [276]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
-    {"Nx.multiply/2", [239]},
-    {"Nx.negate/1", [414]},
-    {"Nx.population_count/1", [424]},
     {"Nx.pow/2", [241, 242, 244]},
     {"Nx.product/2", [505]},
-    {"Nx.quotient/2", [260, 261]},
+    {"Nx.quotient/2", [261]},
     {"Nx.remainder/2", [249]},
     {"Nx.slice_along_axis/4", [683]},
-    {"Nx.subtract/2", [233]},
     {"Nx.sum/2", [466, 467]},
     {"Nx.take/3", [697]},
     {"Nx.tril/2", [23]},
