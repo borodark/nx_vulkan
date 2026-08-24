@@ -64,7 +64,40 @@ defmodule Nx.Vulkan.MixProject do
       # Already a transitive dep via rustler; declared here so the parity
       # test suite's JSON-report output is documented + version-pinned.
       {:jason, "~> 1.4"}
-    ]
+    ] ++ exla_dep()
+  end
+
+  # EXLA is OPT-IN, and it has to be.
+  #
+  # `parity_test.exs` runs a second, independent reference when EXLA is present
+  # and self-skips when it is not — the check is `Code.ensure_loaded?/1` at
+  # runtime, so nothing in the test code needs a flag. Only the DEPENDENCY does.
+  #
+  # Declaring it unconditionally would break the FreeBSD half of the fleet.
+  # `exla` pulls `xla`, which ships precompiled binaries for a fixed matrix of
+  # targets — linux and darwin, x86_64 and aarch64 — and **there is no FreeBSD
+  # build in it at all**. Both Keplers would fail `mix deps.get`, which takes
+  # `mix test` down repo-wide. That is not hypothetical: it is the standing
+  # failure mode in the sibling `exmc` repo, and it is the one thing
+  # `rm -rf _build` does not fix.
+  #
+  # So: off by default, on where it is known to work.
+  #
+  #     NXV_WITH_EXLA=1 mix deps.get
+  #     NXV_WITH_EXLA=1 mix test
+  #
+  # The flag is needed for BOTH — `deps/0` is evaluated every time, so a build
+  # without it simply does not see the dependency.
+  #
+  # Known-good targets: super-io (linux x86_64) and the Jetson
+  # (linux aarch64, CPU only — its CUDA is 10.2 and permanently so, while the
+  # prebuilts start at CUDA 12). See NEXT.md §1.4.
+  defp exla_dep do
+    if System.get_env("NXV_WITH_EXLA") in ["1", "true"] do
+      [{:exla, "~> 0.13", only: [:dev, :test]}]
+    else
+      []
+    end
   end
 
   defp package do
