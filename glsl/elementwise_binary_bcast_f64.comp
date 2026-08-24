@@ -60,6 +60,14 @@ void main() {
         case 3: r = x / y; break;
         case 5: r = max(x, y); break;
         case 6: r = min(x, y); break;
+        // remainder — the sign of the DIVIDEND, not the divisor.
+        //
+        // GLSL's `mod(x, y)` is `x - y * floor(x / y)`, which follows the
+        // DIVISOR: mod(-5, 3) is 1. Nx.BinaryBackend truncates toward zero, so
+        // remainder(-5, 3) is -2 and remainder(5, -3) is 2 — the C `fmod` rule,
+        // and the same rule trunc_div/2 implements for the integer shader.
+        // Using `mod` here would be wrong on exactly half the sign pairs.
+        case 8: r = x - y * trunc(x / y); break;
         default: r = 0.0lf;
     }
     o[gid] = r;

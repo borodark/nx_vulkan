@@ -16,11 +16,12 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **744 of 833 doctests (89.3%) run with host fallbacks refused**, of which
-  **733 (88.0%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **746 of 833 doctests (89.6%) run with host fallbacks refused**, of which
+  **735 (88.2%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
   `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
-  `linspace/3` and `pow/2` are all entirely closed.** The 11-doctest gap is
+  `linspace/3`, `pow/2`, `round/1` and
+  `remainder/2` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -30,6 +31,33 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## two missing float op codes — `round` and `remainder` (+2)
+
+  744/833 -> 746/833. Neither needed a shader, only an arm and a widened
+  selector. What both needed was picking the right FORMULA, because GLSL's
+  obvious built-in implements a different rule than `Nx.BinaryBackend` and the
+  difference shows only on inputs a casual test would not include.
+
+    * **`round` is HALF AWAY FROM ZERO.** GLSL's `round()` is
+      implementation-defined at a tie and may round to even; `roundEven()`
+      definitely does. All three agree on 3.7 and disagree on 2.5, so a driver
+      change could have silently altered the answer. Written out as
+      `sign(x) * floor(abs(x) + 0.5)`.
+    * **`remainder` takes the sign of the DIVIDEND.** GLSL's `mod(x, y)` is
+      `x - y * floor(x / y)` and follows the DIVISOR, so `mod(-5, 3)` is 1 where
+      Nx answers -2. They agree whenever the operands share a sign — half the
+      cases. Written as `x - y * trunc(x / y)`, the same rule `trunc_div`
+      already implements on the integer side.
+
+  **Adding `remainder` at code 8 required deleting three dead arms.**
+  `elementwise_binary_f64.comp` defined 7/8/9 as equal/less/greater, left from
+  before `compare_f64.comp` existed. They were unreachable under
+  `binary_spv({:f, 64}, code) when code <= 6` — but they gave code 8 a different
+  MEANING in that one file than in `@binary_ops`, so widening the cap by one,
+  which is exactly what this change does, would have returned a comparison mask
+  and looked entirely plausible. A dead branch whose numbering disagrees with
+  the live table is worse than a missing one.
 
   ## integer `pow` — admitted by the DATA, not the type (+3)
 
@@ -704,9 +732,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.concatenate/2", [719]},
     {"Nx.divide/2", [254]},
     {"Nx.dot/2", [634]},
-    {"Nx.indexed_add/4", [349, 350]},
-    {"Nx.remainder/2", [247]},
-    {"Nx.round/1", [440]}
+    {"Nx.indexed_add/4", [349, 350]}
   ]
 
   @doc """

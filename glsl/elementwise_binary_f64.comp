@@ -40,9 +40,21 @@ void main() {
         case 4: r = pow_f64(x, y); break;              // power
         case 5: r = max(x, y); break;                  // max
         case 6: r = min(x, y); break;                  // min
-        case 7: r = (x == y) ? 1.0LF : 0.0LF; break;  // equal
-        case 8: r = (x <  y) ? 1.0LF : 0.0LF; break;  // less
-        case 9: r = (x >  y) ? 1.0LF : 0.0LF; break;  // greater
+        // Codes 7-9 USED TO BE equal/less/greater here, left over from before
+        // compare_f64.comp existed. They were unreachable —
+        // `binary_spv({:f, 64}, code)` caps at 6 — but they were worse than
+        // dead: they gave code 8 a different MEANING in this file than in
+        // @binary_ops, where 8 is `remainder`. Widening that guard by one would
+        // have returned a comparison mask and looked entirely plausible.
+        // Removed rather than commented around.
+        // remainder — the sign of the DIVIDEND, not the divisor.
+        //
+        // GLSL's `mod(x, y)` is `x - y * floor(x / y)`, which follows the
+        // DIVISOR: mod(-5, 3) is 1. Nx.BinaryBackend truncates toward zero, so
+        // remainder(-5, 3) is -2 and remainder(5, -3) is 2 — the C `fmod` rule,
+        // and the same rule trunc_div/2 implements for the integer shader.
+        // Using `mod` here would be wrong on exactly half the sign pairs.
+        case 8: r = x - y * trunc(x / y); break;       // remainder
         default: r = 0.0LF; break;
     }
 

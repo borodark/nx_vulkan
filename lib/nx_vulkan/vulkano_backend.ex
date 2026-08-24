@@ -216,8 +216,21 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # correct-looking, silently wrong, and invisible to a value assertion because
   # the host fallback returns the same shape. Refusing the pair sends it to the
   # host instead, which is always right.
-  defp binary_spv({:f, 64}, code) when code <= 6, do: @elementwise_binary_f64_spv
-  defp binary_spv({:f, 32}, code) when code <= 6, do: @elementwise_binary_f32_spv
+  # 8 (remainder) sits outside the 0-6 run because it was added later. Both
+  # float shaders implement it as `x - y * trunc(x / y)` — the sign of the
+  # DIVIDEND — and NOT as GLSL's `mod`, which follows the divisor.
+  #
+  # elementwise_binary_f64.comp used to define 7/8/9 as equal/less/greater,
+  # left over from before compare_f64.comp existed. They were unreachable under
+  # the `code <= 6` cap, but they made code 8 mean something different in that
+  # one file than in @binary_ops — so widening this guard by one, which is
+  # exactly what happened here, would have returned a comparison mask. They were
+  # removed, not commented around.
+  defp binary_spv({:f, 64}, code) when code <= 6 or code == 8,
+    do: @elementwise_binary_f64_spv
+
+  defp binary_spv({:f, 32}, code) when code <= 6 or code == 8,
+    do: @elementwise_binary_f32_spv
 
   # 3 (divide) is the one code the INTEGER shader lacks, and it has to be named
   # here rather than assumed unreachable. `Nx.divide` on two integers really
@@ -395,8 +408,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
                         )
 
   # Same (type, code) pairing as binary_spv/2, and the same reason.
-  defp bcast_binary_spv({:f, 64}, code) when code <= 6, do: @bcast_binary_f64_spv
-  defp bcast_binary_spv({:f, 32}, code) when code <= 6, do: @bcast_binary_f32_spv
+  defp bcast_binary_spv({:f, 64}, code) when code <= 6 or code == 8,
+    do: @bcast_binary_f64_spv
+
+  defp bcast_binary_spv({:f, 32}, code) when code <= 6 or code == 8,
+    do: @bcast_binary_f32_spv
 
   defp bcast_binary_spv({:s, 32}, code) when code != 3 and code != 4,
     do: @bcast_binary_s32_spv
@@ -567,6 +583,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Op codes match `priv/shaders/elementwise_unary.spv` spec constant ID 0:
   #   0=exp  1=log  2=sqrt  3=abs  4=neg  5=sigmoid  6=tanh  7=relu
   #   8=ceil  9=floor  10=sign  11=reciprocal  12=square
+  # 13-15 are integer-only (see @s32_unary_codes); 16 is `round`, which sits
+  # past them because it was added after the integer block and renumbering
+  # would have re-keyed every cached pipeline.
   @unary_ops [
     exp: 0,
     log: 1,
@@ -578,6 +597,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     floor: 9,
     ceil: 8,
     sign: 10,
+    round: 16,
     # Integer-only, absent from both float shaders. See unary_spv/2.
     bitwise_not: 13,
     population_count: 14,
@@ -607,8 +627,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # gate honest rather than relying on that argument holding forever.
   @s32_unary_codes [3, 4, 7, 8, 9, 10, 12, 13, 14, 15]
 
-  defp unary_spv({:f, 64}, code) when code <= 12, do: @elementwise_unary_f64_spv
-  defp unary_spv({:f, 32}, code) when code <= 12, do: @elementwise_unary_f32_spv
+  defp unary_spv({:f, 64}, code) when code <= 12 or code == 16,
+    do: @elementwise_unary_f64_spv
+
+  defp unary_spv({:f, 32}, code) when code <= 12 or code == 16,
+    do: @elementwise_unary_f32_spv
 
   defp unary_spv({:s, 32}, code) when code in @s32_unary_codes,
     do: @elementwise_unary_s32_spv
@@ -681,8 +704,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
     :sin,
     :sinh,
     :tan,
-    # type / check — is_nan and is_infinity moved to @predicate_unary_ops (W5)
-    :round,
+    # type / check — is_nan and is_infinity moved to @predicate_unary_ops (W5),
+    # and `round` to @unary_ops at code 16.
     # special
     :erf_inv,
     # complex
