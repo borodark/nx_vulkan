@@ -1,0 +1,86 @@
+#version 450
+
+// Broadcasting {:u, 32} elementwise binary (rank <= 4). The unsigned twin of
+// elementwise_binary_bcast_s32.comp: identical index arithmetic, identical
+// params layout [rank, out[4], a[4], b[4]], identical op codes — and a
+// DIFFERENT op table, for the reasons in elementwise_binary_u32.comp. max, min,
+// quotient, remainder and right_shift all change meaning; add, multiply,
+// subtract, pow, the bitwise family and left_shift do not.
+//
+// This is the arm that carries `Nx.add(u32_tensor, 1)`.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, binding = 2) writeonly buffer O { uint o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+// Wraps mod 2^32, exactly as the signed twin does. The gate guarantees e >= 0.
+uint ipow(uint base, uint e) {
+    uint r = 1u;
+    uint bb = base;
+    uint n = e;
+    while (n != 0u) {
+        if ((n & 1u) != 0u) r *= bb;
+        bb *= bb;
+        n >>= 1u;
+    }
+    return r;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint idx = gid;
+    uint a_idx = 0u;
+    uint b_idx = 0u;
+    uint a_stride = 1u;
+    uint b_stride = 1u;
+    for (int d = int(p.rank) - 1; d >= 0; --d) {
+        uint od = outd[d];
+        uint coord = idx % od;
+        idx = idx / od;
+        a_idx += ((ad[d] == 1u) ? 0u : coord) * a_stride;
+        b_idx += ((bd[d] == 1u) ? 0u : coord) * b_stride;
+        a_stride *= ad[d];
+        b_stride *= bd[d];
+    }
+
+    uint x = a[a_idx];
+    uint y = b[b_idx];
+    uint r;
+    switch (OP) {
+        case 0:  r = x + y; break;
+        case 1:  r = x * y; break;
+        case 2:  r = x - y; break;
+        case 4:  r = ipow(x, y); break;
+        case 5:  r = max(x, y); break;
+        case 6:  r = min(x, y); break;
+        case 7:  r = x / y; break;
+        case 8:  r = x % y; break;
+        case 9:  r = x & y; break;
+        case 10: r = x | y; break;
+        case 11: r = x ^ y; break;
+        case 12: r = (y >= 32u) ? 0u : x << y; break;
+        case 13: r = (y >= 32u) ? 0u : x >> y; break;
+        default: r = 0u;
+    }
+    o[gid] = r;
+}

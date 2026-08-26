@@ -210,6 +210,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                 __DIR__
                               )
 
+  @elementwise_binary_u32_spv Path.expand(
+                                "../../priv/shaders/elementwise_binary_u32.spv",
+                                __DIR__
+                              )
+
   # Keyed on the (type, op code) PAIR, not the type alone. Codes 0-6 exist in
   # all three shaders; 7-13 only in the integer one. Pairing a float shader with
   # an integer-only code would fall into its `default:` arm and write zeros —
@@ -247,6 +252,20 @@ defmodule Nx.Vulkan.VulkanoBackend do
     do: @elementwise_binary_s32_spv
 
   defp binary_spv({:s, 32}, 4), do: @elementwise_binary_s32_spv
+
+  # {:u, 32} gets its OWN shader rather than borrowing the s32 one.
+  #
+  # Codes 0/1/2 (add, multiply, subtract), 9-11 (bitwise) and 12 (left_shift)
+  # are bit-identical in two's complement and could safely share it. Codes 5, 6,
+  # 7, 8 and 13 — max, min, quotient, remainder, right_shift — cannot: the
+  # signed kernel does not fail on u32 input, it returns a DIFFERENT, in-range,
+  # entirely plausible number. Splitting the selector by code would work and
+  # would be one edit away from silently wrong forever, so the whole dtype gets
+  # a `uint` kernel instead.
+  #
+  # 3 (divide) is absent for the same reason as on the signed side: Nx types
+  # integer division as a float.
+  defp binary_spv({:u, 32}, code) when code != 3, do: @elementwise_binary_u32_spv
 
   defp binary_spv(_type, _code), do: nil
 
@@ -412,6 +431,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
                           __DIR__
                         )
 
+  @bcast_binary_u32_spv Path.expand(
+                          "../../priv/shaders/elementwise_binary_bcast_u32.spv",
+                          __DIR__
+                        )
+
   # Same (type, code) pairing as binary_spv/2, and the same reason.
   defp bcast_binary_spv({:f, 64}, code) when code <= 6 or code == 8,
     do: @bcast_binary_f64_spv
@@ -423,6 +447,8 @@ defmodule Nx.Vulkan.VulkanoBackend do
     do: @bcast_binary_s32_spv
 
   defp bcast_binary_spv({:s, 32}, 4), do: @bcast_binary_s32_spv
+
+  defp bcast_binary_spv({:u, 32}, code) when code != 3, do: @bcast_binary_u32_spv
 
   defp bcast_binary_spv(_type, _code), do: nil
 
@@ -464,6 +490,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # defined for negative exponents and the f64 shader has its own arm.
   defp pow_ok_direct?(_type, code, _b) when code != 4, do: true
   defp pow_ok_direct?({:f, _}, 4, _b), do: true
+
+  # {:u, 32} needs NO data check, and that is not a shortcut — an unsigned
+  # exponent cannot be negative, so the property the check exists to establish
+  # is guaranteed by the type. This is the one place where u32 is simpler than
+  # s32 rather than harder: no readback, no reduce_min, no round trip.
+  defp pow_ok_direct?({:u, 32}, 4, _b), do: true
   defp pow_ok_direct?(_type, 4, b), do: nonneg_exponent?(b)
 
   # The broadcasting path. Floats stay out of it, as they always have: the f64
@@ -471,6 +503,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # its `default:`. Integers ride the same data gate as above.
   defp pow_ok_bcast?(_type, code, _b) when code != 4, do: true
   defp pow_ok_bcast?({:s, 32}, 4, b), do: nonneg_exponent?(b)
+  defp pow_ok_bcast?({:u, 32}, 4, _b), do: true
   defp pow_ok_bcast?(_type, 4, _b), do: false
 
 
@@ -623,6 +656,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
                                __DIR__
                              )
 
+  @elementwise_unary_u32_spv Path.expand(
+                               "../../priv/shaders/elementwise_unary_u32.spv",
+                               __DIR__
+                             )
+
   # Keyed on (type, op code), as binary_spv/2 is, and additionally narrow on the
   # integer side: the s32 shader implements 3/4/7/8/9/10/12 plus 13-15, and NOT
   # the transcendentals. Those cannot arrive anyway — Nx runs exp/log/sqrt/
@@ -640,6 +678,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp unary_spv({:s, 32}, code) when code in @s32_unary_codes,
     do: @elementwise_unary_s32_spv
+
+  # Same code list as s32. Only ONE arm behaves differently — `sign` (10), which
+  # is 0 or 1 on an unsigned value and never -1 — but the shader is separate
+  # anyway, because a `sign(int(x))` copied across would answer -1 above 2^31
+  # and that comes back as 4294967295.
+  defp unary_spv({:u, 32}, code) when code in @s32_unary_codes,
+    do: @elementwise_unary_u32_spv
 
   defp unary_spv(_type, _code), do: nil
 
@@ -1112,6 +1157,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @reduce_axis_u8_to_u32_spv Path.expand("../../priv/shaders/reduce_axis_u8_to_u32.spv", __DIR__)
 
   @reduce_axis_s32_spv Path.expand("../../priv/shaders/reduce_axis_s32.spv", __DIR__)
+  @reduce_axis_u32_spv Path.expand("../../priv/shaders/reduce_axis_u32.spv", __DIR__)
 
   defp reduce_spv({:f, 64}, {:f, 64}), do: @reduce_axis_f64_spv
   defp reduce_spv({:f, 32}, {:f, 32}), do: @reduce_axis_f32_spv
@@ -1125,6 +1171,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # (in, out) keying is what makes that expressible at all — see the u8 note
   # above, which exists for the identical reason.
   defp reduce_spv({:s, 32}, {:s, 32}), do: @reduce_axis_s32_spv
+
+  # Type-preserving, same as the signed entry — Nx keeps `sum` and `product` on
+  # a u32 at {:u, 32} rather than widening, so this is the only pairing that
+  # arrives. `max`/`min` are UNSIGNED in that shader, which is not a wrapping
+  # question but a different answer on ordinary data:
+  # `reduce_max([3_000_000_000, 1])` is 3_000_000_000, and the signed kernel
+  # answers 1.
+  defp reduce_spv({:u, 32}, {:u, 32}), do: @reduce_axis_u32_spv
 
   defp reduce_spv(_from, _to), do: nil
 
@@ -1558,18 +1612,42 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # entry for the pair. The whole thing went to the host to reach a cast that
   # already existed one widening away.
   defp coerce_to(%T{type: from} = t, to) when from != to do
-    if narrow_int?(from) do
-      case widen_to_s32(t, :signed) do
-        nil ->
-          nil
+    cond do
+      # s32 <-> u32 is a REWRAP, not a conversion. Equal width, and Nx's
+      # integer-to-integer rule is truncation, so the bits already ARE the
+      # answer: -1 at s32 is 4294967295 at u32. No dispatch, no shader.
+      #
+      # This is what `Nx.quotient(u8_tensor, u32_tensor)` needed. The u8 operand
+      # widens to s32 and then has to reach a u32 output — one more hop that
+      # costs nothing, and without it the whole op fell back to meet a
+      # conversion that is a no-op.
+      same_width_int?(from, to) ->
+        case t.data do
+          %__MODULE__{ref: ref} ->
+            %{t | type: to, data: %__MODULE__{ref: ref, shape: t.shape, type: to}}
 
-        %T{} = wide ->
-          if to == {:s, 32}, do: wide, else: coerce_to(wide, to)
-      end
-    else
-      coerce_to_cast(t, to)
+          _ ->
+            nil
+        end
+
+      narrow_int?(from) ->
+        case widen_to_s32(t, :signed) do
+          nil ->
+            nil
+
+          %T{} = wide ->
+            # Recurses at most once more, into the rewrap clause above, when
+            # `to` is {:u, 32}.
+            if to == {:s, 32}, do: wide, else: coerce_to(wide, to)
+        end
+
+      true ->
+        coerce_to_cast(t, to)
     end
   end
+
+  defp same_width_int?({a, bits}, {b, bits}) when a in [:s, :u] and b in [:s, :u], do: true
+  defp same_width_int?(_from, _to), do: false
 
   defp coerce_to(t, to), do: coerce_to_cast(t, to)
 
@@ -1609,6 +1687,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
     cond do
       not match?(%__MODULE__{}, t.data) ->
         nil
+
+      # s32 <-> u32 is a REWRAP, not a conversion. Both are 32-bit and Nx's
+      # integer-to-integer rule is truncation, so at equal width the bits are
+      # already the answer: -1 at s32 IS 4294967295 at u32. Same species as
+      # `bitcast/2`, and it needs no dispatch at all.
+      match?({i, 32} when i in [:s, :u], from) and match?({i, 32} when i in [:s, :u], to) ->
+        %__MODULE__{ref: ref} = t.data
+        put_in(out.data, %__MODULE__{ref: ref, shape: out.shape, type: to})
 
       narrow_int?(from) ->
         # Widen once, then land it wherever `to` is.
@@ -1702,12 +1788,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @compare_f32_spv Path.expand("../../priv/shaders/compare_f32.spv", __DIR__)
   @compare_f64_spv Path.expand("../../priv/shaders/compare_f64.spv", __DIR__)
   @compare_s32_spv Path.expand("../../priv/shaders/compare_s32.spv", __DIR__)
+  @compare_u32_spv Path.expand("../../priv/shaders/compare_u32.spv", __DIR__)
 
   # No op-code guard here, unlike binary_spv/2 and unary_spv/2: all three
   # shaders implement the full 0-10, so every pairing is real.
   defp compare_spv({:f, 32}), do: @compare_f32_spv
   defp compare_spv({:f, 64}), do: @compare_f64_spv
   defp compare_spv({:s, 32}), do: @compare_s32_spv
+
+  # EVERY arm changes meaning at u32, even where the source text would not:
+  # read as s32, 3_000_000_000 is -1_294_967_296, so `greater(3e9, 2)` flips
+  # from 1 to 0. The signed kernel does not fail on unsigned input — it answers
+  # the opposite.
+  defp compare_spv({:u, 32}), do: @compare_u32_spv
   defp compare_spv(_), do: nil
 
   for {op, code} <- @compare_ops do
@@ -1804,7 +1897,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
   defp select_spv({:f, 32}), do: @select_f32_spv
   defp select_spv({:f, 64}), do: @select_f64_spv
+  # {:u, 32} REUSES the signed kernel, and this is one of the three places where
+  # that is safe rather than merely tempting. `select` copies whole words
+  # according to a mask and performs no arithmetic on them, so there is no
+  # operation for signedness to change the meaning of. Contrast `compare_spv/1`
+  # above, where every arm flips.
   defp select_spv({:s, 32}), do: @select_s32_spv
+  defp select_spv({:u, 32}), do: @select_s32_spv
   defp select_spv(_), do: nil
 
   @impl true
@@ -1901,6 +2000,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp allany_spv({:f, 32}), do: @allany_f32_spv
   defp allany_spv({:f, 64}), do: @allany_f64_spv
   defp allany_spv({:u, 8}), do: @allany_u8_spv
+
+  # {:u, 32} reuses the signed kernel. `all`/`any` test each element against
+  # ZERO, and a bit pattern is zero or it is not — no ordering is involved, so
+  # signedness cannot reach the answer. The second of the three safe reuses; see
+  # `select_spv/1`.
+  defp allany_spv({:u, 32}), do: @allany_s32_spv
   defp allany_spv(_), do: nil
 
   @impl true
@@ -2823,6 +2928,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @argreduce_f32_spv Path.expand("../../priv/shaders/argreduce_f32.spv", __DIR__)
   @argreduce_f64_spv Path.expand("../../priv/shaders/argreduce_f64.spv", __DIR__)
   @argreduce_s32_spv Path.expand("../../priv/shaders/argreduce_s32.spv", __DIR__)
+  @argreduce_u32_spv Path.expand("../../priv/shaders/argreduce_u32.spv", __DIR__)
 
   # Keyed on the INPUT type only. Unlike reduce_spv/2 there is no (in, out) pair
   # to track, because the output is an index rather than a value — always a
@@ -2830,6 +2936,11 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp argreduce_spv({:f, 32}), do: @argreduce_f32_spv
   defp argreduce_spv({:f, 64}), do: @argreduce_f64_spv
   defp argreduce_spv({:s, 32}), do: @argreduce_s32_spv
+
+  # Unsigned comparison. `argmax([1, 3_000_000_000, 2])` is 1; the signed kernel
+  # reads element 1 as negative, finds it the smallest, and answers 2 — a valid
+  # index and the wrong one.
+  defp argreduce_spv({:u, 32}), do: @argreduce_u32_spv
   defp argreduce_spv(_), do: nil
 
   @impl true
@@ -3443,6 +3554,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # only one answer matches BinaryBackend, which wraps mod 2^32.
   defp matmul_spv({:s, 32}), do: @matmul_s32_spv
 
+  # {:u, 32} reuses the signed kernel — the third and last safe reuse. A matmul
+  # is add and multiply and nothing else, and both wrap identically in two's
+  # complement, so the accumulator produces the same BITS either way.
+  # BinaryBackend agrees: `dot([3_000_000_000, 2], [3, 1])` is 410_065_410,
+  # which is the unsigned reading of the signed result.
+  #
+  # No ordering appears anywhere in a matmul, which is exactly what separates
+  # this from `reduce_spv/2` — where `max`/`min` DO order, and u32 needed its
+  # own shader.
+  defp matmul_spv({:u, 32}), do: @matmul_s32_spv
+
   defp matmul_spv(_), do: nil
 
   @matmul_batched_f32_spv Path.expand("../../priv/shaders/matmul_batched_f32.spv", __DIR__)
@@ -3456,6 +3578,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp matmul_batched_spv({:f, 32}), do: @matmul_batched_f32_spv
   defp matmul_batched_spv({:f, 64}), do: @matmul_batched_f64_spv
   defp matmul_batched_spv({:s, 32}), do: @matmul_batched_s32_spv
+
+  # Same argument as `matmul_spv/1`: add and multiply only, both wrapping
+  # identically, no ordering anywhere.
+  defp matmul_batched_spv({:u, 32}), do: @matmul_batched_s32_spv
   defp matmul_batched_spv(_), do: nil
 
   # Dot product (matmul) — Nx callback signature:

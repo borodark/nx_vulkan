@@ -1,0 +1,60 @@
+#version 450
+
+// {:u, 32} axis reduction. Collapses the middle `reduce_size` axis of an
+// (outer, reduce_size, inner) view; one invocation per output slot.
+//   0=sum 1=max 2=min 3=product
+//
+// THE ACCUMULATOR IS `uint`, AND THAT IS THE POINT — twice over.
+//
+// Like reduce_axis_s32.comp, it wraps rather than widening, because the
+// reference wraps: BinaryBackend gives sum([3e9, 3e9]) = 1705032704 and
+// product([3e9, 3]) = 410065408, both modulo 2^32. A wider accumulator would
+// give the mathematically nicer answers and the wrong ones.
+//
+// Unlike it, `max` and `min` are UNSIGNED here, and that is not a wrapping
+// question — it is a different answer on ordinary data.
+// reduce_max([3000000000, 1]) is 3000000000; the signed kernel reads the first
+// element as -1294967296 and returns 1. Both are in range and only one is
+// right.
+//
+// Seeding mirrors the signed shader: sum starts at 0 and product at 1; max/min
+// seed from the first element rather than a sentinel.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} pc;
+
+layout(std430, binding = 0) readonly buffer In { uint a[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint c[]; };
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint n_slots = pc.outer * pc.inner;
+    if (slot >= n_slots) return;
+
+    uint o = slot / pc.inner;
+    uint i = slot % pc.inner;
+    uint base = o * pc.reduce_size * pc.inner + i;
+
+    uint acc;
+    if (pc.op == 0u) acc = 0u;
+    else if (pc.op == 3u) acc = 1u;
+    else acc = a[base];
+
+    uint start = (pc.op == 0u || pc.op == 3u) ? 0u : 1u;
+
+    for (uint k = start; k < pc.reduce_size; ++k) {
+        uint v = a[base + k * pc.inner];
+        if (pc.op == 0u)      acc += v;
+        else if (pc.op == 1u) acc = max(acc, v);
+        else if (pc.op == 2u) acc = min(acc, v);
+        else                  acc *= v;
+    }
+
+    c[slot] = acc;
+}

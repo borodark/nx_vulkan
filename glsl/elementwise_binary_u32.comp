@@ -1,0 +1,86 @@
+#version 450
+
+// {:u, 32} — the unsigned twin, and NOT a mechanical copy of the s32 shader.
+//
+// u32 cannot use the widen/truncate route that s8/u8/s16/u16 take, because
+// every narrow value has an s32 image and 3000000000 does not. So it needs its
+// own kernels, and the tempting shortcut — reuse the signed shader for "the
+// codes that are the same" — is precisely the trap.
+//
+// BIT-IDENTICAL in two's complement, and safe to share:
+//   add, subtract, multiply, pow, bitwise and/or/xor, left_shift,
+//   negate, bitwise_not, population_count, count_leading_zeros
+//
+// GENUINELY DIFFERENT, where the signed kernel returns a plausible WRONG
+// number rather than an error:
+//   max, min, quotient, remainder, right_shift, sign, and every comparison
+//
+// The difference only shows above 2^31, which is exactly the region a casually
+// written test omits. See test/nx_vulkan/u32_test.exs, where every case
+// straddles it.
+//
+// Op codes match the s32 shader:
+//   0=add 1=mul 2=sub 4=pow 5=max 6=min
+//   7=quotient 8=remainder 9=and 10=or 11=xor 12=shl 13=shr
+//
+// Code 3 (divide) is absent for the same reason as in the s32 shader: Nx types
+// integer division as a float, so it never arrives here.
+//
+// Quotient and remainder need NO sign fixup. The s32 shader computes magnitudes
+// unsigned and reapplies the sign because GLSL leaves `/` and `%` undefined
+// for negative operands; on `uint` there are no negative operands and the
+// operators are simply correct. That deleted helper is the clearest single
+// marker that this is a port and not a copy.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, binding = 2) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push { uint n; } p;
+
+// Exponentiation by squaring, wrapping mod 2^32 — pow(2, 32) is 0 and
+// pow(3, 20) is 3486784401, the unsigned reading of the s32 shader's
+// -808182895. Same bits, same loop. The gate still guarantees e >= 0.
+uint ipow(uint base, uint e) {
+    uint r = 1u;
+    uint bb = base;
+    uint n = e;
+    while (n != 0u) {
+        if ((n & 1u) != 0u) r *= bb;
+        bb *= bb;
+        n >>= 1u;
+    }
+    return r;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+
+    uint x = a[i];
+    uint y = b[i];
+    uint r;
+    switch (OP) {
+        case 0:  r = x + y; break;
+        case 1:  r = x * y; break;
+        case 2:  r = x - y; break;
+        case 4:  r = ipow(x, y); break;
+        case 5:  r = max(x, y); break;
+        case 6:  r = min(x, y); break;
+        case 7:  r = x / y; break;
+        case 8:  r = x % y; break;
+        case 9:  r = x & y; break;
+        case 10: r = x | y; break;
+        case 11: r = x ^ y; break;
+        // A shift at or past the word width is undefined in GLSL, so clamp.
+        // `>>` on a uint is a LOGICAL shift, which is the unsigned rule:
+        // 4294967295 >> 1 is 2147483647, not 4294967295.
+        case 12: r = (y >= 32u) ? 0u : x << y; break;
+        case 13: r = (y >= 32u) ? 0u : x >> y; break;
+        default: r = 0u;
+    }
+    o[i] = r;
+}

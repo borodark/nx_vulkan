@@ -1,0 +1,55 @@
+#version 450
+
+// argmax / argmin over a {:u, 32} input. The unsigned twin of
+// argreduce_s32.comp — same bindings, same (outer, reduce_size, inner, op) push
+// layout, so it reuses reduce_axis/7 with no new NIF, exactly as the signed one
+// does. The output is an INDEX, so the selector keys on the INPUT type.
+//
+// The single difference is the comparison, and it is the whole reason the file
+// exists: `<` and `>` on a uint are unsigned. argmax([1, 3000000000, 2]) is 1.
+// The signed kernel reads element 1 as -1294967296, finds it the SMALLEST, and
+// answers 2 — a valid index, and the wrong one.
+//
+// tie_break and the NaN rule are inherited unchanged. NaN needs no handling at
+// all here: an integer is never NaN, which is why this arm is simpler than the
+// float shaders' comparator.
+//   op: 0=argmax:low 1=argmax:high 2=argmin:low 3=argmin:high
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push {
+    uint outer;
+    uint reduce_size;
+    uint inner;
+    uint op;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint slots = p.outer * p.inner;
+    if (gid >= slots) return;
+
+    uint outr = gid / p.inner;
+    uint inr = gid % p.inner;
+    uint base = outr * p.reduce_size * p.inner + inr;
+
+    bool is_min = (p.op >= 2u);
+    bool tie_high = ((p.op & 1u) == 1u);
+
+    uint best = a[base];
+    uint bi = 0u;
+
+    for (uint r = 1u; r < p.reduce_size; ++r) {
+        uint v = a[base + r * p.inner];
+        bool better = is_min ? (v < best) : (v > best);
+        if (better || (tie_high && v == best)) {
+            best = v;
+            bi = r;
+        }
+    }
+
+    o[gid] = bi;
+}

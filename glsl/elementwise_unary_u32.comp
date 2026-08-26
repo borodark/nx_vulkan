@@ -1,0 +1,50 @@
+#version 450
+
+// {:u, 32} elementwise unary. The unsigned twin of elementwise_unary_s32.comp.
+//
+// Only ONE arm actually changes, and it is the one worth naming:
+//
+//   sign  — unsigned sign is 0 or 1 and NEVER -1. GLSL's `sign()` is not
+//           defined for uint at all, so this cannot even be written the signed
+//           way by accident; it is `x != 0`. Had it been copied across as
+//           `sign(int(x))`, everything above 2^31 would answer -1, which comes
+//           back as 4294967295 — in range, plausible, wrong.
+//
+// Everything else is bit-identical to the signed shader:
+//   abs is the identity on an unsigned value; negate wraps (0 -> 0,
+//   1 -> 4294967295); bitwise_not, population_count and count_leading_zeros all
+//   read the BIT PATTERN and never the value.
+//
+// count_leading_zeros is in fact SIMPLER here. The s32 shader has to write
+// `31 - findMSB(uint(x))` and explain why the signed overload cannot express
+// it; on uint that cast is what the operand already is.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer O { uint o[]; };
+
+layout(push_constant) uniform Push { uint n; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+
+    uint x = a[i];
+    uint r;
+    switch (OP) {
+        case 3:  r = x; break;              // abs: identity on unsigned
+        case 4:  r = -x; break;             // negate: wraps mod 2^32
+        case 7:  r = x; break;              // relu: every u32 is >= 0
+        case 8:  r = x; break;              // ceil
+        case 9:  r = x; break;              // floor
+        case 10: r = (x != 0u) ? 1u : 0u; break;   // sign: 0 or 1, never -1
+        case 12: r = x * x; break;
+        case 13: r = ~x; break;
+        case 14: r = bitCount(x); break;
+        case 15: r = 31 - findMSB(x); break;       // clz(0) -> 32, clz(1) -> 31
+        default: r = 0u;
+    }
+    o[i] = r;
+}

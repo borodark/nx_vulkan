@@ -1,0 +1,77 @@
+#version 450
+
+// {:u, 32} comparison, producing a packed {:u, 8} mask. The unsigned twin of
+// compare_s32.comp.
+//
+// EVERY ARM CHANGES MEANING HERE, even though the source text of most of them
+// is unchanged — because `<` on a uint is an unsigned comparison. Read as s32,
+// 3000000000 is -1294967296, so `greater(3000000000, 2)` flips from 1 to 0.
+// That is the whole reason this file exists rather than reusing compare_s32:
+// the signed kernel does not fail on u32 input, it answers the opposite.
+//
+// Codes 9 and 10 (is_nan, is_infinity) are false for every integer, exactly as
+// in the signed shader — an integer is never NaN and never infinite.
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, binding = 2) writeonly buffer O { uint o[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint rank;
+} p;
+
+uint cmp(uint x, uint y) {
+    bool r;
+    switch (OP) {
+        case 0:  r = (x == y); break;
+        case 1:  r = (x != y); break;
+        case 2:  r = (x < y); break;
+        case 3:  r = (x <= y); break;
+        case 4:  r = (x > y); break;
+        case 5:  r = (x >= y); break;
+        case 6:  r = (x != 0u) && (y != 0u); break;
+        case 7:  r = (x != 0u) || (y != 0u); break;
+        case 8:  r = (x != 0u) != (y != 0u); break;
+        case 9:  r = false; break;
+        case 10: r = false; break;
+        default: r = false;
+    }
+    return r ? 1u : 0u;
+}
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    uint nwords = (p.n + 3u) / 4u;
+    if (word >= nwords) return;
+
+    uint outd[4];
+    uint ad[4];
+    uint bd[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        outd[i] = uint(prm[1 + i]);
+        ad[i] = uint(prm[5 + i]);
+        bd[i] = uint(prm[9 + i]);
+    }
+
+    uint packed = 0u;
+    for (uint j = 0u; j < 4u; ++j) {
+        uint gid = word * 4u + j;
+        if (gid >= p.n) break;
+
+        uint idx = gid, aidx = 0u, bidx = 0u, as = 1u, bs = 1u;
+        for (int d = int(p.rank) - 1; d >= 0; --d) {
+            uint od = outd[d];
+            uint coord = idx % od;
+            idx = idx / od;
+            aidx += ((ad[d] == 1u) ? 0u : coord) * as; as *= ad[d];
+            bidx += ((bd[d] == 1u) ? 0u : coord) * bs; bs *= bd[d];
+        }
+        packed |= cmp(a[aidx], b[bidx]) << (j * 8u);
+    }
+    o[word] = packed;
+}

@@ -16,13 +16,14 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **751 of 833 doctests (90.2%) run with host fallbacks refused**, of which
-  **740 (88.8%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **752 of 833 doctests (90.3%) run with host fallbacks refused**, of which
+  **741 (88.9%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
   `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
   `linspace/3`, `pow/2`, `round/1`,
   `remainder/2`, `divide/2`, `tril/2`,
-  `triu/2` and `fill/3` are all entirely closed.** The 11-doctest gap is
+  `triu/2`, `fill/3` and `quotient/2` are all
+  entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -32,6 +33,69 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## `{:u, 32}` — 30 ops off the device, and one doctest (+1)
+
+  751/833 -> 752/833, and `quotient/2` closes. **The doctest count is the least
+  interesting number here.** Before this, THIRTY of thirty-four u32 operations
+  host-fell-back — every binary op, every comparison, five of six unaries, all
+  the reductions, `argmax`/`argmin`, `select` and `dot`. Exactly one doctest saw
+  any of it, which is why the gap sat in this register looking like a one-line
+  job.
+
+  **u32 cannot use the widen/truncate route.** That works for s8/u8/s16/u16
+  because every narrow value has an s32 image; `3_000_000_000` does not. So u32
+  needs its own `uint` kernels: six new shaders — binary, broadcasting binary,
+  unary, compare, `reduce_axis` and `argreduce`.
+
+  ### The split, and why it was not done per-code
+
+  In two's complement these are BIT-IDENTICAL and the signed kernel would be
+  correct: `add`, `subtract`, `multiply`, `pow`, the bitwise family,
+  `left_shift`, `negate`, `bitwise_not`, `population_count`,
+  `count_leading_zeros`, `sum`, `product`, `dot`, `all`/`any`, `select`.
+
+  These are NOT: `max`, `min`, `quotient`, `remainder`, `right_shift` (logical,
+  not arithmetic), `sign` (0 or 1, never -1), all six comparisons, and
+  `argmax`/`argmin`, which compare.
+
+  Splitting the selector by op code would have worked and would have been **one
+  edit away from silently wrong forever**, so the whole dtype gets `uint`
+  kernels instead. The failure mode is the bad one: a signed kernel does not
+  crash on u32 input, it returns a different in-range plausible number.
+  `greater(3_000_000_000, 2)` answers 0 because s32 reads the operand as
+  -1_294_967_296.
+
+  **Three reuses ARE taken, each because no ordering is involved:** `select`
+  copies whole words and does no arithmetic; `all`/`any` test against zero and a
+  bit pattern is zero or it is not; `matmul` is add and multiply only, both of
+  which wrap identically. Each says so at the selector.
+
+  ### Two places u32 turned out SIMPLER than s32
+
+    * **`quotient` and `remainder` need no sign fixup.** The s32 shader computes
+      magnitudes unsigned and reapplies the sign, because GLSL leaves `/` and
+      `%` undefined for negative operands. On `uint` there are no negative
+      operands and the operators are simply correct. That deleted helper is the
+      clearest marker that this is a port and not a copy.
+    * **`pow` needs no data check.** The integer `pow` gate reads the exponent
+      to prove it non-negative, because BinaryBackend raises otherwise. An
+      unsigned exponent cannot be negative, so the type guarantees what the
+      check exists to establish — no readback, no `reduce_min`, no round trip.
+
+  ### And one gate that had nothing to do with u32
+
+  The doctest is `Nx.quotient(u8, u32)` — a MIXED narrow/full-word pair. Six
+  shaders were not enough on their own: `coerce_to/2` could widen the u8 operand
+  to s32 but had no way to reach a u32 output, because `cast_spv/2` has no
+  `{:s, 32} -> {:u, 32}` entry. There should not be one. Equal width plus Nx's
+  truncation rule means **the bits already are the answer** — `-1` at s32 IS
+  `4294967295` at u32 — so it is a rewrap, the same species as `bitcast/2`, and
+  the op was falling back to meet a conversion that is a no-op.
+
+  `test/nx_vulkan/u32_test.exs` puts at least one operand above 2^31 in every
+  case, because that is the ONLY region where the two readings differ. A test
+  written on small values passes either way and proves nothing.
 
   ## narrow `broadcast` — a word copy cannot address a byte (+3)
 
@@ -210,10 +274,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   GAP someone is trying to close, and a pin should record a measured limit
   rather than a belief about why the limit exists.
 
-  **u32 is deliberately excluded.** It cannot round-trip through s32 — 3e9 has
-  no s32 image — so it needs its own `uint` shaders rather than this trick.
-  `Nx.quotient/2` (261) and every u32 elementwise op stay here for that reason,
-  and that IS a real gap: no u32 arithmetic runs on the device today.
+  **u32 is deliberately excluded from THIS route.** It cannot round-trip
+  through s32 — 3e9 has no s32 image — so it needs its own `uint` shaders rather
+  than this trick. It has them now; see the u32 section above. When this was
+  written, `Nx.quotient/2` (261) and every u32 elementwise op were still here.
 
   One new NIF, `cast_spec/5`. `cast/4` carries no spec constant and
   `apply_unary/5` asserts `a.n_bytes == out.n_bytes` — right for every
@@ -667,7 +731,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 17 doctests, down from 357 before W5.
+  # 16 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -699,7 +763,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
-    {"Nx.quotient/2", [261]},
     {"Nx.slice_along_axis/4", [683]},
     {"Nx.take/3", [697]}
   ]
