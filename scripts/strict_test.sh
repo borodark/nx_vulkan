@@ -4,6 +4,9 @@
 #   sh scripts/strict_test.sh            # the ratchet
 #   sh scripts/strict_test.sh --trace    # extra args pass through to mix test
 #
+# The ExUnit timeout defaults to 600000ms here rather than ExUnit's 60s; pass
+# your own --timeout to override it. See the note above the invocation.
+#
 # `config :nx_vulkan, host_fallback: :raise` makes the first host fallback that
 # is not on Nx.Vulkan.Fallback's allowlist raise Nx.Vulkan.HostFallbackError.
 # A fallback is bit-identical to the GPU path, so no assertion on values can
@@ -44,7 +47,26 @@ echo "    excluding :host_fallback_open (tracked, open — see PLAN_AFTER_BACKWA
 echo "    doctest Nx is IN, minus test/nx_doctest_register.exs (355 of 843 resident)"
 echo
 
+# Default the ExUnit timeout, and let the caller still override it.
+#
+# ExUnit's 60s default is not enough on the slower fleet boxes, and the test it
+# trips is not even a GPU one: `NXV_FUSE_REDUCE=1 ... many-slot reduce` builds a
+# {100_000, 128} tensor with `Nx.BinaryBackend.iota/3` in its SETUP, on the
+# host. On the Jetson's two 5W A57 cores that alone exceeds a minute, so a bare
+# `sh scripts/strict_test.sh` reported 1 failure that had nothing to do with
+# strictness — an ExUnit.TimeoutError dressed up as a strict-mode result.
+#
+# That is the worst shape of false negative for this script: it is the ONE check
+# that can see a mistagged fallback test, so a spurious red here trains people
+# to discount it. Found on the 2026-08-26 fleet run.
+case " $* " in
+    *" --timeout "*) TIMEOUT_ARG="" ;;
+    *)               TIMEOUT_ARG="--timeout 600000" ;;
+esac
+
+# shellcheck disable=SC2086
 NXV_HOST_FALLBACK=raise exec mix test \
     --exclude host_fallback_expected \
     --exclude host_fallback_open \
+    $TIMEOUT_ARG \
     "$@"

@@ -44,11 +44,11 @@ tally() { grep -oE "[0-9]+ $2" "$1" | tail -1 | cut -d' ' -f1; }
 names() { sed -n 's/^ *[0-9][0-9]*) doctest \(.*\) (Nx\.Vulkan\.NxDoctestTest)$/  \1/p' "$1"; }
 
 echo "==> pass A: strict, register applied"
-NXV_HOST_FALLBACK=raise mix test "$FILE" --seed 0 >"$OUT.a" 2>&1 || true
+NXV_HOST_FALLBACK=raise mix test "$FILE" --seed 0 --timeout 600000 >"$OUT.a" 2>&1 || true
 tail -1 "$OUT.a"
 
 echo "==> pass B: strict, register OFF (measuring the truth)"
-NXV_HOST_FALLBACK=raise NXV_DOCTEST_REGISTER=off mix test "$FILE" --seed 0 >"$OUT.b" 2>&1 || true
+NXV_HOST_FALLBACK=raise NXV_DOCTEST_REGISTER=off mix test "$FILE" --seed 0 --timeout 600000 >"$OUT.b" 2>&1 || true
 tail -1 "$OUT.b"
 
 total=$(tally "$OUT.a" "doctests?")
