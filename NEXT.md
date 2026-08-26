@@ -1,9 +1,10 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-23, against `main` @ `d84ed29`. W1–W5 are all closed and
-**residency has crossed ninety percent: 751 of 833 (90.2%)**, up from 714
-(85.7%) at the start of the day.
+**Refreshed:** 2026-08-25, against `main` @ `41a4ebf`. W1–W5 are all closed and
+**residency is 752 of 833 (90.3%)**, up from 714 (85.7%) two days earlier.
+**There is no longer any dtype whose arithmetic leaves the device** — u32 was
+the last, and it is closed (§1.3).
 
 **Eight commits got there and NOT ONE of them was a new arithmetic kernel.**
 Two new `.comp` files landed, both pure format conversion; everything else was a
@@ -57,10 +58,10 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `d84ed29` | the above + the ninety-percent run (§1.2a) |
-| `origin/main` | `d84ed29` | **level — nothing unbacked** |
-| jetson (192.168.0.250) | `221b8c1` | re-verified there, §1.4 — one commit behind, and that commit is `narrow broadcast` |
-| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `235f99c` |
+| `HEAD` / local `main` | `41a4ebf` | the above + the ninety-percent run (§1.2a) + u32 |
+| `origin/main` | `41a4ebf` | **level — nothing unbacked** |
+| jetson (192.168.0.250) | `a950c9f` | re-verified there AND now the only box with EXLA (§1.4). **Two commits behind** |
+| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `235f99c`. **Six commits behind now** |
 | `upstream/main` | `6ab64ac` | **far behind** |
 
 **All four boxes have now seen the ninety-percent run** — Ampere, Maxwell/ARM
@@ -147,7 +148,7 @@ sh scripts/doctest_residency.sh
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 82 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 81 doctests that still leave the GPU,
 in four reason-bucketed lists; `test_helper.exs` applies it only when fallbacks
 are being refused, so a normal `mix test` still runs and asserts all 833. The
 strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
@@ -474,9 +475,10 @@ round trip for the whole tensor is the trade, and it is the same one
 
 ### 1.3 What is left, and what it is actually made of
 
-**82 doctests still refuse**, measured at `d84ed29`. Re-derived from the REFUSED
-OP census (§1.2a) and grouped by REASON, not by op name — which is the whole
-point of §1.2a and is why this table looks nothing like the one it replaces.
+**81 doctests still refuse**, measured at `41a4ebf`. Re-derived from the
+REFUSED OP census (§1.2a) and grouped by REASON, not by op name — which is the
+whole point of §1.2a and is why this table looks nothing like the one it
+replaces.
 
 | group | doctests | state |
 |---|---:|---|
@@ -486,35 +488,41 @@ point of §1.2a and is why this table looks nothing like the one it replaces.
 | s64 — `as_type` (2), `indexed_add`, `indexed_put`, `clz` | 5 | **decided** — needs Int64, a device capability this backend does not require |
 | float `indexed_add` | 2 | **decided** — needs `GL_EXT_shader_atomic_float` |
 | f16 / bf16 `as_type` | 2 | **decided** — needs 16-bit float storage |
-| **u32 `quotient`** | 1 | **OPEN, and far bigger than its doctest** — see below |
+| ~~u32 arithmetic~~ | 0 | **closed** `41a4ebf` — six `uint` shaders; it was 30 ops off the device, not one doctest |
 | `slice/5`, `indexed_put/5` at s32, `dot/7` | 3 | **unexamined** — three separate one-offs, each needs its own probe |
 
 Eighty percent of what is left is genuinely decided. The honest reading is that
 **doctest residency is close to its ceiling** and further work should be judged
 on residency in real workloads rather than on this number.
 
-#### `u32` is the one real remaining gap, and it is understated by its doctest
+#### `u32` is closed — and it WAS understated by its doctest, by thirty to one
 
-Exactly one doctest — `Nx.quotient/2` — but **no u32 arithmetic runs on the
-device at all**. `binary_spv/2`, `unary_spv/2` and `compare_spv/1` have no u32
-entry, so `add`, `multiply`, `bitwise_and` and everything else host-fall-back on
-a full-word dtype.
+Done in `41a4ebf`. Recorded here because the sizing lesson outlives the work.
 
-**It cannot use the narrow-int trick.** Widening works for s8/u8/s16/u16 because
-every value has an s32 image; `3_000_000_000` does not. So u32 needs its own
-shaders — `int` → `uint` copies of `elementwise_binary_s32`,
-`elementwise_binary_bcast_s32`, `elementwise_unary_s32` and `compare_s32`.
+This entry used to say "exactly one doctest, but no u32 arithmetic runs on the
+device at all". That was right, and still understated it: the census found
+**thirty of thirty-four u32 operations** host-falling-back — every binary op,
+every comparison, five of six unaries, all the reductions, `argmax`/`argmin`,
+`select` and `dot`.
 
-Partial reuse is possible and is a TRAP worth naming. Two's-complement `add`,
-`subtract`, `multiply`, the bitwise family and `left_shift` are bit-identical
-between s32 and u32, so the existing shader could serve those codes. But
-`max`, `min`, `quotient`, `remainder`, `right_shift` and every comparison
-DIFFER, and getting the code list wrong yields plausible wrong numbers rather
-than an error. Four `uint` shaders with no per-code exceptions is the safer
-shape.
+Six `uint` shaders: binary, broadcasting binary, unary, compare, `reduce_axis`,
+`argreduce`. Three ops reuse the SIGNED kernel and each says why at the
+selector — `select` copies words and does no arithmetic, `all`/`any` test
+against zero, `matmul` is add and multiply which wrap identically. **No ordering
+is involved in any of the three**, and ordering is the whole difference.
 
-Effort: four near-mechanical shader copies plus selector entries. Doctest yield:
-1. Residency yield for anyone using u32: total.
+The per-code shortcut was available and was refused. `add`/`subtract`/
+`multiply`/`pow`/bitwise/`left_shift` are bit-identical between s32 and u32, so
+a selector split by code would have worked — and would have been one edit away
+from silently wrong forever, because `max`, `min`, `quotient`, `remainder`,
+`right_shift`, `sign` and every comparison are NOT. A signed kernel on u32 input
+does not crash; it returns a different in-range plausible number.
+
+Two things turned out simpler on the unsigned side, which is worth knowing if a
+similar port ever comes up: `quotient`/`remainder` need no sign fixup (GLSL's
+`/` and `%` are undefined for negative operands, and there are none), and `pow`
+needs no data check (the gate exists to prove the exponent non-negative, and an
+unsigned exponent cannot be otherwise).
 
 #### `concatenate/3`'s 8 are still `sort/3`'s
 
@@ -534,16 +542,19 @@ that is the whole lesson of §1.2a.
 
 #### Ranked by value over effort
 
-1. **u32 shaders** — 1 doctest, but the only remaining dtype where a whole
-   arithmetic family leaves the device. Do this if anyone uses u32.
-2. **The three one-offs** — cheap to probe, unknown to fix. Half an hour of
-   probing tells you whether any is worth an hour of work.
-3. **Nothing else.** The rest is decided, and saying so is more useful than
-   leaving it looking like a backlog.
+1. **The three one-offs** — `slice/5` at `{1, 5} {:s, 32}`, `indexed_put/5` at
+   `{1, 2, 3} {:s, 32}`, `dot/7` at `{1, 1, 2, 2} {:f, 32}`. Cheap to probe,
+   unknown to fix. Half an hour of probing tells you whether any is worth an
+   hour of work.
+2. **Nothing else.** The rest is decided, and saying so is more useful than
+   leaving it looking like a backlog. **There is no longer a dtype where a whole
+   arithmetic family leaves the device** — u32 was the last one.
 
 **The pattern that has paid best is still not writing kernels.** Of the 37
 doctests closed in the ninety-percent run, ZERO came from a new arithmetic
-shader. Two `.comp` files landed and both are format conversion. The recurring
+shader. u32 is the exception that proves it — six real kernels for ONE doctest,
+justified by residency rather than by the register, and even there the doctest
+only closed once a `coerce_to/2` gate was widened as well. Two `.comp` files landed and both are format conversion. The recurring
 form is an exact-type-equality or exact-shape guard sitting in front of a kernel
 that could always have done the work — and, twice this run, a comment or a
 pinned test explaining why the guard had to be there.
@@ -1070,11 +1081,11 @@ mix test
 # `mix test` passes (a fallback is bit-identical) and doctest_residency.sh never
 # reads these files. That exact mistake shipped twice and was caught by the
 # fleet, not here. See §1.4.
-sh scripts/strict_test.sh            # 833/780/0, excluded count moves with the register
+sh scripts/strict_test.sh            # 833/819/0, excluded count moves with the register
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 751 / 833 (90.2%), exits 0
-                                     # 740 / 833 (88.8%) device-resident
+sh scripts/doctest_residency.sh      # 752 / 833 (90.3%), exits 0
+                                     # 741 / 833 (88.9%) device-resident
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
