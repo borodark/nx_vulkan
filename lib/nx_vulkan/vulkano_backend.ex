@@ -1646,10 +1646,13 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
+  defp coerce_to(t, to), do: coerce_to_cast(t, to)
+
+  # Defined AFTER the last coerce_to/2 clause on purpose: putting it between two
+  # of them splits the clause group, which Elixir warns about and which makes
+  # the dispatch order harder to read than the helper is worth.
   defp same_width_int?({a, bits}, {b, bits}) when a in [:s, :u] and b in [:s, :u], do: true
   defp same_width_int?(_from, _to), do: false
-
-  defp coerce_to(t, to), do: coerce_to_cast(t, to)
 
   defp coerce_to_cast(%T{type: from, shape: shape, data: %__MODULE__{ref: ref}} = t, to) do
     case cast_spv(from, to) do
