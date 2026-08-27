@@ -16,14 +16,14 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   Measured on `main` @ W1, mac-247 / GT 650M — and confirmed identical on
   super-io / RTX 3060 Ti at W2, so these gates are dtype/shape logic and not
   hardware-conditioned:
-  **752 of 833 doctests (90.3%) run with host fallbacks refused**, of which
-  **741 (88.9%) are genuinely device-resident**. **`dot/7`, `select/4`,
+  **755 of 833 doctests (90.6%) run with host fallbacks refused**, of which
+  **744 (89.3%) are genuinely device-resident**. **`dot/7`, `select/4`,
   `argmax`/`argmin`, `bitwise_not/1`, `population_count/1`, `max/2`, `min/2`,
   `multiply/2`, `subtract/2`, `negate/1`, `sum/2`, `product/2`, `all/2`,
   `linspace/3`, `pow/2`, `round/1`,
   `remainder/2`, `divide/2`, `tril/2`,
-  `triu/2`, `fill/3` and `quotient/2` are all
-  entirely closed.** The 11-doctest gap is
+  `triu/2`, `fill/3`, `quotient/2`, `dot/7` and
+  `slice_along_axis/4` are all entirely closed.** The 11-doctest gap is
   `Nx.reduce/4`, newly allowlisted — see the asterisk below. Quote whichever
   reading you mean, and say which. Note the
   denominator: 833, not 843. `weighted_mean/3` and `Nx.log/2` joined `@rounding`
@@ -33,6 +33,65 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   twice by that**, which is the fragility the moduledoc warns about, happening
   for real. Only the super-io figure is re-measured at this point; the Kepler
   has not been re-run since W4.
+
+  ## the last three one-offs — three unrelated gates (+3)
+
+  752/833 -> 755/833. `dot/7` and `slice_along_axis/4` close.
+
+  `NEXT.md` §1.3 listed these as "three unexamined one-offs" and said to probe
+  before scoping. **Probing was the whole job.** Each was a gate narrower than
+  the kernel behind it, none needed a shader, and the three have nothing in
+  common except that.
+
+    * **`dot/7` at rank 5.** The `rank <= 4` cap exists because `transpose_nd`
+      addresses at most four dims — but `dot_flatten/3` transposes ONLY when the
+      permutation is not already the identity. `Nx.dot(rank_5, rank_1)`
+      contracts a's last axis against b's only axis, so both permutations ARE
+      the identity and nothing was ever going to be transposed. The cap sat on
+      `resident?`, where it applied to operands that needed no rotation at all.
+      It is now a per-operand `dot_layout_ok?/2`: rank <= 4 **or** no rotation
+      needed. A rank-5 operand that genuinely needs rotating still falls back,
+      and that is pinned.
+    * **`indexed_put/5` over a non-prefix axis subset.** `gather/4` has rotated
+      for this since `580e2db`; scatter had not. **Scatter additionally needs
+      the rotation BACK**, and that asymmetry is the only real difference
+      between the two: a gather's result is the index batch dims followed by the
+      non-indexed source dims in their original relative order, which a
+      front-rotation leaves untouched, while a scatter's result carries the
+      TARGET's shape.
+    * **`slice/5` with a dynamic (tensor) start.** Four bytes. The alternative
+      was moving the entire source tensor to the host to avoid moving four bytes
+      to the device. **Clamping is what makes it more than a readback:** Nx
+      clamps a dynamic start into `[0, dim - len]` rather than raising, and the
+      shader has no such logic — it would index past the buffer, where
+      `robust_buffer_access` returns ZEROS. A silently wrong answer of exactly
+      the shape this backend treats as its worst failure mode.
+
+  ### A pre-existing bug the testing found, which is NOT closed
+
+  `indexed_put` with DUPLICATE indices does not match `Nx.BinaryBackend`. Two
+  index rows naming the same slot race; BinaryBackend applies updates in order
+  and the LAST wins, while this backend keeps whichever thread wrote last in
+  hardware — consistently the FIRST row on the RTX 3060 Ti. Consistent is not
+  correct, and nothing in Vulkan orders two writes to the same address from
+  different invocations, so it may differ by driver or by dispatch geometry.
+
+  `indexed_add` is unaffected and the contrast is the diagnosis: addition is
+  commutative and the shader uses atomics, so ordering cannot reach the answer.
+  The problem is specifically WRITE ordering, not scatter.
+
+  No doctest exercises it. Fixing it means a two-pass scatter — `atomicMax` the
+  winning row index into an output-sized scratch buffer, then a second dispatch
+  to write that row's value — i.e. two extra dispatches and a scratch allocation
+  on EVERY `indexed_put`, to be correct on an input nothing currently asks for.
+  That is an operator's cost/benefit call, so it is **pinned at the observed
+  behaviour** rather than quietly fixed or quietly ignored.
+
+  **How it was found is the reusable part.** The first cut of the axis-subset
+  test used all-zero indices, so every subset failed — including the PREFIX ones
+  that never touch the new rotation. That "the untouched path fails too" is what
+  identified the rotation as innocent and sent the search somewhere else
+  entirely.
 
   ## `{:u, 32}` — 30 ops off the device, and one doctest (+1)
 
@@ -731,7 +790,7 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   `NXV_HOST_FALLBACK=raise`. Format: `{"Nx.fun/arity", [ordinals]}`.
   """
 
-  # 16 doctests, down from 357 before W5.
+  # 14 doctests, down from 357 before W5.
   # The name no longer fits: most of what is left is shape- or capability-gated
   # rather than dtype-gated, and is s32 only because Nx's doctests are. See the
   # T2 note in the moduledoc. This WAS a float backend (MISSION §3.1): the integer
@@ -759,11 +818,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.as_type/2", [87, 90]},
     {"Nx.count_leading_zeros/1", [430]},
     {"Nx.indexed_add/4", [351]},
-    {"Nx.indexed_put/4", [361, 364]},
+    {"Nx.indexed_put/4", [364]},
     {"Nx.is_infinity/1", [409]},
     {"Nx.is_nan/1", [406]},
     {"Nx.mode/2", [494, 495, 496, 497, 499, 500]},
-    {"Nx.slice_along_axis/4", [683]},
     {"Nx.take/3", [697]}
   ]
 
@@ -831,7 +889,6 @@ defmodule Nx.Vulkan.NxDoctestRegister do
     {"Nx.as_type/2", [86, 89, 92]},
     {"Nx.atan2/2", [262, 263, 264]},
     {"Nx.concatenate/2", [719]},
-    {"Nx.dot/2", [634]},
     {"Nx.indexed_add/4", [349, 350]}
   ]
 

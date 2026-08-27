@@ -2216,20 +2216,65 @@ defmodule Nx.Vulkan.VulkanoBackend do
     eb = element_bytes(t.type)
     rank = tuple_size(t.shape)
 
-    # GPU strided copy when starts are static integers, the dtype is 4/8-byte,
-    # and rank 1..4. Dynamic (tensor) starts, sub-word dtypes and higher rank
-    # host-fall-back. (Dynamic starts must transfer to BinaryBackend too, else
-    # Nx.slice calls BinaryBackend.to_binary on a VulkanoBackend index — a bug
-    # found via `doctest Nx`.)
-    if Enum.all?(start_indices, &is_integer/1) and rem(eb, 4) == 0 and
+    # GPU strided copy for 4/8-byte dtypes at rank 1..4. Sub-word dtypes and
+    # higher rank still host-fall-back.
+    #
+    # A DYNAMIC start is a rank-0 tensor, and it used to send the whole slice to
+    # the host. It is four bytes. Reading it back is the same trade `coerce_to/2`
+    # makes for a rank-0 constant and the integer `pow` gate makes for a scalar
+    # exponent, and it is a much better one here: the alternative moves the
+    # entire source tensor off the device to avoid moving four bytes onto it.
+    starts = static_starts(start_indices, t.shape, lengths)
+
+    if starts != nil and rem(eb, 4) == 0 and
          match?(%__MODULE__{}, t.data) and rank >= 1 and rank <= 4 do
-      gpu_slice(out, t, start_indices, strides, eb)
+      gpu_slice(out, t, starts, strides, eb)
     else
+      # Dynamic starts must transfer to BinaryBackend too, else Nx.slice calls
+      # BinaryBackend.to_binary on a VulkanoBackend index — a bug found via
+      # `doctest Nx`.
       bin_in = Nx.backend_transfer(t, Nx.BinaryBackend)
       bin_idx = Enum.map(start_indices, &maybe_transfer_idx/1)
       host_result(out, Nx.slice(bin_in, bin_idx, lengths, strides: strides))
     end
   end
+
+  # Resolve every start index to a host integer, or nil if any cannot be.
+  #
+  # **CLAMPING IS NOT OPTIONAL, and it is the whole reason this is not a
+  # one-liner.** Nx clamps a DYNAMIC start into `[0, dim - len]` rather than
+  # raising: on a {2, 5} source, `slice(t, [1, 3], [1, 3])` reads from column 2,
+  # and a start of 9 reads from column 2 as well. The shader has no such logic —
+  # it would index straight off the end of the buffer, where
+  # robust_buffer_access returns zeros. That is a silently wrong answer of
+  # exactly the shape this backend treats as its worst failure mode.
+  #
+  # Static integer starts are already validated by Nx before they reach here, so
+  # the clamp is a no-op for them.
+  defp static_starts(start_indices, shape, lengths) do
+    dims = Tuple.to_list(shape)
+
+    result =
+      [start_indices, dims, lengths]
+      |> Enum.zip()
+      |> Enum.reduce_while([], fn {start, dim, len}, acc ->
+        case start_value(start) do
+          nil -> {:halt, nil}
+          v -> {:cont, [v |> max(0) |> min(dim - len) | acc]}
+        end
+      end)
+
+    if result, do: Enum.reverse(result)
+  end
+
+  defp start_value(i) when is_integer(i), do: i
+
+  # backend_copy, not transfer: the index may still be referenced elsewhere in
+  # the graph.
+  defp start_value(%T{shape: {}} = t),
+    do: t |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.to_number()
+
+  defp start_value(_other), do: nil
 
   defp gpu_slice(out, %T{shape: sshape, data: %__MODULE__{ref: in_ref}}, starts, strides, eb) do
     rank = tuple_size(out.shape)
@@ -2484,8 +2529,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
   #     overlapping pooling backward does — `GL_EXT_shader_atomic_float` is not
   #     guaranteed on the Kepler fleet.
   #
-  # Shared with gather: the indexed axes must be the leading prefix [0..K-1].
-  # Anything else needs a transpose first and host-falls-back for now.
+  # Shared with gather: the shader wants the indexed axes as a leading prefix
+  # [0..K-1]. When they are not, ROTATE rather than refuse — the same move
+  # `gather/4` makes, and for the same reason (SKILL §1b): the kernel can do the
+  # work, only the layout is wrong.
+  #
+  # SCATTER NEEDS THE ROTATION BACK, AND GATHER DOES NOT. That asymmetry is the
+  # whole difference between the two implementations. A gather's result is the
+  # index batch dims followed by the non-indexed source dims in their original
+  # relative order, which a front-rotation leaves untouched. A scatter's result
+  # has the TARGET's shape, so scattering in permuted space produces a permuted
+  # answer and the inverse permutation has to undo it.
   defp scatter_op(%T{type: type} = out, tensor, indices, updates, opts, op_code, op, host_fun) do
     t = ensure_on_backend(tensor)
     idx = ensure_on_backend(indices)
@@ -2503,11 +2557,19 @@ defmodule Nx.Vulkan.VulkanoBackend do
         given -> Nx.Shape.normalize_axes(t.shape, given, t.names)
       end
 
+    prefix? = axes == Enum.to_list(0..(k - 1))
+
+    # Rotatable when the axes are a subset that simply is not at the front.
+    # `transpose_nd` is a word copy over rank <= 4, which the gate already
+    # requires, so the rotation costs two dispatches against a host round trip
+    # for the whole tensor — the same trade `gather/4` and `dot/7` make.
+    perm = axes ++ Enum.reject(0..(max(rank, 1) - 1)//1, &(&1 in axes))
+
     shape_ok? =
       match?(%__MODULE__{}, t.data) and match?(%__MODULE__{}, idx.data) and
         match?(%__MODULE__{}, upd.data) and
         idx_rank == 2 and k >= 1 and rank >= 1 and rank <= 4 and
-        axes == Enum.to_list(0..(k - 1)) and
+        length(axes) == k and
         rem(eb, 4) == 0 and rem(ib, 4) == 0 and
         (op_code == 0 or (integer_type?(type) and eb == 4))
 
@@ -2522,8 +2584,18 @@ defmodule Nx.Vulkan.VulkanoBackend do
     coerced = if shape_ok?, do: {coerce_to(t, type), coerce_to(upd, type)}
 
     case coerced do
-      {%T{} = ct, %T{} = cu} ->
+      {%T{} = ct, %T{} = cu} when prefix? ->
         gpu_scatter(out, ct, idx, cu, k, eb, ib, op_code)
+
+      {%T{} = ct, %T{} = cu} ->
+        # Rotate in, scatter, rotate back. The index COLUMNS need no
+        # adjustment: they carry coordinates for `axes` in that order, and the
+        # permutation puts those axes at the front in that same order, so
+        # column j still addresses axis j of the rotated target.
+        pt = Nx.transpose(ct, axes: perm)
+        scattered = gpu_scatter(pt, pt, idx, cu, k, eb, ib, op_code)
+        back = Nx.transpose(scattered, axes: inverse_perm(perm))
+        put_in(out.data, back.data)
 
       _ ->
         t_bin = Nx.backend_transfer(t, Nx.BinaryBackend)
@@ -2536,6 +2608,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
         # `{:scatter_op, 7}`, which names nothing a reader can act on.
         host_result(out, host_fun.(t_bin, i_bin, u_bin, opts), {op, 5})
     end
+  end
+
+  # The permutation that undoes `perm`: `inv[perm[i]] = i`.
+  defp inverse_perm(perm) do
+    indexed = perm |> Enum.with_index() |> Map.new()
+    Enum.map(0..(length(perm) - 1)//1, &Map.fetch!(indexed, &1))
   end
 
   defp integer_type?({:s, _}), do: true
@@ -3653,10 +3731,31 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     resident? =
       a_v.type == type and b_v.type == type and
-        tuple_size(a_v.shape) <= 4 and tuple_size(b_v.shape) <= 4 and
         match?(%__MODULE__{}, a_v.data) and match?(%__MODULE__{}, b_v.data)
 
-    general? = spv != nil and resident? and batched_a == [] and batched_b == []
+    # The rank limit is a TRANSPOSE limit, and it belongs on the operand that
+    # actually needs one.
+    #
+    # `dot_flatten/3` transposes only when the permutation is not already the
+    # identity; otherwise it reshapes, which is metadata. So the `rank <= 4` cap
+    # — which exists because `transpose_nd` addresses at most four dims — is
+    # irrelevant to an operand that arrives already in contraction order.
+    #
+    # It used to sit on `resident?`, refusing every rank-5 operand including the
+    # ones needing no rotation at all. `Nx.dot(rank_5, rank_1)` contracts a's
+    # LAST axis against b's only axis, so both permutations are the identity and
+    # nothing was ever going to be transposed; the whole op went to the host to
+    # avoid a dispatch it would not have made.
+    #
+    # Once flattened the contraction is {M, K} x {K, N} regardless of the rank
+    # it came from, and `Nx.reshape/2` here is metadata, so the matmul does not
+    # care either.
+    perm_a = free_a ++ axes_a
+    perm_b = axes_b ++ free_b
+
+    general? =
+      spv != nil and resident? and batched_a == [] and batched_b == [] and
+        dot_layout_ok?(a_v, perm_a) and dot_layout_ok?(b_v, perm_b)
 
     # BATCHED contractions are the same reduction with a batch dimension in
     # front. Nx guarantees the batch axes are "successive dimensions starting
@@ -3678,11 +3777,15 @@ defmodule Nx.Vulkan.VulkanoBackend do
     bspv = matmul_batched_spv(type)
     nbatch = batched_a |> Enum.map(&elem(a_v.shape, &1)) |> Enum.product()
 
+    bperm_a = batched_a ++ Enum.reject(free_a, &(&1 in batched_a)) ++ axes_a
+    bperm_b = batched_b ++ axes_b ++ Enum.reject(free_b, &(&1 in batched_b))
+
     batched? =
       bspv != nil and resident? and batched_a != [] and
         batched_a == Enum.to_list(0..(length(batched_a) - 1)//1) and
         batched_b == Enum.to_list(0..(length(batched_b) - 1)//1) and
-        length(batched_a) == length(batched_b) and nbatch <= 65_535
+        length(batched_a) == length(batched_b) and nbatch <= 65_535 and
+        dot_layout_ok?(a_v, bperm_a) and dot_layout_ok?(b_v, bperm_b)
 
     cond do
       batched? ->
@@ -3782,6 +3885,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Permute a tensor's axes into `perm` and flatten to `shape`. The transpose is
   # skipped when `perm` is already the identity — reshape is metadata here, so
   # the identity case costs nothing at all.
+  # A `dot` operand is laid out for the matmul when either the rotation it needs
+  # is within `transpose_nd`'s reach (rank <= 4), or it needs no rotation at all.
+  # See the note at the `general?` gate for why rank alone was the wrong test.
+  defp dot_layout_ok?(t, perm) do
+    rank = tuple_size(t.shape)
+    rank <= 4 or perm == Enum.to_list(0..(rank - 1)//1)
+  end
+
   defp dot_flatten(t, perm, shape) do
     rank = tuple_size(t.shape)
     t = if perm == Enum.to_list(0..(rank - 1)//1), do: t, else: Nx.transpose(t, axes: perm)
