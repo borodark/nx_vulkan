@@ -69,12 +69,26 @@ defmodule Nx.Vulkan.NxDoctestRegister do
 
   ### A pre-existing bug the testing found, which is NOT closed
 
-  `indexed_put` with DUPLICATE indices does not match `Nx.BinaryBackend`. Two
-  index rows naming the same slot race; BinaryBackend applies updates in order
-  and the LAST wins, while this backend keeps whichever thread wrote last in
-  hardware — consistently the FIRST row on the RTX 3060 Ti. Consistent is not
-  correct, and nothing in Vulkan orders two writes to the same address from
-  different invocations, so it may differ by driver or by dispatch geometry.
+  `indexed_put` with DUPLICATE indices is **hardware-dependent**, and the fleet
+  proved it:
+
+  | | result | stability |
+  |---|---|---|
+  | `Nx.BinaryBackend` | `[30, 0, 0]` — last update | defined |
+  | RTX 3060 Ti (Ampere) | `[10, 0, 0]` — **FIRST** row | stable, 5/5 |
+  | GT 650M, GT 750M (Kepler) | `[30, 0, 0]` — **LAST** row | stable, 10/10 |
+
+  Two index rows naming the same slot race, and nothing in Vulkan orders two
+  writes to the same address from different invocations, so both answers are
+  permitted. **The sharp version is not "the GPU is wrong" but "the same program
+  gives different numbers on different boxes in one fleet"** — anything relying
+  on it is unreproducible across hardware, and on Kepler it looks correct.
+
+  The first pin here asserted `refute gpu == host`, which was Ampere's answer
+  written down as if it were the rule. It went red on both Keplers. The pin now
+  asserts only what holds everywhere — the result is one of the updates, the
+  untouched slots are untouched, and the answer is stable within a box — and
+  records which box gives which answer in a table rather than in an assertion.
 
   `indexed_add` is unaffected and the contrast is the diagnosis: addition is
   commutative and the shader uses atomics, so ordering cannot reach the answer.
