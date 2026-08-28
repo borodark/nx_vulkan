@@ -162,16 +162,20 @@ defmodule Nx.Vulkan.OneOffsTest do
     # wins. This backend keeps whichever invocation wrote last in hardware, and
     # **the fleet gives two different stable answers**:
     #
-    #     BinaryBackend        [30, 0, 0]   last update  (defined)
-    #     RTX 3060 Ti (Ampere) [10, 0, 0]   FIRST row    (stable, 5/5)
-    #     GT 650M  (Kepler)    [30, 0, 0]   LAST row     (stable, 10/10)
-    #     GT 750M  (Kepler)    [30, 0, 0]   LAST row     (stable, 10/10)
+    #     BinaryBackend         [30, 0, 0]  last update  (defined)
+    #     RTX 3060 Ti (Ampere)  [10, 0, 0]  FIRST row    (stable, 5/5)
+    #     GT 650M  (Kepler)     [30, 0, 0]  LAST row     (stable, 10/10)
+    #     GT 750M  (Kepler)     [30, 0, 0]  LAST row     (stable, 10/10)
+    #     Tegra X1 (Maxwell)    [30, 0, 0]  LAST row     (stable, 25/25)
     #
-    # Two stable answers that disagree across boxes in one fleet. That is a
-    # sharper result than "the GPU is wrong": the SAME program gives different
-    # numbers on different hardware, so anything relying on this is
-    # unreproducible across the fleet. Nothing in Vulkan orders two writes to
-    # the same address from different invocations, so both are permitted.
+    # Two stable answers that disagree across boxes in one fleet, and **the
+    # majority agrees with the host** — three of four boxes return the correct
+    # answer by accident. Ampere is the outlier. That is worse than a uniform
+    # divergence: the bug is invisible on most of the fleet, and a developer on
+    # a Kepler or the Jetson would have no reason to suspect it.
+    #
+    # Nothing in Vulkan orders two writes to the same address from different
+    # invocations, so all of these are permitted.
     #
     # THIS TEST USED TO ASSERT `refute gpu == host`, which was Ampere's answer
     # written down as if it were the rule. It went red on both Keplers, where

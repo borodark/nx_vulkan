@@ -77,10 +77,13 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   | `Nx.BinaryBackend` | `[30, 0, 0]` — last update | defined |
   | RTX 3060 Ti (Ampere) | `[10, 0, 0]` — **FIRST** row | stable, 5/5 |
   | GT 650M, GT 750M (Kepler) | `[30, 0, 0]` — **LAST** row | stable, 10/10 |
+  | Tegra X1 (Maxwell) | `[30, 0, 0]` — **LAST** row | stable, 25/25 |
 
   Two index rows naming the same slot race, and nothing in Vulkan orders two
-  writes to the same address from different invocations, so both answers are
-  permitted. **The sharp version is not "the GPU is wrong" but "the same program
+  writes to the same address from different invocations, so all of these are
+  permitted. **Three of the four boxes agree with the host by accident**, which
+  is worse than a uniform divergence: the bug is invisible on most of the fleet,
+  and Ampere is the only place it shows. **The sharp version is not "the GPU is wrong" but "the same program
   gives different numbers on different boxes in one fleet"** — anything relying
   on it is unreproducible across hardware, and on Kepler it looks correct.
 

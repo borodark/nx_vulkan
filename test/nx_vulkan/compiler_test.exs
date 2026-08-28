@@ -291,7 +291,32 @@ defmodule Nx.Vulkan.CompilerTest do
     test "many-slot reduce with grid-stride (> 65535 slots) fuses and is correct" do
       # 100k output slots exceeds maxComputeWorkGroupCount[0] (65535); the
       # shader grid-strides over slots. Opt-in only (regresses on Ampere).
-      m = biota({100_000, 128}, 1.0e-6)
+      #
+      # THE REDUCE WIDTH IS DELIBERATELY SMALL — do not grow it back. Only the
+      # SLOT COUNT is under test here, and under `NXV_FUSE_REDUCE=1`
+      # `reduce_beneficial?/3` returns true on the `force == "1"` clause before
+      # it ever looks at `reduce_size`, so the width cannot change what this
+      # exercises.
+      #
+      # It was {100_000, 128} — 12.8M elements — and `biota/2` builds them on the
+      # HOST via `Nx.BinaryBackend.iota/3`, which materialises the range as a
+      # list before it becomes a binary. Measured cost of that one line:
+      #
+      #     width 128  12.8M elements   +3069 MB      <- was
+      #     width   8   800k elements    +218 MB
+      #     width   4   400k elements     +99 MB      <- is
+      #     width   2   200k elements     +48 MB
+      #
+      # 3 GB on a 4 GB box killed the whole BEAM on the Jetson
+      # (`eheap_alloc: Cannot allocate 1098556536 bytes of memory`), taking the
+      # entire suite with it — not a timeout, a VM death, so nothing after it
+      # ran either. It had been failing there as a TIMEOUT before
+      # `strict_test.sh` gained a default `--timeout`; raising the timeout only
+      # let it live long enough to exhaust memory instead.
+      #
+      # The slot count is untouched at 100_000, which is the only thing the
+      # test is about.
+      m = biota({100_000, 4}, 1.0e-6)
       got = jit(fn x -> Nx.sum(x, axes: [1]) end).(m)
       assert match?(%VulkanoBackend{}, got.data)
       assert Nx.shape(got) == {100_000}
