@@ -2508,6 +2508,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
   end
 
   @scatter_spv Path.expand("../../priv/shaders/scatter.spv", __DIR__)
+  @scatter_ordered_spv Path.expand("../../priv/shaders/scatter_ordered.spv", __DIR__)
 
   # `glsl/scatter.comp` — the inverse of `gather.comp`, same index arithmetic and
   # the same params layout with source and destination swapped. Both were
@@ -2616,6 +2617,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
     Enum.map(0..(length(perm) - 1)//1, &Map.fetch!(indexed, &1))
   end
 
+  # Deterministic duplicate-index handling is ON by default and can be turned
+  # off with `NXV_SCATTER_ORDERED=0`.
+  #
+  # The opt-out is defensible rather than a hedge: `Nx.indexed_put/4` documents
+  # duplicate indices as non-deterministic on GPU devices, so the racing
+  # single-dispatch write is CONFORMING. Anyone who knows their indices are
+  # distinct — which is the overwhelming majority of callers, and every caller
+  # inside this backend — is paying for a guarantee they cannot observe.
+  #
+  # Measured on the RTX 3060 Ti, ordered vs racing, same op:
+  #
+  #     case                       racing   ordered    delta
+  #     tiny target, 4 updates      0.191    0.207    +0.016 ms
+  #     1M target, 4 updates        3.066    4.427    +1.36 ms
+  #     1M target, 10k updates      1.856    3.455    +1.60 ms
+  #     4M target, 100k updates    11.158   15.407    +4.25 ms
+  #
+  # The overhead tracks the TARGET size, not the update count, because the
+  # scratch buffer is one u32 per target element and has to be zeroed. That is
+  # the shape of cost to expect: scattering four values into a large tensor pays
+  # the most, proportionally.
+  defp scatter_ordered?, do: System.get_env("NXV_SCATTER_ORDERED") != "0"
+
   defp integer_type?({:s, _}), do: true
   defp integer_type?({:u, _}), do: true
   defp integer_type?(_), do: false
@@ -2652,17 +2676,41 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     n = byte_size_of(u_shape)
 
+    # `indexed_put` (op 0) takes the ORDERED path; `indexed_add` (op 1) does not
+    # need it, because atomicAdd is commutative and ordering cannot reach its
+    # answer.
+    #
+    # Nx documents duplicate indices as non-deterministic on GPU devices, so the
+    # racing write was conforming. What made determinism worth two dispatches is
+    # that the race resolves differently PER DEVICE — Ampere keeps the first
+    # row, Kepler and Maxwell the last — so the same program answered
+    # differently on different boxes in one fleet, and three of the four agreed
+    # with the host by accident. See scatter_ordered.comp for the measured
+    # table.
     :ok =
-      Nx.Vulkan.NativeV.apply_scatter(
-        out_ref,
-        u_ref,
-        idx_ref,
-        params_ref,
-        n,
-        k,
-        op_code,
-        @scatter_spv
-      )
+      if op_code == 0 and scatter_ordered?() do
+        Nx.Vulkan.NativeV.apply_scatter_ordered(
+          out_ref,
+          u_ref,
+          idx_ref,
+          params_ref,
+          n,
+          k,
+          byte_size_of(out.shape),
+          @scatter_ordered_spv
+        )
+      else
+        Nx.Vulkan.NativeV.apply_scatter(
+          out_ref,
+          u_ref,
+          idx_ref,
+          params_ref,
+          n,
+          k,
+          op_code,
+          @scatter_spv
+        )
+      end
 
     put_in(out.data, %__MODULE__{ref: out_ref, shape: out_shape, type: type})
   end

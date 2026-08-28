@@ -1501,6 +1501,122 @@ fn apply_scatter<'a>(
     }
 }
 
+/// Scatter with DETERMINISTIC last-wins semantics for duplicate indices.
+///
+/// `Nx.indexed_put/4` documents duplicate indices as non-deterministic on GPU
+/// devices, so `apply_scatter` above is conforming. This exists because the
+/// race resolves DIFFERENTLY per device — Ampere keeps the first row while
+/// Kepler and Maxwell keep the last — which makes a program's output depend on
+/// which box it ran on. See scatter_ordered.comp for the measured table.
+///
+/// Two dispatches over the same index arithmetic, plus a zero-fill:
+///
+///   fill   winner[0..out_elems) = 0
+///   OP 0   atomicMax(winner[dst], row + 1)
+///   OP 1   write where winner[dst] == row + 1
+///
+/// All three are recorded into ONE command buffer. vulkano's
+/// `AutoCommandBufferBuilder` tracks the winner buffer as written-then-read and
+/// inserts the compute-compute barriers itself, exactly as it does for the FFT
+/// stages — do not hand-roll them, and do not assume they are unneeded.
+///
+/// `out_elems` sizes the winner buffer in ELEMENTS of the target, not bytes:
+/// one u32 slot per target element regardless of the target's dtype width.
+#[rustler::nif(schedule = "DirtyIo")]
+fn apply_scatter_ordered<'a>(
+    env: Env<'a>,
+    out_ref: ResourceArc<VulkanoTensor>,
+    upd_ref: ResourceArc<VulkanoTensor>,
+    idx_ref: ResourceArc<VulkanoTensor>,
+    params_ref: ResourceArc<VulkanoTensor>,
+    n: u32,
+    k: u32,
+    out_elems: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let result = (|| -> Result<(), String> {
+        let winner = alloc_buffer(
+            context.mem_allocator.clone(),
+            (out_elems as usize) * 4,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+        )?;
+
+        let mark = get_or_create_pipeline(&spv_path, Some(0))?;
+        let write = get_or_create_pipeline(&spv_path, Some(1))?;
+
+        let make_set = |cached: &CachedPipeline| {
+            PersistentDescriptorSet::new(
+                &context.set_allocator,
+                cached.layout.set_layouts()[0].clone(),
+                [
+                    WriteDescriptorSet::buffer(0, upd_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(1, out_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(2, idx_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(3, params_ref.buf.clone()),
+                    WriteDescriptorSet::buffer(4, winner.clone()),
+                ],
+                [],
+            )
+            .map_err(|e| format!("descriptor set: {e}"))
+        };
+
+        let mark_set = make_set(&mark)?;
+        let write_set = make_set(&write)?;
+
+        let groups = [n.div_ceil(256), 1, 1];
+        let winner_for_fill = winner.clone();
+
+        let record: RecordFn = Box::new(move |cmd: &mut CmdBuilder| {
+            // `fill_buffer` wants a u32 view; `alloc_buffer` hands back [u8].
+            // The size is a multiple of 4 by construction (4 bytes per target
+            // element), so the reinterpret is exact.
+            cmd.fill_buffer(winner_for_fill.clone().reinterpret::<[u32]>(), 0)
+                .map_err(|e| format!("fill winner: {e}"))?;
+
+            for (cached, set) in [(&mark, &mark_set), (&write, &write_set)] {
+                cmd.bind_pipeline_compute(cached.pipeline.clone())
+                    .map_err(|e| format!("bind pipeline: {e}"))?
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Compute,
+                        cached.layout.clone(),
+                        0,
+                        set.clone(),
+                    )
+                    .map_err(|e| format!("bind descriptor: {e}"))?
+                    .push_constants(cached.layout.clone(), 0, PushBcast { n, rank: k })
+                    .map_err(|e| format!("push_constants: {e}"))?
+                    .dispatch(groups)
+                    .map_err(|e| format!("dispatch: {e}"))?;
+            }
+            Ok(())
+        });
+
+        if batch_max() == 0 {
+            let mut cmd = new_cmd_builder(context)?;
+            record(&mut cmd)?;
+            return submit_and_wait(context, cmd);
+        }
+
+        let mut queue = pending().lock().map_err(|_| "pending queue poisoned".to_string())?;
+        queue.push(record);
+        if queue.len() >= batch_max() {
+            flush_locked(context, &mut queue)
+        } else {
+            Ok(())
+        }
+    })();
+
+    match result {
+        Ok(()) => Ok(rustler::types::atom::ok().encode(env)),
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn apply_gather<'a>(
     env: Env<'a>,

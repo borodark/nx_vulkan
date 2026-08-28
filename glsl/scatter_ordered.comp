@@ -1,0 +1,88 @@
+#version 450
+
+// Scatter with DETERMINISTIC last-wins semantics for duplicate indices.
+//
+// WHY THIS IS OPTIONAL, AND WHY IT EXISTS ANYWAY.
+//
+// `Nx.indexed_put/4` documents: "In case of repeating indices, the result is
+// non-deterministic, since the operation happens in parallel when running on
+// devices such as the GPU." So scatter.comp's plain racing write is CONFORMING,
+// not broken, and this file buys a guarantee the API declines to make.
+//
+// What made it worth buying is that the race resolves differently per device.
+// Measured across this project's fleet with idx=[[0],[0],[0]], upd=[10,20,30]:
+//
+//     Nx.BinaryBackend       [30, 0, 0]   last update  (defined)
+//     RTX 3060 Ti (Ampere)   [10, 0, 0]   FIRST row    (stable, 5/5)
+//     GT 650M  (Kepler)      [30, 0, 0]   LAST row     (stable, 10/10)
+//     GT 750M  (Kepler)      [30, 0, 0]   LAST row     (stable, 10/10)
+//     Tegra X1 (Maxwell)     [30, 0, 0]   LAST row     (stable, 25/25)
+//
+// Every box is individually deterministic and three of the four agree with the
+// host BY ACCIDENT, so the divergence is invisible on most of the fleet. A
+// result that is stable per box and different across boxes is worse to debug
+// than one that is obviously random.
+//
+// THE ALGORITHM. Two passes over the same index arithmetic, sharing one
+// descriptor set so both are one pipeline with a spec constant:
+//
+//   OP 0 (mark)  atomicMax(winner[dst], row + 1)
+//   OP 1 (write) if (winner[dst] == row + 1) write this row's element
+//
+// `row + 1` because the winner buffer is zero-filled and 0 must mean "no row
+// claimed this slot". atomicMax gives the HIGHEST row index, which is the LAST
+// update in `Nx`'s ordering — matching BinaryBackend exactly.
+//
+// The two dispatches are recorded into one command buffer; vulkano's
+// AutoCommandBufferBuilder inserts the compute-compute barrier between them
+// because it tracks the winner buffer as written-then-read. Do not hand-roll
+// that barrier, and do not assume it is unnecessary.
+//
+// Only `indexed_put` needs this. `indexed_add` uses atomicAdd, and addition is
+// commutative, so ordering cannot reach its answer — it stays in scatter.comp
+// at one dispatch.
+//
+// Params and index handling are byte-identical to scatter.comp:
+// [K, ews, idx_words, count, stride[4]].
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const int OP = 0;
+
+layout(std430, binding = 0) readonly buffer U { uint upd[]; };
+layout(std430, binding = 1) buffer O { uint o[]; };
+layout(std430, binding = 2) readonly buffer Idx { uint idxb[]; };
+layout(std430, binding = 3) readonly buffer P { int prm[]; };
+layout(std430, binding = 4) buffer W { uint winner[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint K;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) return;
+
+    uint ews = uint(prm[1]);
+    uint idxw = uint(prm[2]);
+    uint count = uint(prm[3]);
+
+    uint row = gid / count;
+    uint inner = gid % count;
+
+    uint base = 0u;
+    for (uint j = 0u; j < p.K; ++j) {
+        uint w = idxb[(row * p.K + j) * idxw];
+        base += w * uint(prm[4 + int(j)]);
+    }
+
+    uint dst = base + inner;
+
+    if (OP == 0) {
+        atomicMax(winner[dst], row + 1u);
+    } else if (winner[dst] == row + 1u) {
+        for (uint w = 0u; w < ews; ++w) {
+            o[dst * ews + w] = upd[gid * ews + w];
+        }
+    }
+}

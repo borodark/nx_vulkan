@@ -67,10 +67,10 @@ defmodule Nx.Vulkan.NxDoctestRegister do
       `robust_buffer_access` returns ZEROS. A silently wrong answer of exactly
       the shape this backend treats as its worst failure mode.
 
-  ### A pre-existing bug the testing found, which is NOT closed
+  ### A pre-existing bug the testing found, since CLOSED
 
-  `indexed_put` with DUPLICATE indices is **hardware-dependent**, and the fleet
-  proved it:
+  `indexed_put` with DUPLICATE indices did not match `Nx.BinaryBackend`, and the
+  fleet showed why that mattered:
 
   | | result | stability |
   |---|---|---|
@@ -79,30 +79,41 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   | GT 650M, GT 750M (Kepler) | `[30, 0, 0]` — **LAST** row | stable, 10/10 |
   | Tegra X1 (Maxwell) | `[30, 0, 0]` — **LAST** row | stable, 25/25 |
 
-  Two index rows naming the same slot race, and nothing in Vulkan orders two
-  writes to the same address from different invocations, so all of these are
-  permitted. **Three of the four boxes agree with the host by accident**, which
-  is worse than a uniform divergence: the bug is invisible on most of the fleet,
-  and Ampere is the only place it shows. **The sharp version is not "the GPU is wrong" but "the same program
-  gives different numbers on different boxes in one fleet"** — anything relying
-  on it is unreproducible across hardware, and on Kepler it looks correct.
+  **`Nx.indexed_put/4` does not require determinism here.** It documents: "In
+  case of repeating indices, the result is non-deterministic, since the
+  operation happens in parallel when running on devices such as the GPU." The
+  racing write was CONFORMING, and `scatter.comp`'s own comment said so — which
+  is worth recording, because the fix was recommended in this register before
+  anyone read it.
 
-  The first pin here asserted `refute gpu == host`, which was Ampere's answer
-  written down as if it were the rule. It went red on both Keplers. The pin now
-  asserts only what holds everywhere — the result is one of the updates, the
-  untouched slots are untouched, and the answer is stable within a box — and
-  records which box gives which answer in a table rather than in an assertion.
+  What made determinism worth buying anyway is the table: every box stable,
+  boxes disagreeing with each other, and **three of four agreeing with the host
+  by accident**, so the divergence was invisible on most of the fleet and Ampere
+  was the only place it showed.
 
-  `indexed_add` is unaffected and the contrast is the diagnosis: addition is
-  commutative and the shader uses atomics, so ordering cannot reach the answer.
-  The problem is specifically WRITE ordering, not scatter.
+  `scatter_ordered.comp` closes it. Two passes over the same index arithmetic
+  sharing one descriptor set: `atomicMax(winner[dst], row + 1)`, then write
+  where `winner[dst] == row + 1`. `row + 1` because the scratch buffer is
+  zero-filled and 0 must mean "unclaimed"; `atomicMax` yields the highest row,
+  which is Nx's last update. The compute-compute barrier between the passes is
+  inserted by vulkano's `AutoCommandBufferBuilder`, the same mechanism the FFT
+  stages rely on.
 
-  No doctest exercises it. Fixing it means a two-pass scatter — `atomicMax` the
-  winning row index into an output-sized scratch buffer, then a second dispatch
-  to write that row's value — i.e. two extra dispatches and a scratch allocation
-  on EVERY `indexed_put`, to be correct on an input nothing currently asks for.
-  That is an operator's cost/benefit call, so it is **pinned at the observed
-  behaviour** rather than quietly fixed or quietly ignored.
+  Measured cost on the RTX 3060 Ti, racing vs ordered:
+
+  | case | racing | ordered | delta |
+  |---|---:|---:|---:|
+  | tiny target, 4 updates | 0.191 ms | 0.207 ms | +0.016 |
+  | 1M target, 4 updates | 3.066 ms | 4.427 ms | +1.36 |
+  | 1M target, 10k updates | 1.856 ms | 3.455 ms | +1.60 |
+  | 4M target, 100k updates | 11.158 ms | 15.407 ms | +4.25 |
+
+  **The overhead tracks the TARGET size, not the update count**, because the
+  scratch buffer is one u32 per target element and must be zeroed. Scattering
+  four values into a large tensor pays the most, proportionally. `indexed_add`
+  is untouched and stays on the one-dispatch path — atomicAdd is commutative, so
+  ordering never could reach its answer. `NXV_SCATTER_ORDERED=0` restores the
+  racing write for anyone who knows their indices are distinct.
 
   **How it was found is the reusable part.** The first cut of the axis-subset
   test used all-zero indices, so every subset failed — including the PREFIX ones

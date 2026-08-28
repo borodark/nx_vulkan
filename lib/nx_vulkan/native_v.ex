@@ -231,6 +231,24 @@ defmodule Nx.Vulkan.NativeV do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Scatter with DETERMINISTIC last-wins semantics for duplicate indices.
+
+  `Nx.indexed_put/4` documents duplicate indices as non-deterministic on GPU
+  devices, so `apply_scatter/8` is conforming. This exists because the race
+  resolves DIFFERENTLY per device — Ampere keeps the first row, Kepler and
+  Maxwell the last — which makes a program's answer depend on which box ran it.
+
+  Records a zero-fill and two dispatches into one command buffer: `atomicMax`
+  the winning row into a scratch buffer, then write only where a row won. The
+  compute-compute barrier between them is inserted by vulkano's
+  `AutoCommandBufferBuilder`.
+
+  `out_elems` sizes the scratch buffer in TARGET ELEMENTS, not bytes.
+  """
+  def apply_scatter_ordered(_out, _upd, _idx, _params, _n, _k, _out_elems, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Per-axis reduction. `op_code`: 0=sum, 1=max, 2=min.
 
   Input shape is interpreted as a virtual (outer, reduce_size, inner)

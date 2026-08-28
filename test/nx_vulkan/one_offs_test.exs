@@ -151,93 +151,130 @@ defmodule Nx.Vulkan.OneOffsTest do
     end
   end
 
-  describe "DUPLICATE indices — HARDWARE-DEPENDENT, and that is the finding" do
-    # NOT introduced by the axis rotation, and not closed by it. Found because
-    # the first cut of the subset test above used all-zero indices, which made
-    # every subset fail — including the prefix ones that never touch the new
-    # code.
+  describe "DUPLICATE indices — now deterministic last-wins on every box" do
+    # This section has been three different tests, and the sequence is the
+    # point.
     #
-    # `indexed_put` writes without ordering, so two index rows naming the same
-    # slot RACE. `Nx.BinaryBackend` applies updates in order and the LAST one
-    # wins. This backend keeps whichever invocation wrote last in hardware, and
-    # **the fleet gives two different stable answers**:
+    # 1. It asserted `refute gpu == host`, which was Ampere's answer written
+    #    down as if it were the rule. Red on both Keplers.
+    # 2. It asserted only what held everywhere, and recorded per-box results in
+    #    a table:
     #
-    #     BinaryBackend         [30, 0, 0]  last update  (defined)
-    #     RTX 3060 Ti (Ampere)  [10, 0, 0]  FIRST row    (stable, 5/5)
-    #     GT 650M  (Kepler)     [30, 0, 0]  LAST row     (stable, 10/10)
-    #     GT 750M  (Kepler)     [30, 0, 0]  LAST row     (stable, 10/10)
-    #     Tegra X1 (Maxwell)    [30, 0, 0]  LAST row     (stable, 25/25)
+    #        Nx.BinaryBackend       [30, 0, 0]  last update  (defined)
+    #        RTX 3060 Ti (Ampere)   [10, 0, 0]  FIRST row    (stable, 5/5)
+    #        GT 650M / GT 750M      [30, 0, 0]  LAST row     (stable, 10/10)
+    #        Tegra X1 (Maxwell)     [30, 0, 0]  LAST row     (stable, 25/25)
     #
-    # Two stable answers that disagree across boxes in one fleet, and **the
-    # majority agrees with the host** — three of four boxes return the correct
-    # answer by accident. Ampere is the outlier. That is worse than a uniform
-    # divergence: the bug is invisible on most of the fleet, and a developer on
-    # a Kepler or the Jetson would have no reason to suspect it.
+    # 3. `scatter_ordered.comp` now makes every box answer `[30, 0, 0]`.
     #
-    # Nothing in Vulkan orders two writes to the same address from different
-    # invocations, so all of these are permitted.
-    #
-    # THIS TEST USED TO ASSERT `refute gpu == host`, which was Ampere's answer
-    # written down as if it were the rule. It went red on both Keplers, where
-    # the race resolves the other way and the GPU coincidentally AGREES. The
-    # pin now asserts only what is true everywhere — that the result is one of
-    # the updates and is stable within a box — and records WHICH answer each box
-    # gives in the table above rather than in an assertion.
-    #
-    # Fixing the underlying race means a two-pass scatter: atomicMax the winning
-    # ROW INDEX into an output-sized scratch buffer, then a second dispatch to
-    # write that row's value. Two extra dispatches and an allocation on EVERY
-    # indexed_put, to be correct on an input no doctest exercises. That is a
-    # cost/benefit call for the operator, so it is measured and pinned rather
-    # than quietly fixed or quietly ignored.
-    test "indexed_put with duplicate indices returns SOME update, stably" do
-      idx = Nx.tensor([[0], [0], [0]])
-      upd = Nx.tensor([10, 20, 30])
+    # **`Nx.indexed_put/4` does NOT require this.** It documents: "In case of
+    # repeating indices, the result is non-deterministic, since the operation
+    # happens in parallel when running on devices such as the GPU." The racing
+    # write was conforming. What made determinism worth buying is the table
+    # above — every box stable, boxes disagreeing with each other, and three of
+    # four agreeing with the host BY ACCIDENT, so the divergence was invisible
+    # on most of the fleet.
+    test "indexed_put with duplicate indices matches BinaryBackend" do
+      check(fn b ->
+        Nx.indexed_put(
+          Nx.tensor([0, 0, 0], backend: b),
+          Nx.tensor([[0], [0], [0]], backend: b),
+          Nx.tensor([10, 20, 30], backend: b)
+        )
+      end)
 
+      got =
+        Nx.indexed_put(
+          Nx.tensor([0, 0, 0], backend: VulkanoBackend),
+          Nx.tensor([[0], [0], [0]], backend: VulkanoBackend),
+          Nx.tensor([10, 20, 30], backend: VulkanoBackend)
+        )
+
+      assert Nx.to_flat_list(got) == [30, 0, 0], "LAST update must win"
+    end
+
+    test "last-wins holds for longer runs and for interleaved slots" do
+      # atomicMax picks the highest ROW index, so the answer must be the last
+      # update naming each slot — not the largest VALUE, which a max-of-values
+      # implementation would give and which coincides on ascending updates.
+      # These updates DESCEND, so the two rules disagree.
+      check(fn b ->
+        Nx.indexed_put(
+          Nx.tensor([0, 0, 0, 0], backend: b),
+          Nx.tensor([[1], [2], [1], [2], [1]], backend: b),
+          Nx.tensor([90, 80, 70, 60, 50], backend: b)
+        )
+      end)
+
+      got =
+        Nx.indexed_put(
+          Nx.tensor([0, 0, 0, 0], backend: VulkanoBackend),
+          Nx.tensor([[1], [2], [1], [2], [1]], backend: VulkanoBackend),
+          Nx.tensor([90, 80, 70, 60, 50], backend: VulkanoBackend)
+        )
+
+      # slot 1 last written by row 4 (50), slot 2 by row 3 (60)
+      assert Nx.to_flat_list(got) == [0, 50, 60, 0]
+    end
+
+    test "duplicates over a multi-element block, and at f64" do
+      check(fn b ->
+        Nx.indexed_put(
+          Nx.iota({3, 4}, type: {:f, 64}, backend: b),
+          Nx.tensor([[0], [2], [0]], backend: b),
+          Nx.tensor([[1.5, 2.5, 3.5, 4.5], [9.0, 9.0, 9.0, 9.0], [7.5, 7.5, 7.5, 7.5]],
+            type: {:f, 64},
+            backend: b
+          )
+        )
+      end)
+    end
+
+    test "it is stable across runs" do
       run = fn ->
         Nx.to_flat_list(
           Nx.indexed_put(
             Nx.tensor([0, 0, 0], backend: VulkanoBackend),
-            Nx.backend_transfer(idx, VulkanoBackend),
-            Nx.backend_transfer(upd, VulkanoBackend)
+            Nx.tensor([[0], [0], [0]], backend: VulkanoBackend),
+            Nx.tensor([10, 20, 30], backend: VulkanoBackend)
           )
         )
       end
 
-      host = Nx.indexed_put(Nx.tensor([0, 0, 0], backend: Nx.BinaryBackend), idx, upd)
-      assert Nx.to_flat_list(host) == [30, 0, 0], "BinaryBackend applies updates in order"
-
-      got = run.()
-
-      # It must be one of the updates — never a stale target value, never
-      # garbage, and never a partial write.
-      assert hd(got) in [10, 20, 30],
-             "expected one of the updates, got #{inspect(got)}"
-
-      assert tl(got) == [0, 0], "untouched slots must be untouched"
-
-      # Stable WITHIN a box. Both observed behaviours are stable; an unstable
-      # one would be a different and worse problem, so it is worth separating.
-      assert Enum.uniq(for(_ <- 1..5, do: run.())) == [got],
-             "the duplicate-index result varied between runs on this box"
+      assert Enum.uniq(for(_ <- 1..10, do: run.())) == [[30, 0, 0]]
     end
 
-    test "indexed_add with duplicate indices is CORRECT, and that is not luck" do
-      # Addition is commutative and the shader uses atomics, so ordering cannot
-      # change the answer. This is the contrast that shows the problem above is
-      # specifically about WRITE ordering and not about scatter generally — and
-      # it holds on every box in the fleet.
-      idx = Nx.tensor([[0], [0], [0]])
-      upd = Nx.tensor([10, 20, 30])
+    test "NXV_SCATTER_ORDERED=0 opts out, and distinct indices are unaffected" do
+      # The opt-out is defensible rather than a hedge — Nx does not require
+      # determinism here, and the ordered path costs a zero-filled scratch
+      # buffer plus a second dispatch, both scaling with the TARGET size rather
+      # than the update count. Distinct indices must be identical either way.
+      System.put_env("NXV_SCATTER_ORDERED", "0")
 
-      gpu =
+      try do
+        check(fn b ->
+          Nx.indexed_put(
+            Nx.iota({8}, backend: b),
+            Nx.tensor([[1], [3], [5]], backend: b),
+            Nx.tensor([100, 300, 500], backend: b)
+          )
+        end)
+      after
+        System.delete_env("NXV_SCATTER_ORDERED")
+      end
+    end
+
+    test "indexed_add was always correct, and still is" do
+      # Addition is commutative and the shader uses atomicAdd, so ordering never
+      # could reach its answer. It stays on the ONE-dispatch path — the ordered
+      # route would be pure cost.
+      check(fn b ->
         Nx.indexed_add(
-          Nx.tensor([0, 0, 0], backend: VulkanoBackend),
-          Nx.backend_transfer(idx, VulkanoBackend),
-          Nx.backend_transfer(upd, VulkanoBackend)
+          Nx.tensor([0, 0, 0], backend: b),
+          Nx.tensor([[0], [0], [0]], backend: b),
+          Nx.tensor([10, 20, 30], backend: b)
         )
-
-      assert Nx.to_flat_list(gpu) == [60, 0, 0]
+      end)
     end
   end
 
