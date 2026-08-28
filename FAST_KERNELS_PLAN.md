@@ -1,5 +1,12 @@
 # Nx.Vulkan.Fast — explicit named-kernel approach
 
+> **SUPERSEDED — `Nx.Vulkan.Fast` was deleted on 2026-08-28.** This document
+> describes an approach that no longer exists. The mechanism it is built on,
+> `Nx.Defn.Expr.optional/3`, was removed by Nx 0.12 (`3a77d9e`), and the fused
+> path it planned was f32-only while this backend went f64-first (`bb94217`).
+> Kept as a record of the reasoning, not as a plan. See the CHANGELOG.
+
+
 **Status**: plan, May 2026.
 **Trigger**: research into Emily's `Emily.Fast` pattern (in
 `~/projects/learn_erl/emily/lib/emily/fast.ex`) revealed a cleaner

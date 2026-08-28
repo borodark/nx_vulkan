@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### BREAKING — `Nx.Vulkan.Fast` removed
+
+The module is deleted. It was the **fused-kernel dispatch seam**, and both
+halves of what made it a seam are gone.
+
+Each function emitted an `Nx.Defn.Expr` optional/3 IR node naming a backend
+callback, with a `defn` fallback: a backend implementing
+`fast_leapfrog_position/4` dispatched ONE fused shader, everything else ran the
+composed primitives. **Nx 0.12 removed `Expr.optional/3`** (`3a77d9e`), so the
+callbacks went and the functions became their own fallbacks — `leapfrog_position/3`
+is `Nx.add(q, Nx.multiply(eps, p))`, a two-op composition behind a name that no
+longer selects anything.
+
+**And the fused path was f32-only.** Every callback gated on `all_f32?/1`, so a
+non-f32 operand fell through to the fallback by design. This backend then went
+f64-first (`bb94217` dropped the f32 shaders), which means that even with
+`Expr.optional` intact, the f64 leapfrog this project actually runs would have
+taken the fallback every time. `Nx.Vulkan.fused_chain_4/…`, the dispatch target,
+no longer exists either.
+
+So: no mechanism, no target, and the wrong dtype. Six functions with zero callers
+in this repo or its consumer.
+
+**If you called it**, replace with the composition each function documented —
+they are one or two Nx ops apiece, and since `3a77d9e` that is literally all they
+were:
+
+| removed | equivalent |
+|---|---|
+| `leapfrog_position(q, eps, p)` | `Nx.add(q, Nx.multiply(eps, p))` |
+| `leapfrog_momentum_half(p, half_eps, grad)` | `Nx.add(p, Nx.multiply(half_eps, grad))` |
+| `momentum_step(p, eps, grad)` | `Nx.add(p, Nx.multiply(eps, grad))` |
+| `inv_mass_apply(p, inv_mass)` | `Nx.multiply(p, inv_mass)` |
+| `kinetic_energy(p, inv_mass)` | `0.5 * Nx.sum(p² · inv_mass)` |
+| `normal_logpdf(x, mu, sigma)` | `-0.5·z² - log(σ) - 0.5·log(2π)`, `z = (x-mu)/σ` |
+
+**One thing to carry across if you reimplement `normal_logpdf`.** The
+`-0.5·log(2π)` constant must be materialised at the computation's type.
+`Nx.tensor/1` defaults to `{:f, 32}`, so a bare Elixir float silently degrades an
+f64 chain: the module shipped with exactly that defect for four months, giving an
+f64 RESULT TYPE carrying an f32-precision VALUE, off by 1.6e-8. It was invisible
+because it was correct in the f32 world the module was written for, and nothing
+re-examined it when the project became f64-first.
+
+That error is a CONSTANT, so it cancels exactly in a log-RATIO — Metropolis
+acceptance was unaffected. It accumulates in a summed absolute log-likelihood:
+N × 1.56e-8, which is 0.016 at N = 1e6, enough to matter for model comparison.
+
+
 ### Fixed — scalars were refused by three capability gates
 
 `compare`, `select` and the broadcasting binary path all gated the GPU on

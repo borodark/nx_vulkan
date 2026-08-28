@@ -1,5 +1,12 @@
 # Research note — Where the Emily-style named-kernel pattern wins
 
+> **SUPERSEDED — `Nx.Vulkan.Fast` was deleted on 2026-08-28.** This document
+> describes an approach that no longer exists. The mechanism it is built on,
+> `Nx.Defn.Expr.optional/3`, was removed by Nx 0.12 (`3a77d9e`), and the fused
+> path it planned was f32-only while this backend went f64-first (`bb94217`).
+> Kept as a record of the reasoning, not as a plan. See the CHANGELOG.
+
+
 **Date**: May 2026
 **Trigger**: A short refactor session moving eXMC's NUTS leapfrog from
 direct `Nx.*` calls to `Nx.Vulkan.Fast` named kernels (Emily's

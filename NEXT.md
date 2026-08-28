@@ -1066,7 +1066,7 @@ timing** is a standing rule here and the original run did not.
 Two days on non-residency work. It found **one real bug** and several traps, and
 per hour it outproduced the last few residency items.
 
-#### The bug: an f32 constant in an f64 chain
+#### The bug: an f32 constant in an f64 chain — and how I oversold it
 
 `Nx.Vulkan.Fast.normal_logpdf/3` computed at **f32 precision on f64 input**.
 `@log_sqrt_2pi` was a bare Elixir float, so `Nx.tensor/1` materialised it at
@@ -1075,11 +1075,40 @@ significant digits. Subtracting that from an f64 tensor yields an f64 RESULT
 TYPE carrying an f32-precision VALUE — `normal_logpdf(0, 0, 1)` answered
 `-0.9189385175704956` where the exact value is `-0.9189385332046727`.
 
-**No type signature showed it and no test could have caught it, because the
-module had no tests.** It is a log-density feeding a Metropolis acceptance ratio
-across thousands of leapfrog steps. Reproduced on `BinaryBackend` alone first,
-so it was never a GPU issue. Fixed by materialising the constant at
-`Nx.type(z2)`, which leaves f32 callers bit-identical.
+**I first wrote that it "feeds a Metropolis acceptance ratio across thousands of
+leapfrog steps." That is the one use where the bug has ZERO effect**, and I took
+it from the module's own statement of intent instead of checking. The error is a
+CONSTANT — the same additive term on every element of every call — and a
+Metropolis ratio is `logp(proposed) - logp(current)`, so it cancels exactly:
+
+```
+exact ratio       : -0.06000000000000005
+both shifted by e : -0.06000000000000005     identical
+```
+
+Where it does bite is a SUMMED absolute log-likelihood, accumulating as
+N x 1.56e-8: 0.016 at N = 1e6, 1.56 at N = 1e8. That is the range where model
+comparison (WAIC, LOO, Bayes factors) argues over ~0.1 in log-evidence.
+
+**And it was one instance, not a class** — the only float literal in `lib/` with
+more than seven significant digits outside a GLSL string. Reproduced on
+`BinaryBackend` alone first, so it was never a GPU issue.
+
+**Why it survived four months is the interesting part.** It was not an
+oversight: `Nx.Vulkan.Fast`'s fused path was **f32-only** (every backend callback
+gated on `all_f32?/1`), so an f32 constant was the correct width for the world
+the module was written in. It became wrong when the project went f64-first and
+nothing re-examined the module. Correct-for-its-era code left behind by a change
+of era, which is a different failure mode from carelessness and needs a
+different defence — the one that works is running the checks, since the module
+had no tests and no callers to notice.
+
+**The module has since been deleted** (see the CHANGELOG): its dispatch
+mechanism was removed by Nx 0.12 and its target dtype was abandoned by this
+backend, so it had no mechanism, no target and no callers. The fix is recorded
+here because the LESSON outlives the code — materialise a float constant at the
+computation's type, because `Nx.tensor/1` defaults to f32 and will silently
+degrade an f64 chain while leaving the type signature intact.
 
 #### What each check was actually worth
 
@@ -1099,7 +1128,9 @@ so it was never a GPU issue. Fixed by materialising the constant at
     the three `*_push` builders pack C structs a shader reads BY OFFSET (a
     field in the wrong order returns plausible numbers, not an error), and
     `ShaderTemplate.derive_grad_n/1` never runs in production because all three
-    shipped specs supply their own `grad_block_n`.
+    shipped specs supply their own `grad_block_n`. (`Nx.Vulkan.Fast` was in that
+    list at 0% and has since been deleted rather than tested — the coverage
+    number was what sent someone to look at it.)
   * **Docs: `mix docs` was emitting warnings.** `ROADMAP.md` linked `MISSION.md`,
     which is not in the hex package **and carries internal LAN addresses** —
     link removed rather than repointed, because a public roadmap should not send
