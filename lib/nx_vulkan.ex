@@ -63,7 +63,9 @@ defmodule Nx.Vulkan do
         :ok
 
       _ ->
-        Nx.global_default_backend(Nx.Vulkan.VulkanoBackend)
+        # `_ =` on purpose: this returns the PREVIOUS backend, which we are
+        # deliberately discarding.
+        _ = Nx.global_default_backend(Nx.Vulkan.VulkanoBackend)
         :ok
     end
   end

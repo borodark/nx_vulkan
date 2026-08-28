@@ -12,6 +12,13 @@
   # implementation matches the call, which is why it works at runtime and is
   # covered by test/nx_vulkan/vulkano_backend_host_fallback_test.exs. Do NOT
   # "fix" the implementation to match the spec; that would break it.
+  # __shard_jit__/6 raises unconditionally — Nx.Defn.Compiler requires the
+  # callback and this backend does not support sharding. Same species as the
+  # from_pointer/to_pointer entry below: never returning IS the behaviour, so
+  # :error_handling's no_return is accurate rather than a defect. Filtered by
+  # file+category because that is the granularity this file uses throughout.
+  {"lib/nx_vulkan/compiler.ex", :no_return},
+
   {"lib/nx_vulkan/vulkano_backend.ex", :callback_arg_type_mismatch},
   {"lib/nx_vulkan/vulkano_backend.ex", :callback_type_mismatch},
 

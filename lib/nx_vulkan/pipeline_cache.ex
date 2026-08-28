@@ -14,7 +14,8 @@ defmodule Nx.Vulkan.PipelineCache do
   def device_uuid_hex, do: "0000000000000000" <> "0000000000000000"
 
   def clear do
-    File.rm_rf(@cache_dir)
+    # `_ =` on purpose: clearing a cache dir that may not exist is not a failure.
+    _ = File.rm_rf(@cache_dir)
     :ok
   end
 end

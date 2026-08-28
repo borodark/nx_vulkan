@@ -54,11 +54,14 @@ defmodule Nx.Vulkan.Synthesis do
 
     case System.cmd("glslangValidator", ["-V", glsl_tmp, "-o", spv_path], stderr_to_stdout: true) do
       {_output, 0} ->
-        File.rm(glsl_tmp)
+        # `_ =` on purpose: the temp .comp is best-effort cleanup and a failed
+        # unlink must not fail a successful compile. Explicit so that
+        # :unmatched_returns stays on for the returns that DO matter.
+        _ = File.rm(glsl_tmp)
         {:ok, spv_path}
 
       {output, code} ->
-        File.rm(glsl_tmp)
+        _ = File.rm(glsl_tmp)
         {:error, %{exit: code, stderr: output, glsl_path: glsl_tmp}}
     end
   end

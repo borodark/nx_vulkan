@@ -12,6 +12,20 @@ defmodule Nx.Vulkan.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       dialyzer: [
+        # :unmatched_returns is the one that finds real bugs — an ignored
+        # {:error, _} from a NIF or a File call. It is OFF by default in
+        # dialyxir, so it had never run here; when first enabled it reported
+        # four ignored returns, all genuinely best-effort, now written `_ =`
+        # rather than silenced.
+        #
+        # :error_handling reports functions that only terminate by raising.
+        # There is one deliberate case (`__shard_jit__/6`), filtered.
+        #
+        # NOT enabled: :underspecs, :overspecs, :specdiffs. Those reported 13
+        # findings and every one was a spec deliberately narrower or wider than
+        # the inferred success typing, which is what a hand-written spec is FOR.
+        # Turning them on would trade a useful signal for noise.
+        flags: [:unmatched_returns, :error_handling],
         plt_add_apps: [:nx, :ex_unit, :mix],
         plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
         ignore_warnings: ".dialyzer_ignore.exs"
