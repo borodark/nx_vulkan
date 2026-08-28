@@ -145,9 +145,29 @@ defmodule Nx.Vulkan.MixProject do
   # `rm -rf _build` is equally safe and costs nothing here: the 11-minute NIF
   # build lands in `deps/exla/cache/`, and `_build` only symlinks to it.
   #
-  # Known-good targets: super-io (linux x86_64) and the Jetson
-  # (linux aarch64, CPU only — its CUDA is 10.2 and permanently so, while the
-  # prebuilts start at CUDA 12). See NEXT.md §1.4.
+  # Known-good targets and the exact incantation, because two of the three env
+  # vars are not obvious:
+  #
+  #     NXV_WITH_EXLA=1 XLA_TARGET=cpu EXLA_CPU_ONLY=1 mix deps.get
+  #     NXV_WITH_EXLA=1 XLA_TARGET=cpu EXLA_CPU_ONLY=1 mix test
+  #
+  # `XLA_TARGET=cpu` ALONE IS NOT ENOUGH on a machine with CUDA installed. It
+  # selects the CPU xla_extension archive, but EXLA's own Makefile still
+  # compiles `custom_calls/runtime_callback_cuda.o` because nvcc is on PATH, and
+  # on super-io (CUDA 12.6, gcc 13) that file fails to build — taking the whole
+  # dependency with it. `EXLA_CPU_ONLY=1` is what makes it print "skipping nvcc
+  # step". Without CUDA present the flag is redundant, which is why the Jetson
+  # never needed it.
+  #
+  #   * super-io — linux x86_64, CPU-only by CHOICE. CUDA 12.6 and SM 8.6 would
+  #     both work, but EXLA-CUDA would contend with this backend for the same
+  #     3060 Ti during `mix test`, and a CPU reference is further from the
+  #     implementation under test, which is what a parity reference is for.
+  #   * the Jetson — linux aarch64, CPU-only by NECESSITY: its CUDA is 10.2 and
+  #     permanently so (JetPack 4.6.x is terminal for Tegra X1), while the xla
+  #     prebuilts start at CUDA 12.
+  #
+  # See NEXT.md §1.4.
   defp exla_dep do
     if System.get_env("NXV_WITH_EXLA") in ["1", "true"] do
       [{:exla, "~> 0.13", only: [:dev, :test]}]
