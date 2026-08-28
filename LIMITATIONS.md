@@ -88,6 +88,56 @@ mixed-radix (non-power-of-two) FFT, grouped/depthwise conv, and channels-last
 > consumer GPUs are slow at f64), switchable with
 > `Nx.Vulkan.VulkanoBackend.put_f32_matmul_accumulator(:f32)`.
 
+### f64 TRANSCENDENTALS COMPUTE AT f32 PRECISION
+
+The most important thing in this section, and until 2026-08-28 it was recorded
+only in a shader comment.
+
+`Nx.exp`, `Nx.log`, `Nx.tanh` and `Nx.sigmoid` on an `{:f, 64}` tensor return a
+GPU-resident `{:f, 64}` result whose VALUE carries only f32 accuracy. Measured
+against `:math` at x = 1.5, relative error:
+
+| op | relative error | f64 would give |
+|---|---|---|
+| `Nx.log` | 1.18e-7 | ~1e-16 |
+| `Nx.exp` | 2.10e-8 | ~1e-16 |
+| `Nx.tanh` | 1.56e-8 | ~1e-16 |
+| `Nx.sigmoid` | 5.22e-9 | ~1e-16 |
+
+**Eight orders of magnitude**, with no signal in the type. `Nx.type/1` says
+`{:f, 64}`, the tensor is on the device, and nothing raises.
+
+The cause is in `glsl/elementwise_unary_f64.comp`, stated plainly there:
+
+> GLSL builtins (exp, log, tanh) lack f64 overloads. Cast through float for
+> transcendentals — precision limited to f32 for these ops, but arithmetic
+> stays in full f64.
+
+`float64_t log_f64(float64_t x) { return float64_t(log(float(x))); }`. SPIR-V's
+`GLSL.std.450` genuinely has no 64-bit `Exp`/`Log`/`Tanh`, so the alternatives
+are a hand-written double-precision polynomial per op (a project, not a task) or
+a host fallback (a round trip per call). The cast is a deliberate third choice.
+
+**What is NOT true, and was claimed in README.md until 2026-08-28:** that these
+"host-fall-back rather than silently losing precision". They do neither of those
+things. `Nx.Vulkan.Codegen`'s `@f64_unsafe_ops` excludes them from FUSION — that
+part is real — but the evaluator then dispatches them EAGERLY to the shader
+above, so the fused and eager paths return the identical f32-precision value.
+Verified: `Nx.log(f64 2.0)` gives `0.6931471824645996` through both paths, where
+Erlang gives `0.6931471805599453`.
+
+**Consequences worth knowing.** Anything built on these inherits the loss —
+a Normal log-density's `log(sigma)` term is f32-accurate however carefully the
+rest is written. The error is not a constant, so unlike a fixed offset it does
+NOT cancel in a log-ratio. If you need true f64 transcendentals, compute them on
+`Nx.BinaryBackend` and transfer.
+
+The ops with no f64 form at all — `sin`, `cos`, `atan2`, `erf`, `log1p`,
+`expm1`, `cbrt`, `rsqrt` and the rest — are a different case: those genuinely do
+host-fall-back, and are the 40 doctests `NEXT.md` §1.3 files as decided.
+
+---
+
 **What's true**: compute shaders exist in **both f32 and f64**, selected
 by tensor dtype. Storage round-trips any numeric type (f32, f64, s8..s64,
 u8..u64). `Exmc.JIT.precision()` returns `:f64` for the Vulkan path (EMLX,
@@ -148,7 +198,7 @@ exmc suite.
 
 ## 3. Fusion (Path A) limits
 
-`Nx.Vulkan.fused_chain/3` and the `Nx.Vulkan.Fuse.fuse/1` macro share
+`Nx.Vulkan` fused_chain/3 and the `Nx.Vulkan.Fuse.fuse/1` macro share
 the same constraints, inherited from `fused_elementwise.spv`:
 
 - **Two input buffers only.** Op chain operates on `a` (running
@@ -181,7 +231,7 @@ The macro is a v1 demonstration of Path A.2; the proper auto-detector
 | Linear chain only | macro walks one nested-call path; no branching | split the function |
 | `b` must literally be the second arg of every binary op | macro doesn't reorder | rewrite the body to canonical form |
 | Output is `{:ok, ref}`, not an `%Nx.Tensor{}` | doesn't roundtrip cleanly with non-fused code | use within a Vulkan-only flow |
-| **No autograd integration** | Fuse output isn't a `Nx.Defn.Expr` node | use `Nx.Defn.Grad` against the unfused version |
+| **No autograd integration** | Fuse output isn't a `Nx.Defn.Expr` node | use Nx.Defn.Grad against the unfused version |
 | **Doesn't fuse inside `defn`** | macro operates on plain Elixir AST, not defn IR | manual `fuse` on defn body, or wait for v2 |
 
 **v2 plan**: implement `Nx.Vulkan.Compiler` that satisfies the
@@ -304,7 +354,7 @@ improvement in throughput-bound workloads.
 - **Dynamic shape support.** Buffer sizes are bound at upload time. A
   real `Nx.Defn.Compiler` with shape polymorphism is v0.3+ work.
 - **Symbolic differentiation of fused chains.** Each fused chain is
-  opaque to `Nx.Defn.Grad`. The full IR-rewrite compiler (Path A.2 v2)
+  opaque to Nx.Defn.Grad. The full IR-rewrite compiler (Path A.2 v2)
   would need a backward-pass plan for fused nodes.
 
 ---
@@ -315,7 +365,7 @@ improvement in throughput-bound workloads.
   GT 650M all run 112/0 tests on `main`. Same shaders, same Elixir
   code, three GPU generations and two operating systems.
 - **Phase 1 complete**: every callback the EXMC sampler reaches for is
-  implemented. Forward pass and `Nx.Defn.Grad` backward pass work.
+  implemented. Forward pass and Nx.Defn.Grad backward pass work.
 - **Path A demonstrated**: 1.6–4× shader-level speedup measured by
   mac-248; user-facing API and macro both shipping.
 - **Honest about the gaps**: this document.

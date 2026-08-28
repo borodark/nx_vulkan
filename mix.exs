@@ -59,6 +59,11 @@ defmodule Nx.Vulkan.MixProject do
       extras: [
         "README.md",
         "WHY.md",
+        # Ships because §1 documents a real precision limit a user cannot
+        # otherwise discover: f64 exp/log/tanh/sigmoid compute at f32 precision
+        # on the device. Checked for cascade before adding — its only outbound
+        # link is to README.md, which is already here.
+        "LIMITATIONS.md",
         "livebooks/intro_10min.livemd",
         "CHANGELOG.md",
         "ROADMAP.md",
@@ -172,6 +177,7 @@ defmodule Nx.Vulkan.MixProject do
           native/nx_vulkan_vulkano/Cargo.toml
           native/nx_vulkan_vulkano/src
           priv/shaders
+          LIMITATIONS.md
           docs/BACKWARD_PASS_AUDIT.md
           docs/BACKEND_VERIFICATION_GAP.md
           docs/PARITY_STATUS.md

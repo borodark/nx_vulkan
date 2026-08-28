@@ -106,8 +106,11 @@ fallback to the interpreter:
 - **Multi-output** — a `defn` returning a tuple compiles to one shared
   schedule; subexpressions common to several outputs are computed once.
 - **f32 and f64** — the codegen is dtype-parameterised (f64 gated on the
-  device advertising `shader_float64`; f64 transcendentals host-fall-back
-  rather than silently losing precision).
+  device advertising `shader_float64`). f64 transcendentals are excluded from
+  FUSION, but they do not reach the host: the evaluator dispatches them to the
+  eager f64 shader, which computes them at **f32 precision**. See
+  [`LIMITATIONS.md`](LIMITATIONS.md) §1 — this is a real limit and the sentence
+  here previously claimed the opposite.
 
 Whole layers fuse end-to-end: `relu(x @ W + b)`, `relu(conv(x, k) + b)`,
 a CNN classifier head (`conv → flatten → dense`), softmax and layernorm
