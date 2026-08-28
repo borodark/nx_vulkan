@@ -54,6 +54,13 @@ defmodule Nx.Vulkan.MixProject do
         # The CHANGELOG links to these; without them here the links 404 on
         # hexdocs, since `bench_results/` is not in `package/0`'s file list.
         # They are the evidence behind this release's performance claims.
+        #
+        # NOT extended to MODEL_SCALING.md, which ROADMAP.md also links.
+        # Shipping it CASCADES: it in turn links model_scaling/raw_grad.txt,
+        # raw_exla.txt, EXMC_PEROP_RACE.md and CONCURRENT_DISPATCH.md, all of
+        # which exist in the repo and none of which are extras, so `mix docs`
+        # simply trades one warning for four. ROADMAP.md links it by absolute
+        # GitHub URL instead — a pattern that file already used elsewhere.
         "bench_results/BATCHED_DISPATCH.md",
         "bench_results/MNIST_EXLA_RACE.md",
         "bench_results/CSE_SOFTMAX_RACE.md"
@@ -148,8 +155,7 @@ defmodule Nx.Vulkan.MixProject do
       # Shipping a document another shipped document tells you not to read is
       # not a docs directory, it is a working tree. Explicit list instead:
       # things a *consumer* of the package has reason to open.
-      files:
-        ~w(
+      files: ~w(
           lib
           native/nx_vulkan_vulkano/Cargo.toml
           native/nx_vulkan_vulkano/src

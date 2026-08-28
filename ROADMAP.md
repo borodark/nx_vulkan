@@ -16,13 +16,14 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 
 > **The goal of this project is reach, not speed.** EXLA on a host CPU beats
 > this backend by 20-215x on the same gradient at every size measured
-> ([`bench_results/MODEL_SCALING.md`](bench_results/MODEL_SCALING.md)), so
+> ([`bench_results/MODEL_SCALING.md`](https://github.com/borodark/nx_vulkan/blob/main/bench_results/MODEL_SCALING.md)), so
 > performance parity is not the bar and is not pursued. The value is running
 > Nx correctly on hardware nothing else serves — NVIDIA on FreeBSD, decade-old
 > Keplers, AMD/Intel, anything with a Vulkan driver. Sections below that
 > discuss closing a performance gap predate this and are kept as history;
-> where they conflict with this paragraph, this paragraph is newer. See
-> [`MISSION.md`](MISSION.md).
+> where they conflict with this paragraph, this paragraph is newer. The
+> project's internal `MISSION.md` carries the longer argument; it is not
+> published, so this paragraph is the public statement of it.
 
 ## Status snapshot
 

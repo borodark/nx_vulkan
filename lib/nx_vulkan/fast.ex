@@ -101,9 +101,24 @@ defmodule Nx.Vulkan.Fast do
     z2 = Nx.multiply(z, z)
     log_sigma = Nx.log(sigma)
 
+    # `@log_sqrt_2pi` MUST be materialised at the computation's type.
+    #
+    # As a bare Elixir float it went through `Nx.tensor/1`, which defaults to
+    # {:f, 32}: 0.91893853320467274 becomes 0.9189385175704956, losing eight
+    # significant digits. Subtracting that from an f64 tensor produces an f64
+    # RESULT TYPE carrying an f32-precision VALUE — so this function answered
+    # -0.9189385175704956 for normal_logpdf(0, 0, 1) where the exact value is
+    # -0.9189385332046727, an absolute error of 1.6e-8 that no type signature
+    # showed.
+    #
+    # It is a log-density feeding a Metropolis acceptance ratio across thousands
+    # of leapfrog steps, so silent f32 in an f64 chain is the wrong kind of
+    # cheap. `Nx.type(z2)` keeps f32 callers exactly as they were.
+    #
+    # -0.5 needs no such care: it is exact in binary at any width.
     Nx.subtract(
       Nx.subtract(Nx.multiply(z2, -0.5), log_sigma),
-      @log_sqrt_2pi
+      Nx.tensor(@log_sqrt_2pi, type: Nx.type(z2))
     )
   end
 end

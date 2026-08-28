@@ -17,12 +17,23 @@ defmodule Nx.Vulkan.Synthesis do
 
   ## Usage
 
-      iex> spec = Nx.Vulkan.ChainShaderSpecs.beta()
-      iex> {:ok, spv_path} = Nx.Vulkan.Synthesis.compile(spec)
-      iex> push = Nx.Vulkan.ChainShaderSpecs.beta_push(1, 32, 0.05, 2.0, 5.0)
-      iex> Nx.Vulkan.NativeV.leapfrog_chain_synth_f64(q_ref, p_ref, inv_mass_ref,
-      ...>                                       push, 32, spv_path)
-      {:ok, {q_chain, p_chain, grad_chain, logp_chain}}
+  A SKETCH, not a runnable example — `q_ref`, `p_ref` and `inv_mass_ref` are
+  device buffers the caller already holds, and the last line binds rather than
+  asserts. It was written as an `iex>` block, which made it look executable; it
+  never was, and the first attempt to run this module's doctests failed to
+  compile on five undefined variables. Fenced as plain code so it stops
+  claiming to be something it is not.
+
+  ```elixir
+  spec = Nx.Vulkan.ChainShaderSpecs.beta()
+  {:ok, spv_path} = Nx.Vulkan.Synthesis.compile(spec)
+  push = Nx.Vulkan.ChainShaderSpecs.beta_push(1, 32, 0.05, 2.0, 5.0)
+
+  {:ok, {q_chain, p_chain, grad_chain, logp_chain}} =
+    Nx.Vulkan.NativeV.leapfrog_chain_synth_f64(
+      q_ref, p_ref, inv_mass_ref, push, 32, spv_path
+    )
+  ```
   """
 
   alias Nx.Vulkan.ShaderTemplate
