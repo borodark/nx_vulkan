@@ -410,13 +410,33 @@ fn upload_buffer(
 
 /// Allocate an output buffer WITHOUT initialising it.
 ///
-/// This used to zero-fill via `std::iter::repeat(0u8).take(n_bytes)`, which is a
-/// full host-side write of the whole buffer at roughly memory bandwidth —
-/// measured on an RTX 3060 Ti at 5.1 ms for 16 MiB, i.e. as expensive as
-/// uploading real data (3.6 ms) and paid by EVERY op that produces an output,
-/// for bytes a shader is about to overwrite completely.
+/// This used to zero-fill via `std::iter::repeat(0u8).take(n_bytes)`, a full
+/// host-side write of the whole buffer at roughly memory bandwidth, paid by
+/// EVERY op that produces an output, for bytes a shader is about to overwrite
+/// completely. `Buffer::new_slice` allocates the same memory and skips it.
 ///
-/// `Buffer::new_slice` allocates the same memory and skips the fill.
+/// MEASURED A/B on idle boxes — `buf_alloc` against `buf_alloc_zeroed`, which
+/// is byte-identical to the old code, in the same process. Median ms:
+///
+///     size      GT 650M          GT 750M          RTX 3060 Ti
+///     1 MiB     0.063 -> 0.011   0.038 -> 0.006   0.30 -> 0.007
+///     16 MiB    0.934 -> 0.011   0.756 -> 0.006   5.08 -> 0.008
+///
+/// **Do not quote the Ampere "before" figure as the behaviour.** At 16 MiB the
+/// old path costs 5.1 ms there and only 0.76-0.93 ms on the Keplers — the
+/// SLOWER GPUs zero-fill 5-7x faster. Most likely because of where
+/// `PREFER_DEVICE | HOST_RANDOM_ACCESS` lands: device-local host-visible BAR
+/// memory across PCIe on the discrete Ampere card, versus a plain host-visible
+/// heap on the Macs. That is inference, not measurement. The "after" figures
+/// agree closely everywhere (0.006-0.011 ms) and the SHAPE of the win — an
+/// O(n) host write becoming an O(1) allocation — generalises; the absolute
+/// saving does not.
+///
+/// **There is a cliff at 32 MiB.** Below it the new path is flat at ~0.006 ms;
+/// at and above, vulkano stops suballocating and issues a dedicated
+/// `vkAllocateMemory` per buffer, which then dominates — 64 MiB measures 43 ms
+/// new against 98 ms old on a 750M. Still a ~2x win, but not the three orders
+/// the 16 MiB row suggests.
 ///
 /// SAFE ONLY BECAUSE THE SHADERS WERE AUDITED. Every kernel that writes its
 /// output must cover the ENTIRE allocation, including any padding the caller
