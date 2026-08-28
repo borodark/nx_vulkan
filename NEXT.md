@@ -1,10 +1,15 @@
 # NEXT — nx_vulkan
 
 **Written:** 2026-08-16, against `main` @ `40d3137` (the stale-figure sweep).
-**Refreshed:** 2026-08-25, against `main` @ `41a4ebf`. W1–W5 are all closed and
-**residency is 752 of 833 (90.3%)**, up from 714 (85.7%) two days earlier.
+**Refreshed:** 2026-08-28, against `main` @ `661477f`. W1–W5 are all closed and
+**residency is 755 of 833 (90.6%)**, up from 714 (85.7%) five days earlier.
 **There is no longer any dtype whose arithmetic leaves the device** — u32 was
-the last, and it is closed (§1.3).
+the last (§1.3) — and the three "unexamined one-offs" that §1.3 used to list are
+closed too, all three by widening a gate rather than writing a kernel.
+
+Since then the work has turned from residency to health: `indexed_put`'s
+duplicate-index write race is now deterministic (§1.5), and a sweep of dialyzer,
+docs, coverage and format found one real bug and several traps (§1.6).
 
 **Eight commits got there and NOT ONE of them was a new arithmetic kernel.**
 Two new `.comp` files landed, both pure format conversion; everything else was a
@@ -32,7 +37,7 @@ matches super-io to the digit and reproduces all 80 `.spv` byte-for-byte (§1.4)
 inherited from `MISSION.md` §7, whose ranking W5's own census showed to be built
 on numbers that do not mean what they look like.
 
-**Everything is pushed and the tree is clean.** `origin/main` is at `d84ed29`.
+**Everything is pushed and the tree is clean.** `origin/main` is at `661477f`.
 The 2026-08-17 reboot came and went without incident: the driver is matched at
 **580.178.04** on both sides and `device_name()` is the 3060 Ti (§5).
 **Read `MISSION.md` first** — this file assumes it and does not repeat it. This
@@ -58,10 +63,11 @@ Current divergence:
 
 | ref | sha | note |
 |---|---|---|
-| `HEAD` / local `main` | `41a4ebf` | the above + the ninety-percent run (§1.2a) + u32 |
-| `origin/main` | `41a4ebf` | **level — nothing unbacked** |
+| `HEAD` / local `main` | `661477f` | the above + u32, the one-offs, deterministic scatter, and the health sweep |
+| `origin/main` | `661477f` | **level — nothing unbacked** |
 | jetson (192.168.0.250) | `a950c9f` | re-verified there AND now the only box with EXLA (§1.4). **Two commits behind** |
-| mac-247, mac-248 | `92d56cd` | re-verified there, §1.4 — **that run caught a real defect**, fixed in `235f99c`. **Six commits behind now** |
+| mac-247, mac-248 | `d548c85` | re-verified there, §1.4 — **two of four Kepler runs caught a real defect**. Seven commits behind; a run at `661477f` is in flight |
+| jetson (192.168.0.250) | `d548c85` | re-verified there; the only box with EXLA (§1.4). Seven commits behind; a run at `661477f` is in flight |
 | `upstream/main` | `6ab64ac` | **far behind** |
 
 **All four boxes have now seen the ninety-percent run** — Ampere, Maxwell/ARM
@@ -132,7 +138,7 @@ ever reports `orphan (kept)`, look there before anything else.
 
 ---
 
-## 1. W1–W5 are done. Next is picked from §1.3, not from `MISSION.md` §7
+## 1. W1–W5 are done, and §1.3 is now EMPTY — next comes from §1.6, not §1.3
 
 `MISSION.md` §7 ranks W1–W13 and its sequencing note put W2 first, because W2 is
 what tells you whether everything after it worked. **That gate is open and has
@@ -158,12 +164,12 @@ current tree, not from §7's table.
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 751 / 833 (90.2%) run with host fallbacks refused
-#   (740 / 833, 88.8%, device-resident — see §1.2 on the 11-doctest gap)
+#=> doctest Nx residency: 755 / 833 (90.6%) run with host fallbacks refused
+#   (744 / 833, 89.3%, device-resident — see §1.2 on the 11-doctest gap)
 ```
 
 `@moduletag :host_fallback_expected` is off `nx_doctest_test.exs`;
-`test/nx_doctest_register.exs` names the 81 doctests that still leave the GPU,
+`test/nx_doctest_register.exs` names the 78 doctests that still leave the GPU,
 in four reason-bucketed lists; `test_helper.exs` applies it only when fallbacks
 are being refused, so a normal `mix test` still runs and asserts all 833. The
 strict suite went from 910 excluded to 591 at W2, then 557 (W1, W3), 527 (W4),
@@ -490,10 +496,18 @@ round trip for the whole tensor is the trade, and it is the same one
 
 ### 1.3 What is left, and what it is actually made of
 
-**81 doctests still refuse**, measured at `41a4ebf`. Re-derived from the
+**78 doctests still refuse**, measured at `661477f`. Re-derived from the
 REFUSED OP census (§1.2a) and grouped by REASON, not by op name — which is the
 whole point of §1.2a and is why this table looks nothing like the one it
 replaces.
+
+**Every remaining group is decided.** This is the first refresh where nothing in
+the table is open, and the honest reading is that doctest residency has reached
+its ceiling: what is left needs a device capability this backend declines to
+require (Int64, atomic float, 16-bit storage), a real-valued ISA it does not
+have (complex/FFT), an f64 transcendental GLSL.std.450 does not define, or a GPU
+sort that `MISSION.md` §3.2 declines as a project. **Further work should be
+judged on residency in real workloads, not on this number.**
 
 | group | doctests | state |
 |---|---:|---|
@@ -504,7 +518,7 @@ replaces.
 | float `indexed_add` | 2 | **decided** — needs `GL_EXT_shader_atomic_float` |
 | f16 / bf16 `as_type` | 2 | **decided** — needs 16-bit float storage |
 | ~~u32 arithmetic~~ | 0 | **closed** `41a4ebf` — six `uint` shaders; it was 30 ops off the device, not one doctest |
-| `slice/5`, `indexed_put/5` at s32, `dot/7` | 3 | **unexamined** — three separate one-offs, each needs its own probe |
+| ~~`slice/5`, `indexed_put/5` at s32, `dot/7`~~ | 0 | **closed** `3a1357c` — three unrelated gates, no shader between them; see below |
 
 Eighty percent of what is left is genuinely decided. The honest reading is that
 **doctest residency is close to its ceiling** and further work should be judged
@@ -547,23 +561,38 @@ and everything downstream of a host fallback computes on the host. Loosening the
 concat gate was re-tried on 2026-08-23 and still fails. **Treat as decided until
 a GPU sort exists.**
 
-#### The three one-offs, unexamined
+#### The three one-offs — probed, and all three were gates
 
-`slice/5` at `{1, 5} {:s, 32}`, `indexed_put/5` at `{1, 2, 3} {:s, 32}`, and
-`dot/7` at `{1, 1, 2, 2} {:f, 32}`. Each is a single doctest on an op
-that already has a GPU path, which by this run's own evidence usually means a
-gate rather than a kernel — but none has been probed. **Probe before scoping**;
-that is the whole lesson of §1.2a.
+Closed in `3a1357c`. §1.3 said "probe before scoping", and **probing was the
+whole job**: each was a gate narrower than the kernel behind it, none needed a
+shader, and the three had nothing in common except that.
+
+  * **`dot/7` at rank 5.** The `rank <= 4` cap exists because `transpose_nd`
+    addresses four dims — but `dot_flatten/3` transposes ONLY when the
+    permutation is not already the identity. `Nx.dot(rank_5, rank_1)` contracts
+    a's last axis against b's only axis, so both permutations ARE the identity
+    and nothing was going to be transposed. The cap sat on `resident?`, where it
+    applied to operands needing no rotation at all.
+  * **`indexed_put/5` over a non-prefix axis subset.** `gather/4` has rotated for
+    this since `580e2db`; scatter had not. **Scatter also needs the rotation
+    BACK** — a gather's result keeps the non-indexed dims in their original
+    relative order, a scatter's carries the TARGET's shape.
+  * **`slice/5` with a dynamic (tensor) start.** Four bytes, against a host round
+    trip for the entire source tensor. **Clamping is what makes it more than a
+    readback**: Nx clamps a dynamic start into `[0, dim - len]` rather than
+    raising, and the shader would index past the buffer, where
+    `robust_buffer_access` returns ZEROS.
 
 #### Ranked by value over effort
 
-1. **The three one-offs** — `slice/5` at `{1, 5} {:s, 32}`, `indexed_put/5` at
-   `{1, 2, 3} {:s, 32}`, `dot/7` at `{1, 1, 2, 2} {:f, 32}`. Cheap to probe,
-   unknown to fix. Half an hour of probing tells you whether any is worth an
-   hour of work.
-2. **Nothing else.** The rest is decided, and saying so is more useful than
-   leaving it looking like a backlog. **There is no longer a dtype where a whole
-   arithmetic family leaves the device** — u32 was the last one.
+**Nothing.** Every group in the table above is decided, and saying so is more
+useful than leaving a backlog that looks actionable. There is no longer a dtype
+whose arithmetic leaves the device, and no ungated op with a kernel behind it
+that anyone has found.
+
+That is not the same as "no work left" — it means the NEXT work is not doctest
+residency. §1.6 is where the last two days went, and it found more per hour than
+the last few residency items did.
 
 **The pattern that has paid best is still not writing kernels.** Of the 37
 doctests closed in the ninety-percent run, ZERO came from a new arithmetic
@@ -973,6 +1002,132 @@ straight into at `dot/7`).
 
 ---
 
+### 1.5 `indexed_put`'s duplicate-index race — and why "conforming" was not enough
+
+Closed in `d548c85`. Worth its own section because **the decision was harder than
+the fix**, and I got it wrong first.
+
+`Nx.indexed_put/4` documents duplicate indices as non-deterministic:
+
+> "In case of repeating indices, the result is non-deterministic, since the
+> operation happens in parallel when running on devices such as the GPU."
+
+So the racing single-dispatch write was **conforming**, and `scatter.comp`'s own
+comment said so with that quote in it. **I recommended fixing it as a bug
+without reading the shader I was proposing to change.**
+
+What made determinism worth buying anyway is not "it disagrees with the host" —
+that is permitted — but the fleet table:
+
+| | result | stability |
+|---|---|---|
+| `Nx.BinaryBackend` | `[30, 0, 0]` last update | defined |
+| RTX 3060 Ti (Ampere) | `[10, 0, 0]` **FIRST** row | stable, 5/5 |
+| GT 650M, GT 750M (Kepler) | `[30, 0, 0]` **LAST** row | stable, 10/10 |
+| Tegra X1 (Maxwell) | `[30, 0, 0]` **LAST** row | stable, 25/25 |
+
+Every box individually deterministic, boxes disagreeing with each other, and
+**three of four agreeing with the host BY ACCIDENT**. The bug was invisible on
+three quarters of the fleet, and a stable-per-box answer that differs across
+boxes is harder to debug than one that is obviously random.
+
+`scatter_ordered.comp` runs two passes over the same index arithmetic sharing
+one descriptor set: `atomicMax(winner[dst], row + 1)`, then write where
+`winner[dst] == row + 1`. `row + 1` because the scratch buffer is zero-filled
+and 0 must mean unclaimed; `atomicMax` yields the highest row, which is Nx's
+last update. The zero-fill and both dispatches record into ONE command buffer —
+vulkano's `AutoCommandBufferBuilder` inserts the compute-compute barrier, the
+same mechanism the FFT's multi-stage transform relies on.
+
+**Cost, measured on the two IDLE Keplers** (load 0.00–0.18 before and during),
+racing → ordered, median ms:
+
+| case | GT 650M | GT 750M |
+|---|---|---|
+| tiny target(8), 4 updates | 0.266 → 0.290 | 0.144 → 0.189 |
+| 1M target, 4 updates | 1.181 → 1.981 | 1.053 → 1.860 |
+| 4M target, 100k updates | 4.830 → 10.502 | 4.519 → 10.672 |
+
+The overhead tracks the **target** size, not the update count — one u32 per
+target element, zero-filled — so scattering four values into a large tensor pays
+most, proportionally. `indexed_add` is untouched: atomicAdd is commutative, so
+ordering never could reach its answer. **`NXV_SCATTER_ORDERED=0`** restores the
+racing write.
+
+**An Ampere timing table previously stood here and was withdrawn.** It was taken
+without checking super-io's load. The fleet caught it by cross-comparison — my
+table had a GT 650M beating an RTX 3060 Ti 2:1 — and a re-run at load 4.65 with
+another `beam.smp` at 337% CPU reported the ordered path as 0.179 ms FASTER than
+racing on one row. Noise, not a result. **Check `uptime` before AND during any
+timing** is a standing rule here and the original run did not.
+
+### 1.6 The health sweep — dialyzer, docs, coverage, format
+
+Two days on non-residency work. It found **one real bug** and several traps, and
+per hour it outproduced the last few residency items.
+
+#### The bug: an f32 constant in an f64 chain
+
+`Nx.Vulkan.Fast.normal_logpdf/3` computed at **f32 precision on f64 input**.
+`@log_sqrt_2pi` was a bare Elixir float, so `Nx.tensor/1` materialised it at
+`{:f, 32}`: `0.91893853320467274` became `0.9189385175704956`, losing eight
+significant digits. Subtracting that from an f64 tensor yields an f64 RESULT
+TYPE carrying an f32-precision VALUE — `normal_logpdf(0, 0, 1)` answered
+`-0.9189385175704956` where the exact value is `-0.9189385332046727`.
+
+**No type signature showed it and no test could have caught it, because the
+module had no tests.** It is a log-density feeding a Metropolis acceptance ratio
+across thousands of leapfrog steps. Reproduced on `BinaryBackend` alone first,
+so it was never a GPU issue. Fixed by materialising the constant at
+`Nx.type(z2)`, which leaves f32 callers bit-identical.
+
+#### What each check was actually worth
+
+  * **Dialyzer: no bugs, and that was the finding.** `mix dialyzer` was already
+    clean — but clean at DEFAULT strictness, and dialyxir enables no extra
+    warning flags at all, so `:unmatched_returns` had never run. It is the one
+    that finds an unhandled `{:error, _}`. Enabled now, with the four
+    best-effort returns it reported written `_ =` at the site rather than
+    filtered. `:underspecs`/`:overspecs` are deliberately NOT on: 13 findings,
+    every one a spec intentionally narrower or wider than the inferred typing,
+    which is what a hand-written spec is for.
+  * **Coverage: 87.20% → 90.78%, and the threshold now means something.**
+    `NativeV` is 426 lines of Rustler stubs whose bodies are replaced at load
+    time; it can never exceed ~2%, so including it made the repo's own 90%
+    threshold **unreachable by construction**. A threshold that can only fail
+    stops being read. Excluded, and the genuinely untested code found behind it:
+    the three `*_push` builders pack C structs a shader reads BY OFFSET (a
+    field in the wrong order returns plausible numbers, not an error), and
+    `ShaderTemplate.derive_grad_n/1` never runs in production because all three
+    shipped specs supply their own `grad_block_n`.
+  * **Docs: `mix docs` was emitting warnings.** `ROADMAP.md` linked `MISSION.md`,
+    which is not in the hex package **and carries internal LAN addresses** —
+    link removed rather than repointed, because a public roadmap should not send
+    readers to an internal planning doc at all.
+  * **Doctests: the suite ran `doctest Nx` and not one of its own.** Adding them
+    found `Nx.Vulkan.Synthesis`'s "Usage" example had NEVER compiled — five
+    undefined variables, because it was an illustrative sketch written as an
+    `iex>` block. Now a fenced code block.
+  * **Format: 29 files unformatted, 20 of them untouched by that session.**
+    Long-standing drift. Committed separately (`1eec6ec`) so a 675-line
+    mechanical diff did not bury behaviour.
+
+#### And one script deleted rather than repaired
+
+`scripts/build_and_test.sh` pointed at `/home/io/spirit/shaders`, a machine-local
+directory. That was never a build system: per `MISSION.md` it was a RECOVERY AID
+for seven shader sources that had gone missing from the tree, and it pointed
+there because it was "the last thing that knew where they were." That recovery
+finished in `ac509d2`. The directory no longer exists on any box, so under
+`set -eu` the script had been dying on its first unexpanded glob — long enough
+for nobody to notice, which is the evidence it had stopped being run.
+
+**The substance was not the deletion.** It was that the glslang version was
+pinned nowhere: SPIR-V output is a function of the compiler, so every
+reproducibility claim this project has made is relative to an unstated version.
+`SKILL.md` now names it — **glslang 15.1.0, SPIR-V 1.6, generator 11** — with
+the warning that a mismatch yields a working shader and a useless comparison.
+
 ## 2. Housekeeping still open
 
 From `MISSION.md` §9 and `PLAN_AFTER_BACKWARD_PASS.md`. The 2026-08-16 sweep
@@ -985,7 +1140,7 @@ under `NXV_HOST_FALLBACK=raise`. What it did **not** close:
 |---|---|---|
 | ~~Push to `origin`~~ | **done** — `origin/main` at `9fc58f5`, level with `HEAD` | |
 | ~~Re-verify on super-io~~ | **done** — driver matched 580.178.04 both sides throughout W5, `device_name()` the 3060 Ti, all three figures exact (§5) | |
-| ~~Re-verify on the Keplers~~ | **done three times** — 2026-08-22 at `f0d9c96`, 2026-08-23 at `00cfe3b`, and again at `92d56cd` covering the ninety-percent run and the new NIF. **Two of the three found a defect**, both times in a test rather than a kernel. §1.4 | |
+| **Re-verify the fleet at `661477f`** | done five times before, most recently at `d548c85` (§1.4). **Three of the five found a defect** — twice in a test, once a compile warning — which is the argument for running it every time rather than before releases only. A run at `661477f` is in flight; it is the first to carry a whole-tree `mix format`, a deleted script and an untracked `glsl/*.spv`, so a stale working tree there is the thing to watch | anyone |
 | **`mix hex.retire nx_vulkan 0.2.0`** | hex.pm still reports `retirement: None` | **operator only** — needs an interactive Hex password |
 | **`upstream/main` is 59 commits behind** | unpublished | **operator** — publishing decision |
 | **Consumer pin is 19 commits behind** | `../_exmc-things/exmc/mix.lock` still on `a25432f` | anyone, but see §4 — bump it *with* `bench/nuts_truth.exs` on both arms |
@@ -1141,11 +1296,11 @@ mix test
 # `mix test` passes (a fallback is bit-identical) and doctest_residency.sh never
 # reads these files. That exact mistake shipped twice and was caught by the
 # fleet, not here. See §1.4.
-sh scripts/strict_test.sh            # 833/819/0, excluded count moves with the register
+sh scripts/strict_test.sh            # 834/855/0, excluded count moves with the register
 
 # the number that actually means something
-sh scripts/doctest_residency.sh      # 752 / 833 (90.3%), exits 0
-                                     # 741 / 833 (88.9%) device-resident
+sh scripts/doctest_residency.sh      # 755 / 833 (90.6%), exits 0
+                                     # 744 / 833 (89.3%) device-resident
 
 # confirm the real GPU, not llvmpipe, before believing ANY figure — not just
 # perf ones. llvmpipe is not merely slower here, it is WRONG: Nx.sum on {:u, 8}
