@@ -11,6 +11,18 @@ defmodule Nx.Vulkan.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      # NativeV is 426 lines of Rustler stubs whose bodies are
+      # `:erlang.nif_error(:nif_not_loaded)`. `use Rustler` replaces every one
+      # at load time, so the Elixir bodies never execute and the module sits at
+      # 2.38% no matter how thoroughly the NIFs are exercised — which they are,
+      # by essentially the whole suite. Including it makes the 90% threshold
+      # unreachable by construction, which turns the threshold into noise.
+      #
+      # Excluded so the number measures what tests can actually influence.
+      test_coverage: [
+        ignore_modules: [Nx.Vulkan.NativeV],
+        threshold: 90
+      ],
       dialyzer: [
         # :unmatched_returns is the one that finds real bugs — an ignored
         # {:error, _} from a NIF or a File call. It is OFF by default in
