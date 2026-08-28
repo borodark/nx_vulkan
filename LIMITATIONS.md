@@ -118,6 +118,23 @@ The cause is in `glsl/elementwise_unary_f64.comp`, stated plainly there:
 are a hand-written double-precision polynomial per op (a project, not a task) or
 a host fallback (a round trip per call). The cast is a deliberate third choice.
 
+**`sigmoid` is a different case from the other three, and the distinction is
+testable.** For `log`, `exp` and `tanh` the f64 result is EXACTLY the f32 result
+widened — compute the op at `{:f, 32}`, convert to f64, and it compares equal,
+for every value tried on three architectures. `sigmoid` is not: the shader is
+
+    case 5: y = 1.0LF / (1.0LF + exp_f64(-x));
+
+so the add and the reciprocal are genuine f64 and only the `exp` inside casts
+through `float`. It INHERITS f32 accuracy through `exp` rather than being an f32
+value widened, and that is why its relative error (5.2e-9) is smaller than
+`exp`'s own (2.1e-8) — the sigmoid derivative attenuates it.
+
+Worth stating because "everything here is just f32 widened" is the natural
+reading of the paragraph above, and it is wrong for one of the four. It was
+written that way here until the fleet checked each op separately instead of
+generalising from `log`.
+
 **What is NOT true, and was claimed in README.md until 2026-08-28:** that these
 "host-fall-back rather than silently losing precision". They do neither of those
 things. `Nx.Vulkan.Codegen`'s `@f64_unsafe_ops` excludes them from FUSION — that
