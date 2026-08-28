@@ -130,12 +130,29 @@ glslangValidator -V glsl/foo.comp -o priv/shaders/foo.spv
 ```
 
 `-V` = compile GLSL to Vulkan SPIR-V. Commit the `.spv` (they ship in the hex
-package — see the `priv/shaders` entry in `mix.exs` `package/0`). There is no mix
-task — run the command above directly. (`scripts/build_and_test.sh` loops
-glslangValidator over a shader dir, but it points at a **machine-local** path
-outside the repo (a personal `spirit/shaders` dir), not the repo's `glsl/` —
-don't rely on it to compile a kernel you added under `glsl/`.) JIT kernels are compiled the same way but at
-runtime by `Codegen.compile_cached/1`
+package — see the `priv/shaders` entry in `mix.exs` `package/0`). **There is no
+mix task and no build script — run the command above directly.**
+`scripts/build_and_test.sh` used to be mentioned here as a thing NOT to rely on;
+it was deleted on 2026-08-28, because the machine-local `spirit/shaders` dir it
+pointed at was a one-off recovery aid that had already served its purpose and no
+longer exists.
+
+`glsl/*.spv` are build intermediates and are **gitignored**. `priv/shaders/` is
+the canonical location and the only one `vulkano_backend.ex` resolves.
+
+**PIN THE COMPILER IN YOUR HEAD: glslang 15.1.0, SPIR-V 1.6 (`0x00010600`),
+generator 11.** SPIR-V output is a function of the compiler — a different
+glslang emits a different generator stamp and can order instructions
+differently — so a `.spv` rebuilt under another version will NOT be
+byte-identical to the committed one even when the GLSL is unchanged. Every
+reproducibility claim this project makes is relative to that version: 87 of 87
+byte-identical, verified on x86_64 and on aarch64 with a locally built glslang.
+Nothing enforces this; a version mismatch produces a working shader and a
+useless comparison, so check `glslangValidator --version` before concluding a
+`.spv` diff means anything.
+
+JIT kernels are compiled the same way but at runtime by
+`Codegen.compile_cached/1`
 (`System.cmd("glslangValidator", ["-V", comp_path, "-o", spv_path])`) into the
 gitignored `priv/shader_cache/`.
 

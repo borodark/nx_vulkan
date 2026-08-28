@@ -386,15 +386,25 @@ back" is currently an accident.
    >
    > All seven are recovered and committed. They were never lost: they lived in
    > `~/spirit/shaders/` on **both** FreeBSD Keplers, a directory outside any
-   > repository, and super-io did not have it. That is why
-   > `scripts/build_and_test.sh` points at a machine-local shader dir — it was
-   > the last thing that knew where they were.
+   > repository, and super-io did not have it. `scripts/build_and_test.sh`
+   > pointed at that machine-local dir because it was the last thing that knew
+   > where they were.
+   >
+   > **That script has since been deleted (2026-08-28).** Its pointer outlived
+   > its purpose: the recovery it existed to support finished here, the
+   > directory it named no longer exists on any box, and under `set -eu` the
+   > script had been dying on its first unexpanded glob for long enough that
+   > nobody noticed — which is itself the evidence it had stopped being run.
+   > Compiling a shader is one line, documented in the skill:
+   > `glslangValidator -V glsl/foo.comp -o priv/shaders/foo.spv`.
    >
    > Each was proven genuine rather than merely plausible: compiled with
    > `glslangValidator`, byte-compared against the committed `.spv`, **all seven
-   > identical**. The tree now holds a checkable invariant — **59 `.comp` ↔ 59
-   > `.spv`, every blob regenerable** — and the `clean_all_build` skill verifies
-   > it on every run instead of trusting a remembered list.
+   > identical**. The tree now holds a checkable invariant — **every `.comp` ↔
+   > its `.spv`, every blob regenerable** — and the `clean_all_build` skill
+   > verifies it on every run instead of trusting a remembered list. It was 59
+   > at the time of this entry and is **87** as of 2026-08-28, re-verified
+   > byte-identical on both x86_64 and aarch64 (§1.4 of `NEXT.md`).
 
 ---
 
