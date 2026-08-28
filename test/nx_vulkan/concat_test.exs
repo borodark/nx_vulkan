@@ -204,4 +204,78 @@ defmodule Nx.Vulkan.ConcatTest do
       assert counts == %{}
     end
   end
+
+  describe "sub-word dtypes on axis 0 — the padded-splice bug" do
+    # `concat_buffers` splices by each buffer's `n_bytes`, which for a sub-word
+    # dtype is the PADDED size: a {:u, 8} tensor of 1 element occupies 4 bytes,
+    # an {:s, 16} of 5 occupies 12. Byte-appending those put padding into the
+    # INTERIOR of the result and dropped as many real elements off the tail.
+    #
+    # A WRONG ANSWER, not a crash. It predates the uninitialised-allocator
+    # change — the spliced bytes read 0 under deliberate memory poisoning, so
+    # the offsets were already wrong while padding was still zeroed. That change
+    # only made the wrongness non-deterministic.
+    #
+    # This file parametrised {:f,32}, {:f,64}, {:s,32}, {:s,64} — all
+    # word-copyable — and its one 1-byte case asserts a FALLBACK on axis 1. The
+    # axis-0 byte-append path had never been exercised with a sub-word dtype,
+    # which is why a documented rule ("1/2-byte types fall back") could be
+    # missing from one of the two gates that needed it.
+    # TAGGED because the fallback IS the fix. Sub-word axis-0 concat now
+    # host-falls-back by design, so under NXV_HOST_FALLBACK=raise these raise.
+    #
+    # This is the FOURTH time this session that a test whose subject is a
+    # fallback went in without the tag, and each time only strict_test.sh could
+    # see it — `mix test` passes, because a fallback returns a bit-identical
+    # answer. The rule keeps having to be relearned because the green `mix test`
+    # is the one you look at. Run all three scripts.
+    @tag :host_fallback_expected
+    test "the case that was wrong: concatenating two 1-slot u8 reductions" do
+      build = fn b ->
+        t = Nx.tensor([[1, 0]], backend: b)
+        Nx.concatenate([Nx.all(t, axes: [1]), Nx.any(t, axes: [1])])
+      end
+
+      assert Nx.to_flat_list(build.(VulkanoBackend)) == [0, 1]
+      assert Nx.to_flat_list(build.(VulkanoBackend)) == Nx.to_flat_list(build.(Nx.BinaryBackend))
+    end
+
+    for type <- [{:u, 8}, {:s, 8}, {:s, 16}, {:u, 16}] do
+      type = Macro.escape(type)
+
+      @tag :host_fallback_expected
+      test "#{inspect(type)} at lengths that pad" do
+        type = unquote(type)
+
+        # Lengths chosen so the buffer is padded: at 1 byte per element,
+        # anything not a multiple of 4; at 2 bytes, anything odd.
+        for n <- [1, 2, 3, 5, 7, 9] do
+          build = fn b ->
+            a = Nx.tensor(Enum.map(1..n, &rem(&1 * 7, 100)), type: type, backend: b)
+            c = Nx.tensor(Enum.map(1..n, &rem(&1 * 13, 100)), type: type, backend: b)
+            # THREE operands, and the third carries nonzero data past the second
+            # splice. A two-way concat with an all-zero tail passes even when the
+            # offsets are wrong — that false negative hid this during the fleet
+            # run until a three-way case was tried.
+            Nx.concatenate([a, c, a])
+          end
+
+          assert Nx.to_flat_list(build.(VulkanoBackend)) ==
+                   Nx.to_flat_list(build.(Nx.BinaryBackend)),
+                 "#{inspect(type)} concat of three #{n}-element tensors disagreed"
+        end
+      end
+    end
+
+    test "word-copyable dtypes still take the GPU path" do
+      # The fix must not cost residency for the dtypes that were always correct.
+      for type <- [{:f, 32}, {:f, 64}, {:s, 32}, {:u, 32}] do
+        a = Nx.iota({5}, type: type, backend: VulkanoBackend)
+        got = Nx.concatenate([a, a])
+
+        assert match?(%VulkanoBackend{}, got.data),
+               "#{inspect(type)} axis-0 concat should still be GPU-resident"
+      end
+    end
+  end
 end

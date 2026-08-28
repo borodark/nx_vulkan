@@ -2688,7 +2688,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
     {:ok, params_ref} = Nx.Vulkan.NativeV.buf_upload(params)
 
     # Seed the output with the target. A scatter writes only the elements the
-    # indices name; everything else has to survive, so `buf_alloc` (zeroed) is
+    # indices name; everything else has to survive, so a fresh `buf_alloc` is
     # wrong here. `concat_buffers/1` on a single buffer is a device-to-device
     # copy that waits before returning, which also orders it ahead of the
     # dispatch below.
@@ -2831,7 +2831,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
       # GPU byte-append is only valid when every input already has the output
       # type — a raw concat can't cast. Mixed-type concat (e.g. f32+u8+s64) must
       # host-fall-back so Nx casts to the merged type first (found via doctest Nx).
-      axis == 0 and all_vulkano?(tensors) and Enum.all?(tensors, &(&1.type == out.type)) ->
+      #
+      # `word_copyable?/1` IS LOAD-BEARING AND WAS MISSING. `concat_buffers`
+      # splices by each buffer's `n_bytes`, which for a sub-word dtype is the
+      # PADDED size — a {:u, 8} tensor of 1 element occupies 4 bytes, an
+      # {:s, 16} of 5 occupies 12. Appending those byte-for-byte splices the
+      # padding into the INTERIOR of the result and drops an equal number of
+      # real elements off the tail:
+      #
+      #     Nx.concatenate([Nx.all(t, axes: [1]), Nx.any(t, axes: [1])])
+      #     #=> [0, 0]      where Nx gives [0, 1]
+      #
+      # A wrong answer, not a crash, and it predates the uninitialised-allocator
+      # change — the spliced bytes read 0 under deliberate memory poisoning, so
+      # the offsets were already wrong when the padding was zeroed. What that
+      # change did was make the WRONGNESS non-deterministic for dtypes whose
+      # padding is no longer guaranteed zero.
+      #
+      # The axis > 0 gate below has always carried this rule and says so:
+      # "4/8-byte dtypes only, because the shader copies u32 words; 1/2-byte
+      # types fall back as they do for slice/pad/put_slice." Axis 0 simply never
+      # got it. Found by the Kepler fleet run at `95258d0`.
+      axis == 0 and word_copyable?(out.type) and all_vulkano?(tensors) and
+          Enum.all?(tensors, &(&1.type == out.type)) ->
         concat_vulkano(out, tensors)
 
       # W4's census made this the highest-leverage gap in the backend: an

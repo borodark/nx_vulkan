@@ -431,12 +431,28 @@ fn upload_buffer(
 /// first class — `allany_{f32,f64,s32,u8}`, which `atomicOr` one thread per
 /// slot into a packed u8 mask. Those use `alloc_buffer_zeroed` below.
 ///
-/// Nothing is in the second class: every packed-u8 writer (`compare_*`,
-/// `cast_f32_to_u8`, `cast_s32_to_narrow`) runs ONE THREAD PER OUTPUT WORD with
-/// `nwords = (n + 3) / 4`, so the tail word is written whole with its unused
-/// lanes zeroed in a register. `scatter`/`scatter_ordered` accumulate but do not
-/// come through here at all — their output is seeded by `concat_buffers`, and
-/// `scatter_ordered`'s scratch buffer is explicitly `fill_buffer`'d.
+/// No ELEMENTWISE kernel is in the second class: every packed-u8 writer
+/// (`compare_*`, `cast_f32_to_u8`, `cast_s32_to_narrow`) runs ONE THREAD PER
+/// OUTPUT WORD with `nwords = (n + 3) / 4`, so the tail word is written whole
+/// with its unused lanes zeroed in a register. `scatter`/`scatter_ordered`
+/// accumulate but do not come through here at all — their output is seeded by
+/// `concat_buffers`, and `scatter_ordered`'s scratch buffer is explicitly
+/// `fill_buffer`'d.
+///
+/// **ONE KNOWN EXCEPTION, and the original wording of this note claimed there
+/// were none.** The leapfrog chain NIFs allocate `K * d * 4` bytes and dispatch
+/// `[1, 1, 1]` with `local_size_x = 256`, so only 256 invocations exist however
+/// large `d` is. `leapfrog_chain_normal_f64.comp` states the precondition as a
+/// comment — "Single workgroup; n <= 256" — and nothing enforces it. For
+/// `d > 256` the tail was previously zeros and is now undefined, and these
+/// buffers are handed back WHOLE by `download_buffer` with no logical-size
+/// slice.
+///
+/// Low severity: `d` is bounded near 13 in practice by the push-block budget,
+/// and the `logp` reduction was already wrong past 256 — so `d > 256` is
+/// already broken for a different reason. Recorded because "nothing is in the
+/// second class" was an absolute claim and it does not survive this. Analytic,
+/// not hardware-tested.
 ///
 /// **If you add a kernel that accumulates or partially writes, use
 /// `alloc_buffer_zeroed`.** Getting this wrong is silent.
@@ -993,7 +1009,12 @@ fn buf_upload<'a>(env: Env<'a>, data: Binary<'a>) -> NifResult<Term<'a>> {
     Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
 }
 
-/// Allocate a zero-initialised device buffer of `n_bytes`.
+/// Allocate an UNINITIALISED device buffer of `n_bytes`.
+///
+/// Contents are whatever was in that memory. See `alloc_buffer` for the rule
+/// every kernel writing through this must obey, and `buf_alloc_zeroed` for the
+/// exception. This comment said "zero-initialised" until 2026-08-28 — in the
+/// same commit that stopped it being true.
 /// Returns `{:ok, resource}`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn buf_alloc<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {

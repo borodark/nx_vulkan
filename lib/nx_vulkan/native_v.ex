@@ -41,7 +41,17 @@ defmodule Nx.Vulkan.NativeV do
   """
   def buf_upload(_data), do: :erlang.nif_error(:nif_not_loaded)
 
-  @doc "Allocate a zero-initialised device buffer of `n_bytes`. Returns `{:ok, ref}`."
+  @doc """
+  Allocate an UNINITIALISED device buffer of `n_bytes`. Returns `{:ok, ref}`.
+
+  Its contents are whatever was in that memory. Every kernel writing through
+  this must cover the ENTIRE allocation, padding included — see
+  `buf_alloc_zeroed/1` below for the two patterns that must not, and for the
+  audit that established which shaders are affected.
+
+  This docstring said "zero-initialised" until 2026-08-28, and kept saying it in
+  the same commit that stopped it being true.
+  """
   def buf_alloc(_n_bytes), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
