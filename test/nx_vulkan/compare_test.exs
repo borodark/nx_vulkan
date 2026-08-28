@@ -23,10 +23,27 @@ defmodule Nx.Vulkan.CompareTest do
   end
 
   describe "comparison ops on GPU (f32)" do
-    test "greater x>0", do: check(fn b -> Nx.greater(Nx.subtract(Nx.iota({4, 5}, type: {:f, 32}, backend: b), 10.0), 0.0) end)
-    test "less", do: check(fn b -> Nx.less(Nx.iota({7}, type: {:f, 32}, backend: b), Nx.tensor(3.0, type: {:f, 32}, backend: b)) end)
-    test "greater_equal, non-multiple-of-4 length", do: check(fn b -> Nx.greater_equal(Nx.iota({5}, type: {:f, 32}, backend: b), 2.0) end)
-    test "not_equal", do: check(fn b -> Nx.not_equal(Nx.iota({3, 3}, type: {:f, 32}, backend: b), 4.0) end)
+    test "greater x>0",
+      do:
+        check(fn b ->
+          Nx.greater(Nx.subtract(Nx.iota({4, 5}, type: {:f, 32}, backend: b), 10.0), 0.0)
+        end)
+
+    test "less",
+      do:
+        check(fn b ->
+          Nx.less(
+            Nx.iota({7}, type: {:f, 32}, backend: b),
+            Nx.tensor(3.0, type: {:f, 32}, backend: b)
+          )
+        end)
+
+    test "greater_equal, non-multiple-of-4 length",
+      do: check(fn b -> Nx.greater_equal(Nx.iota({5}, type: {:f, 32}, backend: b), 2.0) end)
+
+    test "not_equal",
+      do: check(fn b -> Nx.not_equal(Nx.iota({3, 3}, type: {:f, 32}, backend: b), 4.0) end)
+
     test "row-broadcast greater {4,5} > {4,1}" do
       check(fn b ->
         t = Nx.iota({4, 5}, type: {:f, 32}, backend: b)
@@ -46,7 +63,14 @@ defmodule Nx.Vulkan.CompareTest do
 
     xb = Nx.backend_copy(x, Nx.BinaryBackend)
     dyb = Nx.backend_copy(dy, Nx.BinaryBackend)
-    ref = Nx.select(Nx.greater(xb, 0.0), dyb, Nx.tensor(0.0, type: {:f, 32}, backend: Nx.BinaryBackend))
+
+    ref =
+      Nx.select(
+        Nx.greater(xb, 0.0),
+        dyb,
+        Nx.tensor(0.0, type: {:f, 32}, backend: Nx.BinaryBackend)
+      )
+
     assert Nx.to_flat_list(Nx.backend_copy(grad, Nx.BinaryBackend)) == Nx.to_flat_list(ref)
   end
 end

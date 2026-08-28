@@ -26,7 +26,8 @@ defmodule Nx.Vulkan.F32OpsTest do
     |> Nx.to_number()
   end
 
-  defp f32(list, shape, backend), do: Nx.tensor(list, type: {:f, 32}, backend: backend) |> Nx.reshape(shape)
+  defp f32(list, shape, backend),
+    do: Nx.tensor(list, type: {:f, 32}, backend: backend) |> Nx.reshape(shape)
 
   # unary: run f on both backends, assert on-GPU + f32 + within tol
   defp unary(shape, f, tol) do
@@ -85,7 +86,10 @@ defmodule Nx.Vulkan.F32OpsTest do
     ci = for i <- 1..(1 * 3 * 6 * 6), do: :math.sin(i * 0.2)
     ck = for i <- 1..(4 * 3 * 3 * 3), do: :math.cos(i * 0.3)
     got = Nx.conv(f32(ci, {1, 3, 6, 6}, VulkanoBackend), f32(ck, {4, 3, 3, 3}, VulkanoBackend))
-    ref = Nx.conv(f32(ci, {1, 3, 6, 6}, Nx.BinaryBackend), f32(ck, {4, 3, 3, 3}, Nx.BinaryBackend))
+
+    ref =
+      Nx.conv(f32(ci, {1, 3, 6, 6}, Nx.BinaryBackend), f32(ck, {4, 3, 3, 3}, Nx.BinaryBackend))
+
     assert match?(%VulkanoBackend{}, got.data)
     assert Nx.type(got) == {:f, 32}
     assert maxdiff(got, ref) <= @tol

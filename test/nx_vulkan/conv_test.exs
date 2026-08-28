@@ -35,6 +35,7 @@ defmodule Nx.Vulkan.ConvTest do
 
   defp max_abs_diff(a, b) do
     assert Nx.shape(a) == Nx.shape(b)
+
     Nx.subtract(Nx.backend_copy(a, Nx.BinaryBackend), b)
     |> Nx.abs()
     |> Nx.reduce_max()
@@ -58,7 +59,9 @@ defmodule Nx.Vulkan.ConvTest do
           {"3d basic", {1, 1, 4, 4, 4}, {1, 1, 2, 2, 2}, []}
         ] do
       test "#{label}" do
-        {got, ref} = run(unquote(Macro.escape(ishape)), unquote(Macro.escape(kshape)), unquote(opts))
+        {got, ref} =
+          run(unquote(Macro.escape(ishape)), unquote(Macro.escape(kshape)), unquote(opts))
+
         assert match?(%VulkanoBackend{}, got.data), "expected on-GPU dispatch"
         assert Nx.type(got) == {:f, 64}
         assert max_abs_diff(got, ref) < 1.0e-10
@@ -118,8 +121,14 @@ defmodule Nx.Vulkan.ConvTest do
     end
 
     test "2d multichannel f32, both accumulator policies on GPU + correct" do
-      iv = Nx.tensor(for(i <- 1..75, do: i * 0.1), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({1, 3, 5, 5})
-      kv = Nx.tensor(for(i <- 1..54, do: i * 0.05), type: {:f, 32}, backend: VulkanoBackend) |> Nx.reshape({2, 3, 3, 3})
+      iv =
+        Nx.tensor(for(i <- 1..75, do: i * 0.1), type: {:f, 32}, backend: VulkanoBackend)
+        |> Nx.reshape({1, 3, 5, 5})
+
+      kv =
+        Nx.tensor(for(i <- 1..54, do: i * 0.05), type: {:f, 32}, backend: VulkanoBackend)
+        |> Nx.reshape({2, 3, 3, 3})
+
       ib = Nx.backend_copy(iv, Nx.BinaryBackend)
       kb = Nx.backend_copy(kv, Nx.BinaryBackend)
       ref = Nx.conv(ib, kb)

@@ -66,12 +66,20 @@ defmodule Nx.Vulkan.ParityFallbackTest do
 
   # --- fixtures (built per-backend) ---
 
-  defp sym_pd(b), do: Nx.tensor([[6.0, 2.0, 1.0], [2.0, 5.0, 2.0], [1.0, 2.0, 4.0]], type: {:f, 64}, backend: b)
-  defp gen3(b), do: Nx.tensor([[1.0, 2.0, 3.0], [0.0, 1.0, 4.0], [5.0, 6.0, 0.0]], type: {:f, 64}, backend: b)
-  defp lower3(b), do: Nx.tensor([[2.0, 0.0, 0.0], [3.0, 1.0, 0.0], [1.0, 4.0, 5.0]], type: {:f, 64}, backend: b)
+  defp sym_pd(b),
+    do: Nx.tensor([[6.0, 2.0, 1.0], [2.0, 5.0, 2.0], [1.0, 2.0, 4.0]], type: {:f, 64}, backend: b)
+
+  defp gen3(b),
+    do: Nx.tensor([[1.0, 2.0, 3.0], [0.0, 1.0, 4.0], [5.0, 6.0, 0.0]], type: {:f, 64}, backend: b)
+
+  defp lower3(b),
+    do: Nx.tensor([[2.0, 0.0, 0.0], [3.0, 1.0, 0.0], [1.0, 4.0, 5.0]], type: {:f, 64}, backend: b)
+
   defp b3(b), do: Nx.tensor([1.0, 2.0, 3.0], type: {:f, 64}, backend: b)
   defp vec(b), do: Nx.tensor([3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0, 6.0], type: {:f, 64}, backend: b)
-  defp mat(b), do: Nx.tensor([[3.0, 1.0, 4.0], [1.5, 5.0, 9.0], [2.0, 6.0, 5.0]], type: {:f, 64}, backend: b)
+
+  defp mat(b),
+    do: Nx.tensor([[3.0, 1.0, 4.0], [1.5, 5.0, 9.0], [2.0, 6.0, 5.0]], type: {:f, 64}, backend: b)
 
   describe "linalg — routed through block/4 (removed as callbacks in nx 0.13)" do
     test "cholesky", do: assert_parity(fn b -> Nx.LinAlg.cholesky(sym_pd(b)) end)
@@ -84,7 +92,8 @@ defmodule Nx.Vulkan.ParityFallbackTest do
   end
 
   describe "linalg — triangular_solve stayed a callback" do
-    test "triangular_solve", do: assert_parity(fn b -> Nx.LinAlg.triangular_solve(lower3(b), b3(b)) end)
+    test "triangular_solve",
+      do: assert_parity(fn b -> Nx.LinAlg.triangular_solve(lower3(b), b3(b)) end)
   end
 
   describe "reductions/scans removed as callbacks — via block/4" do
@@ -109,7 +118,10 @@ defmodule Nx.Vulkan.ParityFallbackTest do
         end)
 
     test "logical_not",
-      do: assert_parity(fn b -> Nx.logical_not(Nx.tensor([1, 0, 1, 0], type: {:u, 8}, backend: b)) end)
+      do:
+        assert_parity(fn b ->
+          Nx.logical_not(Nx.tensor([1, 0, 1, 0], type: {:u, 8}, backend: b))
+        end)
   end
 
   describe "fallback callbacks that stayed — regression guard" do
@@ -119,9 +131,16 @@ defmodule Nx.Vulkan.ParityFallbackTest do
     test "reverse", do: assert_parity(fn b -> Nx.reverse(vec(b)) end)
     test "window_sum", do: assert_parity(fn b -> Nx.window_sum(vec(b), {3}) end)
     test "argmax", do: assert_parity(fn b -> Nx.argmax(vec(b)) end)
-    test "gather", do: assert_parity(fn b -> Nx.gather(mat(b), Nx.tensor([[0, 0], [1, 2]], backend: b)) end)
-    test "all", do: assert_parity(fn b -> Nx.all(Nx.tensor([1, 1, 0], type: {:u, 8}, backend: b)) end)
-    test "any", do: assert_parity(fn b -> Nx.any(Nx.tensor([0, 0, 1], type: {:u, 8}, backend: b)) end)
+
+    test "gather",
+      do: assert_parity(fn b -> Nx.gather(mat(b), Nx.tensor([[0, 0], [1, 2]], backend: b)) end)
+
+    test "all",
+      do: assert_parity(fn b -> Nx.all(Nx.tensor([1, 1, 0], type: {:u, 8}, backend: b)) end)
+
+    test "any",
+      do: assert_parity(fn b -> Nx.any(Nx.tensor([0, 0, 1], type: {:u, 8}, backend: b)) end)
+
     test "to_batched", do: assert_parity(fn b -> Nx.to_batched(mat(b), 1) |> Enum.at(1) end)
   end
 end

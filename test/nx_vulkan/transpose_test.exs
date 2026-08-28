@@ -21,14 +21,25 @@ defmodule Nx.Vulkan.TransposeTest do
 
   defp maxdiff(a, b) do
     assert Nx.shape(a) == Nx.shape(b)
-    Nx.subtract(Nx.backend_copy(a, Nx.BinaryBackend), b) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+
+    Nx.subtract(Nx.backend_copy(a, Nx.BinaryBackend), b)
+    |> Nx.abs()
+    |> Nx.reduce_max()
+    |> Nx.to_number()
   end
 
   defp both(shape, type) do
     {m, n} = shape
     data = Enum.map(1..(m * n), &(&1 * 1.0))
-    v = Nx.tensor(data, type: type, backend: VulkanoBackend) |> Nx.reshape(shape) |> Nx.transpose()
-    b = Nx.tensor(data, type: type, backend: Nx.BinaryBackend) |> Nx.reshape(shape) |> Nx.transpose()
+
+    v =
+      Nx.tensor(data, type: type, backend: VulkanoBackend) |> Nx.reshape(shape) |> Nx.transpose()
+
+    b =
+      Nx.tensor(data, type: type, backend: Nx.BinaryBackend)
+      |> Nx.reshape(shape)
+      |> Nx.transpose()
+
     {v, b}
   end
 
@@ -104,7 +115,10 @@ defmodule Nx.Vulkan.TransposeTest do
   end
 
   test "transpose feeds dot correctly (A^T · b), the logistic-regression path" do
-    a = Nx.tensor(Enum.map(1..15, &(&1 * 0.3)), type: {:f, 64}, backend: VulkanoBackend) |> Nx.reshape({3, 5})
+    a =
+      Nx.tensor(Enum.map(1..15, &(&1 * 0.3)), type: {:f, 64}, backend: VulkanoBackend)
+      |> Nx.reshape({3, 5})
+
     x = Nx.tensor([1.0, 2.0, 3.0], type: {:f, 64}, backend: VulkanoBackend) |> Nx.reshape({3, 1})
     ab = Nx.backend_copy(a, Nx.BinaryBackend)
     xb = Nx.backend_copy(x, Nx.BinaryBackend)

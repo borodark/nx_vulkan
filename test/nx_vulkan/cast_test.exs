@@ -14,8 +14,13 @@ defmodule Nx.Vulkan.CastTest do
   end
 
   defp maxdiff(a, b) do
-    Nx.subtract(Nx.backend_copy(a, Nx.BinaryBackend) |> Nx.as_type({:f, 64}), Nx.backend_copy(b, Nx.BinaryBackend) |> Nx.as_type({:f, 64}))
-    |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+    Nx.subtract(
+      Nx.backend_copy(a, Nx.BinaryBackend) |> Nx.as_type({:f, 64}),
+      Nx.backend_copy(b, Nx.BinaryBackend) |> Nx.as_type({:f, 64})
+    )
+    |> Nx.abs()
+    |> Nx.reduce_max()
+    |> Nx.to_number()
   end
 
   @data [1.5, -2.25, 3.125, 4.0, -0.5, 100.0, -0.0001]
@@ -38,8 +43,13 @@ defmodule Nx.Vulkan.CastTest do
 
   @tag :host_fallback_expected
   test "non-f32/f64 cast still falls back but stays correct" do
-    v = Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: VulkanoBackend) |> Nx.as_type({:s, 32})
-    b = Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: Nx.BinaryBackend) |> Nx.as_type({:s, 32})
+    v =
+      Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: VulkanoBackend) |> Nx.as_type({:s, 32})
+
+    b =
+      Nx.tensor([1.7, 2.3, 3.9], type: {:f, 32}, backend: Nx.BinaryBackend)
+      |> Nx.as_type({:s, 32})
+
     assert Nx.to_flat_list(v) == Nx.to_flat_list(b)
   end
 end

@@ -29,20 +29,84 @@ defmodule Nx.Vulkan.GatherTest do
     it = Macro.escape(it)
 
     describe "gather value=#{inspect(vt)} index=#{inspect(it)} on GPU" do
-      test "1d full", do: check(fn b -> Nx.gather(Nx.iota({6}, type: unquote(vt), backend: b), Nx.tensor([[0], [3], [5], [1]], type: unquote(it), backend: b)) end, true)
-      test "2d full (scalar picks)", do: check(fn b -> Nx.gather(Nx.iota({3, 4}, type: unquote(vt), backend: b), Nx.tensor([[0, 1], [2, 3], [1, 0]], type: unquote(it), backend: b)) end, true)
-      test "2d rows axes[0] (block copy)", do: check(fn b -> Nx.gather(Nx.iota({3, 4}, type: unquote(vt), backend: b), Nx.tensor([[2], [0]], type: unquote(it), backend: b), axes: [0]) end, true)
-      test "3d full batched index", do: check(fn b -> Nx.gather(Nx.iota({2, 3, 4}, type: unquote(vt), backend: b), Nx.tensor([[[0, 0, 0], [1, 2, 3]], [[0, 1, 2], [1, 0, 1]]], type: unquote(it), backend: b)) end, true)
+      test "1d full",
+        do:
+          check(
+            fn b ->
+              Nx.gather(
+                Nx.iota({6}, type: unquote(vt), backend: b),
+                Nx.tensor([[0], [3], [5], [1]], type: unquote(it), backend: b)
+              )
+            end,
+            true
+          )
+
+      test "2d full (scalar picks)",
+        do:
+          check(
+            fn b ->
+              Nx.gather(
+                Nx.iota({3, 4}, type: unquote(vt), backend: b),
+                Nx.tensor([[0, 1], [2, 3], [1, 0]], type: unquote(it), backend: b)
+              )
+            end,
+            true
+          )
+
+      test "2d rows axes[0] (block copy)",
+        do:
+          check(
+            fn b ->
+              Nx.gather(
+                Nx.iota({3, 4}, type: unquote(vt), backend: b),
+                Nx.tensor([[2], [0]], type: unquote(it), backend: b),
+                axes: [0]
+              )
+            end,
+            true
+          )
+
+      test "3d full batched index",
+        do:
+          check(
+            fn b ->
+              Nx.gather(
+                Nx.iota({2, 3, 4}, type: unquote(vt), backend: b),
+                Nx.tensor([[[0, 0, 0], [1, 2, 3]], [[0, 1, 2], [1, 0, 1]]],
+                  type: unquote(it),
+                  backend: b
+                )
+              )
+            end,
+            true
+          )
     end
   end
 
   @tag :host_fallback_expected
   test "non-prefix axes ([1]) falls back but stays correct" do
-    check(fn b -> Nx.gather(Nx.iota({3, 4}, type: {:f, 32}, backend: b), Nx.tensor([[1], [3]], type: {:s, 64}, backend: b), axes: [1]) end, false)
+    check(
+      fn b ->
+        Nx.gather(
+          Nx.iota({3, 4}, type: {:f, 32}, backend: b),
+          Nx.tensor([[1], [3]], type: {:s, 64}, backend: b),
+          axes: [1]
+        )
+      end,
+      false
+    )
   end
 
   @tag :host_fallback_expected
   test "u8 value dtype falls back but stays correct" do
-    check(fn b -> Nx.gather(Nx.iota({6}, type: {:u, 8}, backend: b), Nx.tensor([[0], [2]], type: {:s, 64}, backend: b)) end, false)
+    check(
+      fn b ->
+        Nx.gather(
+          Nx.iota({6}, type: {:u, 8}, backend: b),
+          Nx.tensor([[0], [2]], type: {:s, 64}, backend: b)
+        )
+      end,
+      false
+    )
   end
 end

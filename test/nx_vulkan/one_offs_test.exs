@@ -50,8 +50,10 @@ defmodule Nx.Vulkan.OneOffsTest do
 
     test "rank 6 too — the cap was never about rank, only about transposing" do
       check(fn b ->
-        Nx.dot(Nx.iota({1, 2, 1, 2, 2, 3}, type: {:f, 32}, backend: b),
-               Nx.iota({3}, type: {:f, 32}, backend: b))
+        Nx.dot(
+          Nx.iota({1, 2, 1, 2, 2, 3}, type: {:f, 32}, backend: b),
+          Nx.iota({3}, type: {:f, 32}, backend: b)
+        )
       end)
     end
 
@@ -79,8 +81,17 @@ defmodule Nx.Vulkan.OneOffsTest do
       assert Nx.Vulkan.Fallback.count_total(fn -> Nx.dot(a, [0], [], b, [0], []) end) > 0
 
       got = Nx.dot(a, [0], [], b, [0], [])
-      ref = Nx.dot(Nx.backend_transfer(a, Nx.BinaryBackend), [0], [],
-                   Nx.backend_transfer(b, Nx.BinaryBackend), [0], [])
+
+      ref =
+        Nx.dot(
+          Nx.backend_transfer(a, Nx.BinaryBackend),
+          [0],
+          [],
+          Nx.backend_transfer(b, Nx.BinaryBackend),
+          [0],
+          []
+        )
+
       assert Nx.to_flat_list(got) == Nx.to_flat_list(ref)
     end
   end

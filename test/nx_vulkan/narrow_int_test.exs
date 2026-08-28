@@ -59,18 +59,35 @@ defmodule Nx.Vulkan.NarrowIntTest do
   # Deliberately awkward: the extremes of each width, values that overflow when
   # combined, negatives, and a LENGTH THAT IS NOT A MULTIPLE OF 4 so the packed
   # tail word is exercised.
-  defp operands({:s, 8}), do: {[127, -128, 100, -100, 3, -3, 0, 1, 42], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
-  defp operands({:u, 8}), do: {[0, 1, 200, 255, 128, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
-  defp operands({:s, 16}), do: {[32767, -32768, 300, -300, 3, -3, 0, 1, 999], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
-  defp operands({:u, 16}), do: {[0, 1, 60000, 65535, 32768, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
+  defp operands({:s, 8}),
+    do: {[127, -128, 100, -100, 3, -3, 0, 1, 42], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
+
+  defp operands({:u, 8}),
+    do: {[0, 1, 200, 255, 128, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
+
+  defp operands({:s, 16}),
+    do: {[32767, -32768, 300, -300, 3, -3, 0, 1, 999], [2, 3, 100, 7, -2, 5, 4, -1, 7]}
+
+  defp operands({:u, 16}),
+    do: {[0, 1, 60000, 65535, 32768, 7, 99, 254, 3], [2, 3, 100, 7, 2, 5, 4, 1, 7]}
 
   @types [{:s, 8}, {:u, 8}, {:s, 16}, {:u, 16}]
 
   # `divide` and `pow` are absent on purpose: Nx types `divide` on integers as a
   # float, and the s32 kernel has no `pow` — so neither can reach a narrow
   # integer output, and narrow_binary/5 refuses both codes explicitly.
-  @binary [:add, :subtract, :multiply, :max, :min, :quotient, :remainder,
-           :bitwise_and, :bitwise_or, :bitwise_xor]
+  @binary [
+    :add,
+    :subtract,
+    :multiply,
+    :max,
+    :min,
+    :quotient,
+    :remainder,
+    :bitwise_and,
+    :bitwise_or,
+    :bitwise_xor
+  ]
 
   describe "elementwise binary, same shape" do
     for type <- @types, op <- @binary do
@@ -173,7 +190,9 @@ defmodule Nx.Vulkan.NarrowIntTest do
       # -1 at {:s, 8} has eight set bits, not thirty-two. Sign-extending on the
       # way up would answer 32 and look entirely plausible.
       assert Nx.to_flat_list(
-               Nx.population_count(Nx.tensor([-1, -128, 127], type: {:s, 8}, backend: VulkanoBackend))
+               Nx.population_count(
+                 Nx.tensor([-1, -128, 127], type: {:s, 8}, backend: VulkanoBackend)
+               )
              ) == [8, 1, 7]
     end
   end
@@ -287,7 +306,9 @@ defmodule Nx.Vulkan.NarrowIntTest do
     end
 
     test "over an axis of a rank-3 narrow tensor" do
-      t = fn b -> Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4}) end
+      t = fn b ->
+        Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4})
+      end
 
       for axis <- 0..2 do
         check(fn b -> Nx.sum(t.(b), axes: [axis]) end)
@@ -386,7 +407,9 @@ defmodule Nx.Vulkan.NarrowIntTest do
   describe "multi-dimensional" do
     test "{:s, 8} rank 3, and the result is still resident" do
       check(fn b ->
-        t = Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4})
+        t =
+          Nx.reshape(Nx.tensor(Enum.map(1..24, &(&1 - 12)), type: {:s, 8}, backend: b), {2, 3, 4})
+
         Nx.multiply(t, t)
       end)
     end

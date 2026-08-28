@@ -36,7 +36,13 @@ defmodule Nx.Vulkan.NnGpuCoverageTest do
     assert gpu?(got), "NN forward leaked to host — a broadcast/elementwise op fell back"
 
     ref = mlp_softmax(Nx.BinaryBackend)
-    diff = Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend), ref) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+
+    diff =
+      Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend), ref)
+      |> Nx.abs()
+      |> Nx.reduce_max()
+      |> Nx.to_number()
+
     assert diff < 1.0e-6
   end
 
@@ -45,7 +51,13 @@ defmodule Nx.Vulkan.NnGpuCoverageTest do
     b = Nx.subtract(Nx.iota({4, 5}, type: {:f, 32}, backend: Nx.BinaryBackend), 8.0)
     got = Nx.clip(v, 0.0, 5.0)
     assert gpu?(got)
-    diff = Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend), Nx.clip(b, 0.0, 5.0)) |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+
+    diff =
+      Nx.subtract(Nx.backend_copy(got, Nx.BinaryBackend), Nx.clip(b, 0.0, 5.0))
+      |> Nx.abs()
+      |> Nx.reduce_max()
+      |> Nx.to_number()
+
     assert diff == 0.0
   end
 end

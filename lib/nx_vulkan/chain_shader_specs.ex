@@ -73,8 +73,8 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
   """
   def beta_push(n, k, eps, alpha, beta, logp_const)
       when is_number(alpha) and is_number(beta) and is_number(logp_const) do
-    <<n::little-32, k::little-32, eps::little-float-32,
-      alpha::little-float-32, beta::little-float-32, logp_const::little-float-32>>
+    <<n::little-32, k::little-32, eps::little-float-32, alpha::little-float-32,
+      beta::little-float-32, logp_const::little-float-32>>
   end
 
   @doc """
@@ -120,8 +120,8 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
   """
   def gamma_push(n, k, eps, alpha, beta, logp_const)
       when is_number(alpha) and is_number(beta) and is_number(logp_const) do
-    <<n::little-32, k::little-32, eps::little-float-32,
-      alpha::little-float-32, beta::little-float-32, logp_const::little-float-32>>
+    <<n::little-32, k::little-32, eps::little-float-32, alpha::little-float-32,
+      beta::little-float-32, logp_const::little-float-32>>
   end
 
   @doc """
@@ -176,7 +176,7 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
   def lognormal_push(n, k, eps, mu, sigma) when is_number(mu) and is_number(sigma) do
     logp_const = -0.5 * :math.log(2.0 * :math.pi() * sigma * sigma)
 
-    <<n::little-32, k::little-32, eps::little-float-32,
-      mu::little-float-32, sigma::little-float-32, logp_const::little-float-32>>
+    <<n::little-32, k::little-32, eps::little-float-32, mu::little-float-32,
+      sigma::little-float-32, logp_const::little-float-32>>
   end
 end

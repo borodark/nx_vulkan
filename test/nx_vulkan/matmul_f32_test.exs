@@ -74,7 +74,20 @@ defmodule Nx.Vulkan.MatmulF32Test do
       # [1e9, 1, ..., 1, -1e9]·[1,..,1]: the f32 accumulator drops the 1s once
       # 1e9 is resident (ulp ~64 > 1); the f64 accumulator keeps them.
       k = 512
-      a = for(i <- 0..(k - 1), do: cond(do: (i == 0 -> 1.0e9; i == k - 1 -> -1.0e9; true -> 1.0)))
+
+      a =
+        for(
+          i <- 0..(k - 1),
+          do:
+            cond(
+              do: (
+                i == 0 -> 1.0e9
+                i == k - 1 -> -1.0e9
+                true -> 1.0
+              )
+            )
+        )
+
       b = List.duplicate(1.0, k)
       truth = k - 2
 

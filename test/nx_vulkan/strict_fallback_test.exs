@@ -96,7 +96,8 @@ defmodule Nx.Vulkan.StrictFallbackTest do
     end
 
     test "the message points at the defect class, not just the symptom" do
-      err = assert_raise HostFallbackError, fn -> Fallback.strict(fn -> refused_fallback() end) end
+      err =
+        assert_raise HostFallbackError, fn -> Fallback.strict(fn -> refused_fallback() end) end
 
       # §1b of the skill is where the "gate written against the forward pass"
       # story lives. A strict-mode failure with no pointer to it just looks

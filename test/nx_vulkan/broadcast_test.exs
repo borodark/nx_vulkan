@@ -16,7 +16,9 @@ defmodule Nx.Vulkan.BroadcastTest do
 
   defp maxdiff(a, b) do
     Nx.subtract(Nx.backend_copy(a, Nx.BinaryBackend), Nx.backend_copy(b, Nx.BinaryBackend))
-    |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+    |> Nx.abs()
+    |> Nx.reduce_max()
+    |> Nx.to_number()
   end
 
   # run builder on both backends; assert exact-ish match + on-GPU (f32)
@@ -30,18 +32,32 @@ defmodule Nx.Vulkan.BroadcastTest do
 
   describe "f32 broadcast on GPU (the DL path)" do
     test "bias add {8,16}+{16}" do
-      check(fn b -> Nx.add(Nx.iota({8, 16}, type: {:f, 32}, backend: b), Nx.iota({16}, type: {:f, 32}, backend: b)) end, 0.0)
+      check(
+        fn b ->
+          Nx.add(
+            Nx.iota({8, 16}, type: {:f, 32}, backend: b),
+            Nx.iota({16}, type: {:f, 32}, backend: b)
+          )
+        end,
+        0.0
+      )
     end
 
     test "relu max(x, 0.0)" do
-      check(fn b -> Nx.max(Nx.subtract(Nx.iota({8, 16}, type: {:f, 32}, backend: b), 40.0), 0.0) end, 0.0)
+      check(
+        fn b -> Nx.max(Nx.subtract(Nx.iota({8, 16}, type: {:f, 32}, backend: b), 40.0), 0.0) end,
+        0.0
+      )
     end
 
     test "softmax subtract {8,16}-{8,1}" do
-      check(fn b ->
-        t = Nx.iota({8, 16}, type: {:f, 32}, backend: b)
-        Nx.subtract(t, Nx.reduce_max(t, axes: [1], keep_axes: true))
-      end, 0.0)
+      check(
+        fn b ->
+          t = Nx.iota({8, 16}, type: {:f, 32}, backend: b)
+          Nx.subtract(t, Nx.reduce_max(t, axes: [1], keep_axes: true))
+        end,
+        0.0
+      )
     end
 
     test "scalar multiply {5,5}*3.0" do
@@ -49,17 +65,39 @@ defmodule Nx.Vulkan.BroadcastTest do
     end
 
     test "col divide {8,16}/{8,1}" do
-      check(fn b ->
-        Nx.divide(Nx.add(Nx.iota({8, 16}, type: {:f, 32}, backend: b), 1.0), Nx.add(Nx.iota({8, 1}, type: {:f, 32}, backend: b), 1.0))
-      end, 1.0e-5)
+      check(
+        fn b ->
+          Nx.divide(
+            Nx.add(Nx.iota({8, 16}, type: {:f, 32}, backend: b), 1.0),
+            Nx.add(Nx.iota({8, 1}, type: {:f, 32}, backend: b), 1.0)
+          )
+        end,
+        1.0e-5
+      )
     end
 
     test "4D bias {2,3,4,5}+{5}" do
-      check(fn b -> Nx.add(Nx.iota({2, 3, 4, 5}, type: {:f, 32}, backend: b), Nx.iota({5}, type: {:f, 32}, backend: b)) end, 0.0)
+      check(
+        fn b ->
+          Nx.add(
+            Nx.iota({2, 3, 4, 5}, type: {:f, 32}, backend: b),
+            Nx.iota({5}, type: {:f, 32}, backend: b)
+          )
+        end,
+        0.0
+      )
     end
   end
 
   test "f64 same-type broadcast on GPU" do
-    check(fn b -> Nx.add(Nx.iota({8, 16}, type: {:f, 64}, backend: b), Nx.iota({16}, type: {:f, 64}, backend: b)) end, 0.0)
+    check(
+      fn b ->
+        Nx.add(
+          Nx.iota({8, 16}, type: {:f, 64}, backend: b),
+          Nx.iota({16}, type: {:f, 64}, backend: b)
+        )
+      end,
+      0.0
+    )
   end
 end

@@ -325,7 +325,6 @@ defmodule Nx.Vulkan.CompilerTest do
   end
 
   describe "unsupported graphs fall back to the Evaluator (still correct)" do
-
     test "tuple output falls back" do
       a = bin([1.0, 2.0])
       got = jit(fn x -> {Nx.negate(x), Nx.exp(x)} end).(a)

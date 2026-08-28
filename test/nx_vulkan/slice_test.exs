@@ -24,10 +24,50 @@ defmodule Nx.Vulkan.SliceTest do
 
   for type <- [{:f, 32}, {:f, 64}, {:s, 32}] do
     describe "slice #{inspect(type)} on GPU" do
-      test "1d contiguous", do: check(fn b -> Nx.slice(Nx.iota({8}, type: unquote(Macro.escape(type)), backend: b), [2], [4]) end, true)
-      test "2d block", do: check(fn b -> Nx.slice(Nx.iota({5, 6}, type: unquote(Macro.escape(type)), backend: b), [1, 2], [3, 3]) end, true)
-      test "1d strided", do: check(fn b -> Nx.slice(Nx.iota({10}, type: unquote(Macro.escape(type)), backend: b), [1], [6], strides: [2]) end, true)
-      test "3d", do: check(fn b -> Nx.slice(Nx.iota({2, 3, 4}, type: unquote(Macro.escape(type)), backend: b), [0, 1, 1], [2, 2, 2]) end, true)
+      test "1d contiguous",
+        do:
+          check(
+            fn b ->
+              Nx.slice(Nx.iota({8}, type: unquote(Macro.escape(type)), backend: b), [2], [4])
+            end,
+            true
+          )
+
+      test "2d block",
+        do:
+          check(
+            fn b ->
+              Nx.slice(Nx.iota({5, 6}, type: unquote(Macro.escape(type)), backend: b), [1, 2], [
+                3,
+                3
+              ])
+            end,
+            true
+          )
+
+      test "1d strided",
+        do:
+          check(
+            fn b ->
+              Nx.slice(Nx.iota({10}, type: unquote(Macro.escape(type)), backend: b), [1], [6],
+                strides: [2]
+              )
+            end,
+            true
+          )
+
+      test "3d",
+        do:
+          check(
+            fn b ->
+              Nx.slice(
+                Nx.iota({2, 3, 4}, type: unquote(Macro.escape(type)), backend: b),
+                [0, 1, 1],
+                [2, 2, 2]
+              )
+            end,
+            true
+          )
     end
   end
 
@@ -38,6 +78,11 @@ defmodule Nx.Vulkan.SliceTest do
 
   @tag :host_fallback_expected
   test "dynamic (tensor) start falls back but stays correct" do
-    check(fn b -> Nx.slice(Nx.iota({6}, type: {:f, 32}, backend: b), [Nx.tensor(2, backend: b)], [3]) end, false)
+    check(
+      fn b ->
+        Nx.slice(Nx.iota({6}, type: {:f, 32}, backend: b), [Nx.tensor(2, backend: b)], [3])
+      end,
+      false
+    )
   end
 end

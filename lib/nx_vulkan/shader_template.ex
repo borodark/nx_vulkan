@@ -73,82 +73,82 @@ defmodule Nx.Vulkan.ShaderTemplate do
   end
 
   @template ~S"""
-#version 450
+  #version 450
 
-// SYNTHESIZED by Nx.Vulkan.ShaderTemplate for family: {{name}}
-// Generated from a templated leapfrog-chain skeleton. Do not edit;
-// regenerate via Nx.Vulkan.Synthesis.compile/2.
+  // SYNTHESIZED by Nx.Vulkan.ShaderTemplate for family: {{name}}
+  // Generated from a templated leapfrog-chain skeleton. Do not edit;
+  // regenerate via Nx.Vulkan.Synthesis.compile/2.
 
-layout (local_size_x = 256) in;
+  layout (local_size_x = 256) in;
 
-layout (push_constant) uniform Push {
-    uint  n;
-    uint  K;
-    float eps;
-{{push_fields}}
-} pc;
+  layout (push_constant) uniform Push {
+      uint  n;
+      uint  K;
+      float eps;
+  {{push_fields}}
+  } pc;
 
-layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
-layout (std430, binding = 1) readonly  buffer In_p     { float p_init[]; };
-layout (std430, binding = 2) readonly  buffer In_mass  { float inv_mass[]; };
-layout (std430, binding = 3) writeonly buffer Out_q    { float q_chain[]; };
-layout (std430, binding = 4) writeonly buffer Out_p    { float p_chain[]; };
-layout (std430, binding = 5) writeonly buffer Out_grad { float grad_chain[]; };
-layout (std430, binding = 6) writeonly buffer Out_logp { float logp_chain[]; };
+  layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
+  layout (std430, binding = 1) readonly  buffer In_p     { float p_init[]; };
+  layout (std430, binding = 2) readonly  buffer In_mass  { float inv_mass[]; };
+  layout (std430, binding = 3) writeonly buffer Out_q    { float q_chain[]; };
+  layout (std430, binding = 4) writeonly buffer Out_p    { float p_chain[]; };
+  layout (std430, binding = 5) writeonly buffer Out_grad { float grad_chain[]; };
+  layout (std430, binding = 6) writeonly buffer Out_logp { float logp_chain[]; };
 
-shared float partial[256];
+  shared float partial[256];
 
-void main() {
-    uint i   = gl_GlobalInvocationID.x;
-    uint tid = gl_LocalInvocationIndex;
-    bool in_bounds = (i < pc.n);
+  void main() {
+      uint i   = gl_GlobalInvocationID.x;
+      uint tid = gl_LocalInvocationIndex;
+      bool in_bounds = (i < pc.n);
 
-    float qi = in_bounds ? q_init[i] : 0.0;
-    float pi = in_bounds ? p_init[i] : 0.0;
-    float mi = in_bounds ? inv_mass[i] : 0.0;
+      float qi = in_bounds ? q_init[i] : 0.0;
+      float pi = in_bounds ? p_init[i] : 0.0;
+      float mi = in_bounds ? inv_mass[i] : 0.0;
 
-    for (uint k = 0; k < pc.K; k++) {
-        // Half-step momentum at q
-        {
-{{grad_block}}
-            float p_half = pi + 0.5 * pc.eps * grad_q;
+      for (uint k = 0; k < pc.K; k++) {
+          // Half-step momentum at q
+          {
+  {{grad_block}}
+              float p_half = pi + 0.5 * pc.eps * grad_q;
 
-            // Full-step position
-            qi = qi + pc.eps * mi * p_half;
+              // Full-step position
+              qi = qi + pc.eps * mi * p_half;
 
-            {
-{{grad_block_n}}
-                pi = p_half + 0.5 * pc.eps * grad_qn;
+              {
+  {{grad_block_n}}
+                  pi = p_half + 0.5 * pc.eps * grad_qn;
 
-                if (in_bounds) {
-                    q_chain[k * pc.n + i]    = qi;
-                    p_chain[k * pc.n + i]    = pi;
-                    grad_chain[k * pc.n + i] = grad_qn;
-                }
-            }
-        }
+                  if (in_bounds) {
+                      q_chain[k * pc.n + i]    = qi;
+                      p_chain[k * pc.n + i]    = pi;
+                      grad_chain[k * pc.n + i] = grad_qn;
+                  }
+              }
+          }
 
-        // Output contract: lp_i is evaluated HERE, after `qi` has been
-        // advanced, so logp_chain[k] describes the same state as
-        // q_chain[k]. Moving this block above the update introduces a
-        // one-step lag — see the moduledoc.
-{{logp_block}}
-        partial[tid] = lp_i;
-        barrier();
+          // Output contract: lp_i is evaluated HERE, after `qi` has been
+          // advanced, so logp_chain[k] describes the same state as
+          // q_chain[k]. Moving this block above the update introduces a
+          // one-step lag — see the moduledoc.
+  {{logp_block}}
+          partial[tid] = lp_i;
+          barrier();
 
-        for (uint s = 128u; s > 0u; s /= 2u) {
-            if (tid < s) partial[tid] += partial[tid + s];
-            barrier();
-        }
+          for (uint s = 128u; s > 0u; s /= 2u) {
+              if (tid < s) partial[tid] += partial[tid + s];
+              barrier();
+          }
 
-        if (tid == 0u) {
-            logp_chain[k] = {{logp_final}};
-        }
+          if (tid == 0u) {
+              logp_chain[k] = {{logp_final}};
+          }
 
-        barrier();
-    }
-}
-"""
+          barrier();
+      }
+  }
+  """
 
   @doc """
   Render a `%FamilySpec{}` to GLSL source.

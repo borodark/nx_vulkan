@@ -29,17 +29,82 @@ defmodule Nx.Vulkan.PadTest do
     t = Macro.escape(type)
 
     describe "pad #{inspect(type)} on GPU" do
-      test "1d low/high edge", do: check(fn b -> Nx.pad(Nx.iota({4}, type: unquote(t), backend: b), pv(unquote(t), b), [{2, 1, 0}]) end, true)
-      test "2d asymmetric", do: check(fn b -> Nx.pad(Nx.iota({2, 3}, type: unquote(t), backend: b), pv(unquote(t), b), [{1, 0, 0}, {0, 2, 0}]) end, true)
-      test "1d interior", do: check(fn b -> Nx.pad(Nx.iota({3}, type: unquote(t), backend: b), pv(unquote(t), b), [{0, 0, 2}]) end, true)
-      test "1d negative crop", do: check(fn b -> Nx.pad(Nx.iota({5}, type: unquote(t), backend: b), pv(unquote(t), b), [{-1, -1, 0}]) end, true)
-      test "3d edge + interior mix", do: check(fn b -> Nx.pad(Nx.iota({2, 2, 2}, type: unquote(t), backend: b), pv(unquote(t), b), [{1, 0, 0}, {0, 1, 1}, {0, 0, 0}]) end, true)
-      test "nonzero pad value", do: check(fn b -> Nx.pad(Nx.iota({3}, type: unquote(t), backend: b), Nx.tensor(7, type: unquote(t), backend: b), [{1, 1, 0}]) end, true)
+      test "1d low/high edge",
+        do:
+          check(
+            fn b ->
+              Nx.pad(Nx.iota({4}, type: unquote(t), backend: b), pv(unquote(t), b), [{2, 1, 0}])
+            end,
+            true
+          )
+
+      test "2d asymmetric",
+        do:
+          check(
+            fn b ->
+              Nx.pad(Nx.iota({2, 3}, type: unquote(t), backend: b), pv(unquote(t), b), [
+                {1, 0, 0},
+                {0, 2, 0}
+              ])
+            end,
+            true
+          )
+
+      test "1d interior",
+        do:
+          check(
+            fn b ->
+              Nx.pad(Nx.iota({3}, type: unquote(t), backend: b), pv(unquote(t), b), [{0, 0, 2}])
+            end,
+            true
+          )
+
+      test "1d negative crop",
+        do:
+          check(
+            fn b ->
+              Nx.pad(Nx.iota({5}, type: unquote(t), backend: b), pv(unquote(t), b), [{-1, -1, 0}])
+            end,
+            true
+          )
+
+      test "3d edge + interior mix",
+        do:
+          check(
+            fn b ->
+              Nx.pad(Nx.iota({2, 2, 2}, type: unquote(t), backend: b), pv(unquote(t), b), [
+                {1, 0, 0},
+                {0, 1, 1},
+                {0, 0, 0}
+              ])
+            end,
+            true
+          )
+
+      test "nonzero pad value",
+        do:
+          check(
+            fn b ->
+              Nx.pad(
+                Nx.iota({3}, type: unquote(t), backend: b),
+                Nx.tensor(7, type: unquote(t), backend: b),
+                [{1, 1, 0}]
+              )
+            end,
+            true
+          )
     end
   end
 
   @tag :host_fallback_expected
   test "u8 pad falls back but stays correct" do
-    check(fn b -> Nx.pad(Nx.iota({3}, type: {:u, 8}, backend: b), Nx.tensor(0, type: {:u, 8}, backend: b), [{1, 1, 0}]) end, false)
+    check(
+      fn b ->
+        Nx.pad(Nx.iota({3}, type: {:u, 8}, backend: b), Nx.tensor(0, type: {:u, 8}, backend: b), [
+          {1, 1, 0}
+        ])
+      end,
+      false
+    )
   end
 end

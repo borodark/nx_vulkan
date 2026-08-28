@@ -207,7 +207,9 @@ defmodule Nx.Vulkan.VulkanoBackendTest do
     end
 
     test "transpose 2D [1,0] fast path" do
-      a = v(Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], type: :f32, backend: Nx.BinaryBackend))
+      a =
+        v(Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], type: :f32, backend: Nx.BinaryBackend))
+
       r = Nx.transpose(a)
       assert Nx.shape(r) == {2, 3}
       assert Nx.to_flat_list(r) == [1.0, 3.0, 5.0, 2.0, 4.0, 6.0]
@@ -217,7 +219,15 @@ defmodule Nx.Vulkan.VulkanoBackendTest do
   describe "matmul (dot rank-2 f32 fast path)" do
     test "{2,3} @ {3,2}" do
       a = v(Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], type: :f32, backend: Nx.BinaryBackend))
-      b = v(Nx.tensor([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]], type: :f32, backend: Nx.BinaryBackend))
+
+      b =
+        v(
+          Nx.tensor([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+            type: :f32,
+            backend: Nx.BinaryBackend
+          )
+        )
+
       r = Nx.dot(a, b)
       # Expected: [[58, 64], [139, 154]]
       assert Nx.to_flat_list(r) == [58.0, 64.0, 139.0, 154.0]
@@ -233,13 +243,23 @@ defmodule Nx.Vulkan.VulkanoBackendTest do
 
   describe "matmul (dot rank-2 f64 fast path)" do
     test "{3,4} @ {4,2} — exact for small dims" do
-      a = v(Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], type: :f64, backend: Nx.BinaryBackend))
+      a =
+        v(
+          Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
+            type: :f64,
+            backend: Nx.BinaryBackend
+          )
+        )
+
       b = v(Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]], type: :f64, backend: Nx.BinaryBackend))
       r = Nx.dot(a, b)
-      expected = Nx.dot(
-        Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], type: :f64),
-        Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]], type: :f64)
-      )
+
+      expected =
+        Nx.dot(
+          Nx.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], type: :f64),
+          Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]], type: :f64)
+        )
+
       assert Nx.to_flat_list(r) == Nx.to_flat_list(expected)
       assert Nx.shape(r) == {3, 2}
       assert Nx.type(r) == {:f, 64}

@@ -102,7 +102,9 @@ defmodule Nx.Vulkan.Codegen do
 
   defp fusable_node?(%T{data: %Expr{op: op, args: [a]}, type: type, shape: s}, out_shape, type)
        when is_map_key(@unary_ops, op),
-       do: fusable_op?(op, type) and broadcasts_to?(s, out_shape) and fusable_node?(a, out_shape, type)
+       do:
+         fusable_op?(op, type) and broadcasts_to?(s, out_shape) and
+           fusable_node?(a, out_shape, type)
 
   defp fusable_node?(%T{data: %Expr{op: op, args: [a, b]}, type: type, shape: s}, out_shape, type)
        when is_map_key(@binary_ops, op),
@@ -139,7 +141,12 @@ defmodule Nx.Vulkan.Codegen do
   def emit_elementwise(%T{} = expr) do
     inputs = param_inputs(expr)
     {glsl, _meta} = emit_region(expr, inputs)
-    {glsl, %{param_order: Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end), n_inputs: length(inputs)}}
+
+    {glsl,
+     %{
+       param_order: Enum.map(inputs, fn {{:param, pidx}, _} -> pidx end),
+       n_inputs: length(inputs)
+     }}
   end
 
   @doc """
@@ -250,8 +257,14 @@ defmodule Nx.Vulkan.Codegen do
 
     temps = Enum.map_join(temp_lines, "\n", &("            " <> &1))
 
-    %{acc_type: acc_type, init: init, shared_init: shared_init, accumulate: accumulate,
-      combine: combine, store: base_store} = reduce_kind(reduce_op, root, type)
+    %{
+      acc_type: acc_type,
+      init: init,
+      shared_init: shared_init,
+      accumulate: accumulate,
+      combine: combine,
+      store: base_store
+    } = reduce_kind(reduce_op, root, type)
 
     store = if scale, do: "(#{base_store}) / #{glsl_lit(scale, type)}", else: base_store
 

@@ -414,7 +414,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-
   # Broadcasting elementwise binary (rank <= 4) — keeps bias-add / scaling /
   # relu-via-max on the GPU instead of host-falling-back.
   @bcast_binary_f64_spv Path.expand(
@@ -505,7 +504,6 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp pow_ok_bcast?({:s, 32}, 4, b), do: nonneg_exponent?(b)
   defp pow_ok_bcast?({:u, 32}, 4, _b), do: true
   defp pow_ok_bcast?(_type, 4, _b), do: false
-
 
   for {op, code} <- @binary_ops do
     @impl true
@@ -1394,8 +1392,9 @@ defmodule Nx.Vulkan.VulkanoBackend do
         hi = List.last(sorted)
 
         if sorted == Enum.to_list(lo..hi//1) do
-          {:ok, {prod.(Enum.take(dims, lo)), prod.(Enum.slice(dims, lo..hi)),
-           prod.(Enum.drop(dims, hi + 1))}}
+          {:ok,
+           {prod.(Enum.take(dims, lo)), prod.(Enum.slice(dims, lo..hi)),
+            prod.(Enum.drop(dims, hi + 1))}}
         else
           :fallback
         end
@@ -2741,7 +2740,7 @@ defmodule Nx.Vulkan.VulkanoBackend do
 
     cond do
       word_copyable?(type) and out_rank >= 1 and out_rank <= 4 and in_rank <= 4 and
-          match?(%__MODULE__{}, t.data) and t.type == type ->
+        match?(%__MODULE__{}, t.data) and t.type == type ->
         gpu_broadcast(out, t, shape, axes, @broadcast_nd_spv)
 
       true ->

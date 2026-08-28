@@ -1311,7 +1311,10 @@ defmodule Nx.Vulkan.IntegerKernelsTest do
       # -808182895. `ipow` accumulates in `int` and wraps identically; a wider
       # accumulator would give the mathematically nicer answers and the wrong
       # ones — the same argument reduce_axis_s32.comp makes for its accumulator.
-      assert_parity(fn t -> Nx.pow(t.([2, 3, 2, 0, -2, -2], {:s, 32}), t.([4, 20, 32, 0, 3, 2], {:s, 32})) end)
+      assert_parity(fn t ->
+        Nx.pow(t.([2, 3, 2, 0, -2, -2], {:s, 32}), t.([4, 20, 32, 0, 3, 2], {:s, 32}))
+      end)
+
       assert_parity(fn t -> Nx.pow(t.([1, 2, 3], {:s, 32}), 2) end)
     end
 

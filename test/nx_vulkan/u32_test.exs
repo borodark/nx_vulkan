@@ -58,8 +58,18 @@ defmodule Nx.Vulkan.U32Test do
   defp t(list, b), do: Nx.tensor(list, type: {:u, 32}, backend: b)
 
   describe "elementwise binary, same shape" do
-    for op <- [:add, :subtract, :multiply, :max, :min, :quotient, :remainder,
-               :bitwise_and, :bitwise_or, :bitwise_xor] do
+    for op <- [
+          :add,
+          :subtract,
+          :multiply,
+          :max,
+          :min,
+          :quotient,
+          :remainder,
+          :bitwise_and,
+          :bitwise_or,
+          :bitwise_xor
+        ] do
       test "#{op}" do
         op = unquote(op)
         check(fn b -> apply(Nx, op, [t(@big, b), t(@div, b)]) end)
@@ -75,7 +85,10 @@ defmodule Nx.Vulkan.U32Test do
       check(fn b -> Nx.left_shift(t(@big, b), t(shifts, b)) end)
 
       assert Nx.to_flat_list(
-               Nx.right_shift(t([4_294_967_295, 2_147_483_648], VulkanoBackend), t([1, 1], VulkanoBackend))
+               Nx.right_shift(
+                 t([4_294_967_295, 2_147_483_648], VulkanoBackend),
+                 t([1, 1], VulkanoBackend)
+               )
              ) == [2_147_483_647, 1_073_741_824]
     end
 
@@ -162,6 +175,7 @@ defmodule Nx.Vulkan.U32Test do
     test "reduce_max / reduce_min compare UNSIGNED" do
       check(fn b -> Nx.reduce_max(t(@big, b)) end)
       check(fn b -> Nx.reduce_min(t(@big, b)) end)
+
       assert Nx.to_flat_list(Nx.reduce_max(t([3_000_000_000, 1], VulkanoBackend))) ==
                [3_000_000_000]
     end

@@ -30,11 +30,16 @@ defmodule Nx.Vulkan.SynthesisTest do
 
       # SPIR-V binaries start with the magic word 0x07230203.
       <<magic::little-32, _rest::binary>> = File.read!(spv_path)
-      assert magic == 0x07230203, "not a SPIR-V file (got magic 0x#{Integer.to_string(magic, 16)})"
+
+      assert magic == 0x07230203,
+             "not a SPIR-V file (got magic 0x#{Integer.to_string(magic, 16)})"
     end
 
     test "Gamma + Lognormal also compile cleanly" do
-      for spec_fn <- [&Nx.Vulkan.ChainShaderSpecs.gamma/0, &Nx.Vulkan.ChainShaderSpecs.lognormal/0] do
+      for spec_fn <- [
+            &Nx.Vulkan.ChainShaderSpecs.gamma/0,
+            &Nx.Vulkan.ChainShaderSpecs.lognormal/0
+          ] do
         {:ok, path} = Synthesis.compile(spec_fn.())
         assert File.exists?(path)
       end

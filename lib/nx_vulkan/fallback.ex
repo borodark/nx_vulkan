@@ -365,7 +365,9 @@ defmodule Nx.Vulkan.Fallback do
   Exposed so a test can assert on it — an allowlist that only exists in a
   module attribute is one nobody reviews.
   """
-  @spec allowlist() :: [{{atom(), arity() | module()}, :always | {:rank_at_least, pos_integer()}, String.t()}]
+  @spec allowlist() :: [
+          {{atom(), arity() | module()}, :always | {:rank_at_least, pos_integer()}, String.t()}
+        ]
   def allowlist, do: @allowlist
 
   @doc """

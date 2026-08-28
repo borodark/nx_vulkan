@@ -96,7 +96,9 @@ defmodule Nx.Vulkan.Compiler do
         fn [params] -> [run_fused(spv_path, param_order, template, params)] end
 
       {:ok_reduce, spv_path, param_order, {outer, rsize, inner}, template} ->
-        debug(fn -> "FUSED reduce: root=#{op_of(result)} n_in=#{length(param_order)} o/r/i=#{outer}/#{rsize}/#{inner}" end)
+        debug(fn ->
+          "FUSED reduce: root=#{op_of(result)} n_in=#{length(param_order)} o/r/i=#{outer}/#{rsize}/#{inner}"
+        end)
 
         fn [params] ->
           [run_fused_reduce(spv_path, param_order, {outer, rsize, inner}, template, params)]
@@ -109,7 +111,10 @@ defmodule Nx.Vulkan.Compiler do
             fn [params] -> [run_plan(stages, out_sid, template, params)] end
 
           {:ok_plan_multi, stages, out_refs, template} ->
-            debug(fn -> "MULTISTAGE(multi): #{length(stages)} stages, #{length(out_refs)} outputs" end)
+            debug(fn ->
+              "MULTISTAGE(multi): #{length(stages)} stages, #{length(out_refs)} outputs"
+            end)
+
             fn [params] -> [run_plan_multi(stages, out_refs, template, params)] end
 
           :fallback ->
@@ -412,7 +417,13 @@ defmodule Nx.Vulkan.Compiler do
     {in_ref, state} = plan_node(inp, state)
     {m, n} = {elem(inp.shape, 0), elem(inp.shape, 1)}
     {sid, state} = new_sid(state)
-    state = add_stage(state, {:transpose, sid, in_ref, m, n, ebytes(node.type), transpose_spv(node.type)})
+
+    state =
+      add_stage(
+        state,
+        {:transpose, sid, in_ref, m, n, ebytes(node.type), transpose_spv(node.type)}
+      )
+
     ref = {:stage, sid}
     {ref, memoize(state, node, ref)}
   end
@@ -582,7 +593,12 @@ defmodule Nx.Vulkan.Compiler do
   # GPU conv path covers: f32 in/kernel/out, spatial rank 1..3, no feature/batch
   # grouping, identity permutations. Anything else throws :unschedulable and the
   # whole graph falls back to the Evaluator (still correct).
-  defp conv_schedulable!(%T{type: t}, %T{type: it, shape: ishape}, %T{type: kt, shape: kshape}, opts) do
+  defp conv_schedulable!(
+         %T{type: t},
+         %T{type: it, shape: ishape},
+         %T{type: kt, shape: kshape},
+         opts
+       ) do
     rank = tuple_size(ishape)
     sr = rank - 2
 
@@ -706,7 +722,11 @@ defmodule Nx.Vulkan.Compiler do
   # reduce stage: parallel workgroup-per-slot tree reduce (dispatch_generated_reduce)
   # over the fusable inner chain, writing outer*inner slots. Inputs may be earlier
   # stages' buffers.
-  defp exec_stage({:reduce, sid, spv, input_refs, {outer, rsize, inner}, n_out, eb}, values, params) do
+  defp exec_stage(
+         {:reduce, sid, spv, input_refs, {outer, rsize, inner}, n_out, eb},
+         values,
+         params
+       ) do
     {in_refs, values} = Enum.map_reduce(input_refs, values, &resolve(&1, &2, params))
     {:ok, out} = NativeV.buf_alloc(n_out * eb)
     :ok = NativeV.dispatch_generated_reduce(out, in_refs, outer, rsize, inner, spv)

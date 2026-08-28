@@ -31,7 +31,6 @@ defmodule Nx.Vulkan.NativeV do
   def leapfrog_chain_synth_f64(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
 
-
   # -- Buffer lifecycle ---------------------------------------------------
 
   @doc """

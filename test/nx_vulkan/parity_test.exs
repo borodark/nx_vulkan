@@ -298,12 +298,14 @@ defmodule Nx.Vulkan.ParityTest do
   describe "parity check" do
     @tag :vulkano_only
     test "vulkano: run all non-skip fixtures, write JSON report" do
-      results = Enum.flat_map(@fixtures, fn entry ->
-        module = Map.get(entry, :module, Nx)
-        Enum.map(entry.cases, fn case_spec ->
-          run_vulkano_case(module, entry.callback, case_spec)
+      results =
+        Enum.flat_map(@fixtures, fn entry ->
+          module = Map.get(entry, :module, Nx)
+
+          Enum.map(entry.cases, fn case_spec ->
+            run_vulkano_case(module, entry.callback, case_spec)
+          end)
         end)
-      end)
 
       report = build_report("vulkano-only", results)
       out_path = report_path("vulkano-only")
@@ -320,18 +322,20 @@ defmodule Nx.Vulkan.ParityTest do
         end)
 
       assert regressions == [],
-        "regressions on expected-pass callbacks: #{inspect(Enum.map(regressions, & &1.callback))}"
+             "regressions on expected-pass callbacks: #{inspect(Enum.map(regressions, & &1.callback))}"
     end
 
     @tag :parity
     test "parity: run all non-skip fixtures against EXLA reference (super-io only)" do
       if exla_available?() do
-        results = Enum.flat_map(@fixtures, fn entry ->
-          module = Map.get(entry, :module, Nx)
-          Enum.map(entry.cases, fn case_spec ->
-            run_parity_case(module, entry.callback, case_spec)
+        results =
+          Enum.flat_map(@fixtures, fn entry ->
+            module = Map.get(entry, :module, Nx)
+
+            Enum.map(entry.cases, fn case_spec ->
+              run_parity_case(module, entry.callback, case_spec)
+            end)
           end)
-        end)
 
         report = build_report("parity-vs-exla", results)
         out_path = report_path("parity-vs-exla")
@@ -341,7 +345,7 @@ defmodule Nx.Vulkan.ParityTest do
         failed = Enum.filter(results, fn r -> r.actual_status == :fail end)
 
         assert failed == [],
-          "parity failures: #{inspect(Enum.map(failed, & &1.callback))}"
+               "parity failures: #{inspect(Enum.map(failed, & &1.callback))}"
       else
         IO.puts("EXLA not available — skipping parity-vs-exla")
       end
@@ -366,8 +370,10 @@ defmodule Nx.Vulkan.ParityTest do
       cond do
         case_spec.expected_status in [:skip, :skip_unimplemented] ->
           :skipped
+
         exla_status == :ok and vulk_status == :ok ->
           if within_tolerance?(exla_result, vulk_result), do: :ok, else: :fail
+
         true ->
           :error
       end
@@ -436,8 +442,9 @@ defmodule Nx.Vulkan.ParityTest do
   defp within_tolerance?(a, b) do
     tol = Map.get(@tolerance, Nx.type(a), 1.0e-6)
 
-    if Nx.shape(a) != Nx.shape(b), do: false,
-    else: max_abs_diff(a, b) <= tol
+    if Nx.shape(a) != Nx.shape(b),
+      do: false,
+      else: max_abs_diff(a, b) <= tol
   end
 
   defp max_abs_diff(a, b) do
@@ -494,7 +501,11 @@ defmodule Nx.Vulkan.ParityTest do
   end
 
   defp vulkano_commit do
-    case System.cmd("git", ["-C", Application.app_dir(:nx_vulkan, ".."), "log", "-1", "--format=%h"], stderr_to_stdout: true) do
+    case System.cmd(
+           "git",
+           ["-C", Application.app_dir(:nx_vulkan, ".."), "log", "-1", "--format=%h"],
+           stderr_to_stdout: true
+         ) do
       {sha, 0} -> String.trim(sha)
       _ -> "unknown"
     end
