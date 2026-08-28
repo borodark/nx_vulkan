@@ -143,6 +143,27 @@ above, so the fused and eager paths return the identical f32-precision value.
 Verified: `Nx.log(f64 2.0)` gives `0.6931471824645996` through both paths, where
 Erlang gives `0.6931471805599453`.
 
+**The clearest way to see it: the same call on another backend.** Measured on
+the Jetson, the one box in this project's fleet carrying both backends. Same op,
+same dtype, x = 1.5, f64:
+
+| op | this backend | EXLA (XLA-CPU) |
+|---|---|---|
+| `Nx.log` | 1.18e-7 | **0.0** — bit-identical to `:math.log/1` |
+| `Nx.exp` | 2.10e-8 | **0.0** |
+| `Nx.tanh` | 1.56e-8 | 1.23e-16 (1 ulp) |
+| `Nx.sigmoid` | 5.22e-9 | **0.0** |
+
+`Nx.type/1` reports `{:f, 64}` in every cell. Nine orders of magnitude, same
+call, same dtype, only the backend differs.
+
+**The figures above are hardware-independent.** Verified on three
+architectures — Ampere (RTX 3060 Ti), Kepler (GT 650M and GT 750M) and Maxwell
+(Tegra X1) — agreeing not merely to the printed precision but bit-for-bit on the
+raw doubles. That follows from the mechanism: the loss is imposed by the shader
+casting to `float`, and every driver's f32 `exp`/`log`/`tanh` lands on the same
+value.
+
 **Consequences worth knowing.** Anything built on these inherits the loss —
 a Normal log-density's `log(sigma)` term is f32-accurate however carefully the
 rest is written. The error is not a constant, so unlike a fixed offset it does
