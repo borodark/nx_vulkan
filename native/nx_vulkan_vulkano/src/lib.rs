@@ -425,9 +425,9 @@ fn upload_buffer(
 /// within 2x on the "before" and to the microsecond on the "after", so the
 /// neighbour did not move the result — but the reader should know it was there.
 ///
-///     size      GT 650M          GT 750M          RTX 3060 Ti
-///     1 MiB     0.063 -> 0.011   0.038 -> 0.006   0.30 -> 0.007
-///     16 MiB    0.934 -> 0.011   0.756 -> 0.006   5.08 -> 0.008
+///     size      GT 650M          GT 750M          RTX 3060 Ti      Tegra X1
+///     1 MiB     0.063 -> 0.011   0.038 -> 0.006   0.30 -> 0.007    0.39 -> 0.10
+///     16 MiB    0.934 -> 0.011   0.756 -> 0.006   5.08 -> 0.008    3.71 -> 0.10
 ///
 /// **Do not quote the Ampere "before" figure as the behaviour.** At 16 MiB the
 /// old path costs 5.1 ms there and only 0.76-0.93 ms on the Keplers — the
@@ -439,11 +439,31 @@ fn upload_buffer(
 /// O(n) host write becoming an O(1) allocation — generalises; the absolute
 /// saving does not.
 ///
-/// **There is a cliff at 32 MiB.** Below it the new path is flat at ~0.006 ms;
-/// at and above, vulkano stops suballocating and issues a dedicated
-/// `vkAllocateMemory` per buffer, which then dominates — 64 MiB measures 43 ms
-/// new against 98 ms old on a 750M. Still a ~2x win, but not the three orders
-/// the 16 MiB row suggests.
+/// **The unified-memory box wins LEAST, which is the opposite of what was
+/// predicted.** The Jetson saves 3.61 ms at 16 MiB (37x) against Ampere's
+/// 5.07 ms (635x) — smaller absolutely AND proportionally. The reasoning that
+/// it would win most was "slowest memory in the fleet", and the control
+/// disproves it: `buf_upload` IS slower there (6.0 ms vs Ampere's 3.6 at
+/// 16 MiB), so the memory is slow as expected — but the ZERO-FILL is FASTER
+/// (3.71 vs 5.08). On Tegra the buffer is DEVICE_LOCAL|HOST_VISIBLE|
+/// HOST_COHERENT, so writing a constant into LPDDR4 is cheaper than Ampere's
+/// host write across PCIe into BAR memory. Unified memory made the OLD path
+/// cheap, so there was less to reclaim. The bottleneck this change removes was
+/// never memory speed; it was the bus.
+///
+/// **There is a cliff at exactly 32 MiB**, confirmed on two architectures with
+/// a fine sweep — a 1/4/16/64 grid straddles it invisibly. Below it the new
+/// path is genuinely flat and O(1); at and above, vulkano stops suballocating
+/// from a pooled block and issues a dedicated `vkAllocateMemory`, after which
+/// the driver commits and zeroes pages itself at ~0.83 ms/MiB on Tegra — an
+/// O(n) cost outside this code's control.
+///
+///     Tegra X1, MiB:    8      16     24     31     32       48     64
+///     buf_alloc  ms:    0.09   0.12   0.14   0.12   26.98    39.69  52.92
+///     old path   ms:    2.94   3.71   5.38   6.70   55.87    83.27  110.58
+///
+/// Still a ~2x win above the cliff, but **"O(1) allocation" is only true below
+/// 32 MiB.** Do not quote the 16 MiB ratio at large sizes.
 ///
 /// SAFE ONLY BECAUSE THE SHADERS WERE AUDITED. Every kernel that writes its
 /// output must cover the ENTIRE allocation, including any padding the caller

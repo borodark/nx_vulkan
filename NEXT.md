@@ -1002,6 +1002,63 @@ straight into at `dot/7`).
 
 ---
 
+### 1.4a The uninitialised allocator — and a prediction the fleet falsified
+
+`084b937`. `alloc_buffer` zero-filled every output buffer through
+`std::iter::repeat(0u8)` — a full host-side write, paid by every op that
+produces an output, for bytes a shader was about to overwrite.
+`Buffer::new_slice` skips it.
+
+**The audit was the work, and the fleet turned it from reasoned into verified.**
+All 87 shaders were checked for two hazards: accumulating into the output, or
+writing fewer bytes than allocated. Exactly four are in the first class —
+`allany_{f32,f64,s32,u8}`, which `atomicOr` one thread per slot into a packed u8
+mask — and they use a new `buf_alloc_zeroed/1`.
+
+What made it evidence rather than argument is what the Keplers did with it. A
+clean run proves little here, because freshly mapped pages are OS-zeroed: a
+shader wrongly depending on zeroed memory passes cold and fails once blocks
+recycle. So they built a control first, **and their first poisoning scheme was
+vacuous** — `buf_upload` buffers land in a different suballocator pool and came
+back 0/24 dirty. Only after finding a scheme that produced 40/40 dirty
+reallocations did they trust the result: ~4,275 poisoned operations, zero
+defects, plus direct byte-level downloads of the PADDED buffers confirming every
+tail lane reads zero. The Jetson repeated it on unified memory with 6 x 32 MiB
+`0xFF` blocks churned before every case. Also clean.
+
+#### The prediction was wrong, and the reason is the interesting part
+
+I wrote that the Jetson would show the win most, having the slowest memory in
+the fleet. **It shows it least** — 3.61 ms saved at 16 MiB (37x) against
+Ampere's 5.07 ms (635x), smaller both absolutely and proportionally.
+
+The control disproves the reasoning cleanly. `buf_upload` IS slower on Tegra
+(6.0 ms vs Ampere's 3.6 at 16 MiB), so the memory really is slow. But the
+ZERO-FILL is FASTER there (3.71 vs 5.08). On Tegra the buffer is
+`DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT`, so writing a constant into LPDDR4
+costs less than Ampere's host write across PCIe into BAR memory.
+
+**Unified memory made the OLD path cheap, so there was less to reclaim.** The
+bottleneck this change removes was never memory speed — it was the bus. Which is
+also why the unified-memory optimisation I originally went looking for did not
+exist: there was no staging copy to eliminate, because `HOST_SEQUENTIAL_WRITE`
+already writes straight into mapped memory.
+
+#### And a cliff a coarse grid hides
+
+Confirmed on two architectures by a fine sweep. Below 32 MiB the new path is
+flat and O(1); at and above, vulkano stops suballocating from a pooled block and
+issues a dedicated `vkAllocateMemory`, after which the driver commits and zeroes
+pages itself at ~0.83 ms/MiB on Tegra — outside this code's control.
+
+    Tegra X1, MiB:    8      16     24     31     32       48     64
+    buf_alloc  ms:    0.09   0.12   0.14   0.12   26.98    39.69  52.92
+    old path   ms:    2.94   3.71   5.38   6.70   55.87    83.27  110.58
+
+Still ~2x above the cliff, but **"O(1) allocation" is only true below 32 MiB**,
+and a 1/4/16/64 benchmark grid straddles it invisibly. Both boxes that measured
+it found it independently.
+
 ### 1.5 `indexed_put`'s duplicate-index race — and why "conforming" was not enough
 
 Closed in `d548c85`. Worth its own section because **the decision was harder than
