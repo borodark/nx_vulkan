@@ -2626,18 +2626,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # distinct — which is the overwhelming majority of callers, and every caller
   # inside this backend — is paying for a guarantee they cannot observe.
   #
-  # Measured on the RTX 3060 Ti, ordered vs racing, same op:
+  # Measured racing vs ordered on the two Keplers, which were verifiably IDLE
+  # (load 0.00-0.18 before and during). Median ms:
   #
-  #     case                       racing   ordered    delta
-  #     tiny target, 4 updates      0.191    0.207    +0.016 ms
-  #     1M target, 4 updates        3.066    4.427    +1.36 ms
-  #     1M target, 10k updates      1.856    3.455    +1.60 ms
-  #     4M target, 100k updates    11.158   15.407    +4.25 ms
+  #     case                      GT 650M           GT 750M
+  #     tiny target(8), 4 upd     0.266 -> 0.290    0.144 -> 0.189
+  #     1M target, 4 upd          1.181 -> 1.981    1.053 -> 1.860
+  #     1M target, 10k upd        1.278 -> 2.427    1.110 -> 2.208
+  #     4M target, 100k upd       4.830 -> 10.502   4.519 -> 10.672
   #
   # The overhead tracks the TARGET size, not the update count, because the
-  # scratch buffer is one u32 per target element and has to be zeroed. That is
-  # the shape of cost to expect: scattering four values into a large tensor pays
-  # the most, proportionally.
+  # scratch buffer is one u32 per target element and has to be zeroed:
+  # ~0.8 ns per target element at 1M and ~1.5 ns at 4M, on both boxes.
+  # Scattering four values into a large tensor pays the most, proportionally.
+  #
+  # THE KEPLER NUMBERS ARE THE TRUSTWORTHY ONES. An earlier version of this
+  # comment quoted an Ampere table (racing 11.158 ms at 4M/100k) taken WITHOUT
+  # checking the box's load. Re-measured with the fleet's own harness while
+  # super-io sat at load 4.65 with another beam.smp at 337% CPU, the same
+  # benchmark reported ordered as 0.179 ms FASTER than racing on one row —
+  # which is not a result, it is noise. Both readings are unusable. If an Ampere
+  # figure is ever needed, take it on a quiet box and say so; contention here is
+  # not hypothetical and this project has a standing rule to check `uptime`
+  # before AND during any timing, which the original run did not.
   defp scatter_ordered?, do: System.get_env("NXV_SCATTER_ORDERED") != "0"
 
   defp integer_type?({:s, _}), do: true

@@ -72,6 +72,21 @@ keep for the second time: it caught two mistagged tests that turned
 and check `function_exported?` rather than trusting a green compile, because
 `mix` will print "Generated nx_vulkan app" without rebuilding the crate.
 
+**AND `function_exported?/3` LIES ON A COLD VM.** It returns `false` for a
+module that has not been loaded yet, and `Application.ensure_all_started(
+:nx_vulkan)` does NOT load `Nx.Vulkan.NativeV`. Reproduced on all three
+architectures. So the check only means anything in this form:
+
+```elixir
+Code.ensure_loaded!(Nx.Vulkan.NativeV)
+function_exported?(Nx.Vulkan.NativeV, :apply_scatter_ordered, 8)
+```
+
+Without the `ensure_loaded!` it reports a stale `.so` on a perfectly good build
+— which is exactly the wrong failure, because it sends you off rebuilding a
+crate that was already fine. Found on the 2026-08-28 fleet run, after this file
+had been recommending the bare check for several rounds.
+
 Push with `git push origin main` — **not** `upstream`, which is the public
 release remote and is deliberately behind. Publishing there is a release
 decision and belongs to the operator (§2).
@@ -789,7 +804,8 @@ scratch — necessary rather than tidy, because this was the first new NIF since
 
 Nothing to report from it, which is the point: five items including a new NIF
 and three new shaders, and the fleet agrees to the digit. Check
-`function_exported?` for a new NIF rather than trusting a green compile — `mix`
+`function_exported?` for a new NIF — AFTER `Code.ensure_loaded!/1`, see §0 —
+rather than trusting a green compile, because `mix`
 will print "Generated nx_vulkan app" without rebuilding the crate.
 
 **First run, 2026-08-22 at `f0d9c96`**, after W5 had gone nine commits on Ampere

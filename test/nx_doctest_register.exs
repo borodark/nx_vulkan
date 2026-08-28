@@ -99,18 +99,28 @@ defmodule Nx.Vulkan.NxDoctestRegister do
   inserted by vulkano's `AutoCommandBufferBuilder`, the same mechanism the FFT
   stages rely on.
 
-  Measured cost on the RTX 3060 Ti, racing vs ordered:
+  Measured cost, racing vs ordered, on the two Keplers — the boxes that were
+  verifiably IDLE (load 0.00-0.18 before and during). Median ms:
 
-  | case | racing | ordered | delta |
-  |---|---:|---:|---:|
-  | tiny target, 4 updates | 0.191 ms | 0.207 ms | +0.016 |
-  | 1M target, 4 updates | 3.066 ms | 4.427 ms | +1.36 |
-  | 1M target, 10k updates | 1.856 ms | 3.455 ms | +1.60 |
-  | 4M target, 100k updates | 11.158 ms | 15.407 ms | +4.25 |
+  | case | GT 650M | GT 750M |
+  |---|---|---|
+  | tiny target(8), 4 updates | 0.266 → 0.290 | 0.144 → 0.189 |
+  | 1M target, 4 updates | 1.181 → 1.981 | 1.053 → 1.860 |
+  | 1M target, 10k updates | 1.278 → 2.427 | 1.110 → 2.208 |
+  | 4M target, 100k updates | 4.830 → 10.502 | 4.519 → 10.672 |
+
+  **An Ampere table previously stood here and has been withdrawn.** It was taken
+  without checking super-io's load. Re-run with the fleet's harness while that
+  box sat at load 4.65 with another `beam.smp` at 337% CPU, the same benchmark
+  reported the ordered path as 0.179 ms FASTER than racing on one row — not a
+  result, noise. Both readings are unusable, and the fleet run is what caught
+  it: a GT 650M does not beat an RTX 3060 Ti 2:1 on the same workload, so the
+  cross-box comparison was the tell.
 
   **The overhead tracks the TARGET size, not the update count**, because the
-  scratch buffer is one u32 per target element and must be zeroed. Scattering
-  four values into a large tensor pays the most, proportionally. `indexed_add`
+  scratch buffer is one u32 per target element and must be zeroed — ~0.8 ns per
+  target element at 1M and ~1.5 ns at 4M, on both Keplers. Scattering four
+  values into a large tensor pays the most, proportionally. `indexed_add`
   is untouched and stays on the one-dispatch path — atomicAdd is commutative, so
   ordering never could reach its answer. `NXV_SCATTER_ORDERED=0` restores the
   racing write for anyone who knows their indices are distinct.
