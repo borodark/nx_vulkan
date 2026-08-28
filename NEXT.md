@@ -576,6 +576,50 @@ pinned test explaining why the guard had to be there.
 
 ### 1.4 The fleet re-verifications, and the one thing they caught
 
+**Fifth run, 2026-08-28 at `d548c85`**, all four boxes, covering the
+deterministic scatter and its new NIF.
+
+| | super-io | jetson | mac-247 | mac-248 |
+|---|---|---|---|---|
+| `mix test --seed 0` | 833 / 837 / 0 | 833 / 837 / 0 | 833 / 837 / 0 | 833 / 837 / 0 |
+| `strict_test.sh` | 0 fail, 153 excl | 0 fail, 153 excl | 0 fail, 153 excl | 0 fail, 153 excl |
+| `doctest_residency.sh` | 755 / 833 (90.6%) | 755 / 833, 78==78 | 755 / 833, 78==78 | 755 / 833, 78==78 |
+| `apply_scatter_ordered/8` | — | exported | exported | exported |
+
+`0da264d` is the current head and changes only comments and this file; the
+`d548c85` result stands for it.
+
+**Three things this run established that the tests alone could not.**
+
+  * **`[0, 50, 60, 0]` on every box**, 10/10 on each Kepler and 5/5 on the
+    Jetson. The updates DESCEND, so a `atomicMax` over VALUES would have
+    answered `[0, 90, 80, 0]`. The implementation really is max-over-ROW-INDEX.
+  * **No flakiness in five runs per box.** The two dispatches and the zero-fill
+    share one command buffer and rely on vulkano's `AutoCommandBufferBuilder`
+    to insert the compute-compute barrier. If that were ineffective on Kepler
+    or Tegra, pass 2 would read a half-written scratch buffer and the symptom
+    would be flakiness, not a clean failure. None appeared. Honest limit: five
+    runs of a 1.7s file is a modest sample for a race — "no flakiness observed",
+    not "barrier proven".
+  * **The full suite completes on the Jetson for the first time.** The
+    `compiler_test.exs` many-slot reduce no longer builds 3 GB on the host, so
+    the box that used to die mid-suite now finishes in 58s with 3.3 GB still
+    free.
+
+**And one thing only the fleet could show.** On both Keplers the RACING arm also
+answers `[0, 50, 60, 0]`, so there the VALUE does not discriminate ordered from
+racing — only the >2x timing gap does. The descending test discriminates the
+IMPLEMENTATION, not which path executed. On Ampere it does both, because that is
+the box whose race resolved the other way.
+
+Two environment findings, both now in the runbook: `function_exported?/3`
+returns false for an unloaded module (see §0), and on the Jetson **neither `mix`
+nor `cargo` is on `PATH` in a non-login shell** — Rustler dies with `:enoent`
+until `~/.cargo/env` is sourced alongside `~/.asdf/asdf.sh`. The Jetson's
+checkout is also left on a DETACHED HEAD at `d548c85` with local `main` still at
+`3a1357c`, so the next run there should `git checkout main` before pulling
+rather than after.
+
 **Fourth run, 2026-08-23 at `92d56cd`**, on both Keplers — and **it caught a
 defect that `mix test` structurally cannot see.**
 
