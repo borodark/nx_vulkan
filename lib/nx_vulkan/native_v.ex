@@ -44,6 +44,22 @@ defmodule Nx.Vulkan.NativeV do
   @doc "Allocate a zero-initialised device buffer of `n_bytes`. Returns `{:ok, ref}`."
   def buf_alloc(_n_bytes), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Allocate a ZERO-FILLED device buffer.
+
+  `buf_alloc/1` does not initialise — zero-filling a buffer a shader is about to
+  overwrite costs a full host-side write (5.1 ms for 16 MiB on an RTX 3060 Ti,
+  as much as uploading real data). Use this variant ONLY for kernels that
+  ACCUMULATE into their output, where the untouched bits must start at 0.
+
+  Today that is the four `allany_*` shaders, which `atomicOr` one thread per
+  slot into a packed u8 mask. See `alloc_buffer` in the Rust crate for the
+  audit that established nothing else needs it — and add to it if you write a
+  kernel that accumulates or writes fewer bytes than the caller allocates.
+  Getting this wrong is silent.
+  """
+  def buf_alloc_zeroed(_n_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc "Read a device buffer back to a host binary. Returns `{:ok, binary}`."
   def buf_download(_ref), do: :erlang.nif_error(:nif_not_loaded)
 

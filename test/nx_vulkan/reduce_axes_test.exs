@@ -150,6 +150,55 @@ defmodule Nx.Vulkan.ReduceAxesTest do
     end
   end
 
+  describe "all / any depend on a ZEROED output buffer" do
+    # `buf_alloc/1` does not initialise its memory — zero-filling a buffer a
+    # shader is about to overwrite costs a full host-side write, and at 16 MiB
+    # that measured 5.1 ms, as much as uploading real data. Every op that
+    # produces an output was paying it.
+    #
+    # `allany_*.comp` is the one exception in the backend: it sets bits with
+    # `atomicOr`, ONE THREAD PER SLOT, so every bit no slot touches must already
+    # be 0. It allocates through `buf_alloc_zeroed/1` for exactly that reason.
+    #
+    # These are the cases where getting it wrong shows. A uniformly-true or
+    # uniformly-false input would pass even with garbage memory, because every
+    # bit gets set or the answer is 0 anyway — so each case below leaves part of
+    # the padded tail word untouched by any slot.
+    for n <- [1, 2, 3, 5, 7, 9, 13] do
+      test "#{n} slots — the padded tail word has lanes no slot writes" do
+        n = unquote(n)
+
+        # Output is n slots of u8, allocated as div(n + 3, 4) * 4 bytes. For
+        # every n above except 4k, the last word has lanes belonging to no slot.
+        build = fn b -> Nx.remainder(Nx.iota({n, 3}, backend: b), 2) end
+
+        for op <- [:all, :any] do
+          got = apply(Nx, op, [build.(VulkanoBackend), [axes: [1]]])
+          ref = apply(Nx, op, [build.(Nx.BinaryBackend), [axes: [1]]])
+
+          assert match?(%VulkanoBackend{}, got.data)
+
+          assert Nx.to_flat_list(got) == Nx.to_flat_list(ref),
+                 "#{op} over #{n} slots disagreed — a non-zeroed atomicOr target is the first thing to check"
+        end
+      end
+    end
+
+    test "a full reduction to one slot, where three tail lanes are untouched" do
+      # The sharpest case: one output slot in a four-byte word, so three
+      # quarters of the allocation is written by nothing.
+      for {input, expected_all, expected_any} <- [
+            {[1, 1, 1], 1, 1},
+            {[1, 0, 1], 0, 1},
+            {[0, 0, 0], 0, 0}
+          ] do
+        t = Nx.tensor(input, backend: VulkanoBackend)
+        assert Nx.to_number(Nx.all(t)) == expected_all
+        assert Nx.to_number(Nx.any(t)) == expected_any
+      end
+    end
+  end
+
   describe "the degenerate runs the old clauses covered" do
     test "all axes collapses to a scalar" do
       check(fn b -> Nx.sum(Nx.iota(@shape, backend: b)) end)

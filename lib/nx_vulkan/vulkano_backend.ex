@@ -2031,7 +2031,17 @@ defmodule Nx.Vulkan.VulkanoBackend do
       n_out = max(byte_size_of(out_shape), 1)
       # u8 out, written as u32 words — pad the buffer to a 4-byte multiple, the
       # same as gpu_compare/5.
-      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc(div(n_out + 3, 4) * 4)
+      #
+      # ZEROED, and this is the one place in the backend that needs it.
+      # `allany_*.comp` sets bits with `atomicOr`, one thread per slot, so every
+      # bit no slot touches must already be 0. `buf_alloc/1` does NOT initialise
+      # — see its note — and atomicOr into uninitialised memory returns garbage
+      # rather than a wrong-but-plausible answer.
+      #
+      # `gpu_compare/5` allocates the same padded shape and does NOT need this:
+      # its shader runs one thread per output WORD and writes each whole,
+      # zeroing the unused lanes in a register.
+      {:ok, out_ref} = Nx.Vulkan.NativeV.buf_alloc_zeroed(div(n_out + 3, 4) * 4)
 
       :ok =
         Nx.Vulkan.NativeV.reduce_axis(out_ref, a_ref, outer, reduce_size, inner, op_code, spv)

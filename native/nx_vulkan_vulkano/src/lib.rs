@@ -408,7 +408,64 @@ fn upload_buffer(
     .map_err(|e| format!("upload buffer: {e}"))
 }
 
+/// Allocate an output buffer WITHOUT initialising it.
+///
+/// This used to zero-fill via `std::iter::repeat(0u8).take(n_bytes)`, which is a
+/// full host-side write of the whole buffer at roughly memory bandwidth —
+/// measured on an RTX 3060 Ti at 5.1 ms for 16 MiB, i.e. as expensive as
+/// uploading real data (3.6 ms) and paid by EVERY op that produces an output,
+/// for bytes a shader is about to overwrite completely.
+///
+/// `Buffer::new_slice` allocates the same memory and skips the fill.
+///
+/// SAFE ONLY BECAUSE THE SHADERS WERE AUDITED. Every kernel that writes its
+/// output must cover the ENTIRE allocation, including any padding the caller
+/// added. Two patterns would break:
+///
+///   * a kernel that ACCUMULATES into its output — `atomicOr` into
+///     uninitialised memory returns garbage, not a wrong-but-plausible number;
+///   * a kernel that writes fewer bytes than the caller allocated, leaving the
+///     padding undefined.
+///
+/// The audit (2026-08-28, all 87 shaders) found exactly four kernels in the
+/// first class — `allany_{f32,f64,s32,u8}`, which `atomicOr` one thread per
+/// slot into a packed u8 mask. Those use `alloc_buffer_zeroed` below.
+///
+/// Nothing is in the second class: every packed-u8 writer (`compare_*`,
+/// `cast_f32_to_u8`, `cast_s32_to_narrow`) runs ONE THREAD PER OUTPUT WORD with
+/// `nwords = (n + 3) / 4`, so the tail word is written whole with its unused
+/// lanes zeroed in a register. `scatter`/`scatter_ordered` accumulate but do not
+/// come through here at all — their output is seeded by `concat_buffers`, and
+/// `scatter_ordered`'s scratch buffer is explicitly `fill_buffer`'d.
+///
+/// **If you add a kernel that accumulates or partially writes, use
+/// `alloc_buffer_zeroed`.** Getting this wrong is silent.
 fn alloc_buffer(
+    alloc: Arc<StandardMemoryAllocator>,
+    n_bytes: usize,
+    usage: BufferUsage,
+) -> Result<Subbuffer<[u8]>, String> {
+    Buffer::new_slice::<u8>(
+        alloc,
+        BufferCreateInfo {
+            usage,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        n_bytes as u64,
+    )
+    .map_err(|e| format!("alloc buffer: {e}"))
+}
+
+/// Allocate an output buffer and zero it — for kernels that ACCUMULATE.
+///
+/// The four `allany_*` shaders `atomicOr` into a packed u8 mask, one thread per
+/// slot, so every bit not set by a slot must start at 0. See `alloc_buffer`.
+fn alloc_buffer_zeroed(
     alloc: Arc<StandardMemoryAllocator>,
     n_bytes: usize,
     usage: BufferUsage,
@@ -426,7 +483,7 @@ fn alloc_buffer(
         },
         std::iter::repeat(0u8).take(n_bytes),
     )
-    .map_err(|e| format!("alloc buffer: {e}"))
+    .map_err(|e| format!("alloc zeroed buffer: {e}"))
 }
 
 fn download_buffer(buf: Subbuffer<[u8]>) -> Result<Vec<u8>, String> {
@@ -946,6 +1003,29 @@ fn buf_alloc<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {
     };
 
     let buf = match alloc_buffer(
+        context.mem_allocator.clone(),
+        n_bytes as usize,
+        BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+    ) {
+        Ok(b) => b,
+        Err(e) => return Ok((atoms::error(), atoms::upload_failed(), e).encode(env)),
+    };
+
+    let tensor = VulkanoTensor { buf, n_bytes };
+    Ok((atoms::ok(), ResourceArc::new(tensor)).encode(env))
+}
+
+/// Allocate a ZERO-FILLED device buffer. Use only for kernels that accumulate
+/// into their output — see `alloc_buffer`'s note. `buf_alloc` above does not
+/// initialise, which is why it is roughly free.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_alloc_zeroed<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let buf = match alloc_buffer_zeroed(
         context.mem_allocator.clone(),
         n_bytes as usize,
         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
