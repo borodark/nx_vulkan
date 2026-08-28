@@ -48,3 +48,12 @@ Cargo.lock
 # Agent worktrees (Claude Code `isolation: worktree`) — scratch checkouts,
 # not repository content.
 /.claude/worktrees/
+
+# Build intermediates. `scripts/build_and_test.sh` compiles each glsl/*.comp to
+# glsl/*.spv and then COPIES it to priv/shaders/, which is the canonical
+# location and the only one lib/nx_vulkan/vulkano_backend.ex resolves. Seventeen
+# of these were tracked, mirroring priv/shaders/ partially and validated by
+# nothing: regenerating only priv/shaders/ would have left them silently stale.
+# Found by the Jetson's shader-reproducibility check on 2026-08-28, which
+# compared them on its own initiative.
+glsl/*.spv
