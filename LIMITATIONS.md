@@ -17,7 +17,7 @@
 > - The `Nx.Vulkan.Backend` (spirit C++) Elixir backend was **dropped**;
 >   references to it below are historical.
 > - Test counts below (e.g. "112/0") are stale: current suite is
->   **843 doctests, 456 tests, 0 failures** on super-io.
+>   **833 doctests, 871 tests, 0 failures** on super-io, both Keplers and the Jetson.
 >
 > The genuinely-still-true limitations (host-fallback long tail: sort,
 > scatter, native linalg; batched/non-2D dot; etc.) remain accurate.
