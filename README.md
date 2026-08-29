@@ -126,9 +126,10 @@ compilation now present in the one place a Vulkan backend can offer it —
 on any GPU with a driver, CUDA or not.
 
 - **Correctness first.** Every fused result is checked exact against
-  `Nx.BinaryBackend`. The suite — **843 doctests, 456 tests, 0 failures**
-  — is green on both a 2012 Kepler (GT 650M, FreeBSD) and a 2021 Ampere
-  (RTX 3060 Ti, Linux), with the f64 fused path active on both. Gradient
+  `Nx.BinaryBackend`. The suite — **833 doctests, 871 tests, 0 failures**
+  — is green on two 2012-era Keplers (GT 650M / GT 750M, FreeBSD), a 2021
+  Ampere (RTX 3060 Ti, Linux) and a Tegra X1 Jetson Nano (unified memory,
+  Ubuntu), with the f64 fused path active on all four. Gradient
   parity and host-fallback counts are asserted, not assumed: `Nx.Defn.grad`
   is compared against `BinaryBackend` op by op, and a CNN training step is
   asserted to leave the GPU exactly once.
@@ -412,13 +413,13 @@ path, and `:host_fallback_open` for real fallbacks that are tracked and open.
 Neither is skipped by a normal `mix test`.
 
 Nx's own doctests run under the ratchet too, minus the ones named in
-`test/nx_doctest_register.exs` — 524 of 843 that still leave the GPU for at
+`test/nx_doctest_register.exs` — 78 of 833 that still leave the GPU for at
 least one op, each line carrying its reason. That makes the share of upstream
 Nx this backend actually computes on-device a number you can print:
 
 ```sh
 sh scripts/doctest_residency.sh
-#=> doctest Nx residency: 319 / 843 (37.8%) run with host fallbacks refused
+#=> doctest Nx residency: 755 / 833 (90.6%) run with host fallbacks refused
 ```
 
 It fails if a doctest not in the register falls back (a regression) *or* if one

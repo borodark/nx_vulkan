@@ -19,7 +19,7 @@ worth doing. Where the two disagree, this one is newer.
 1. **§9 of this document — "contradictory or stale".** Start there, not at the
    top. Seven items, and three of them are numbers you will otherwise trust:
    `README`, `ROADMAP` and `T11` circulate three *different* suite counts, all
-   wrong (actual: **843 doctests, 456 tests**), and `ROADMAP.md` still carries
+   wrong (actual: **833 doctests, 871 tests**), and `ROADMAP.md` still carries
    the pre-reframing performance goal *above* the reach-not-speed paragraph, so
    stopping early gets you the old mission.
 2. **This document**, §1–§8.
@@ -138,7 +138,7 @@ count often means a fix worked and exposed what it was hiding
 monotone-decreasing census would forbid the fixes.
 
 **A `doctest Nx` pass rate measures the wrong property in the normal run.**
-`doctest Nx` passes today (843 doctests, part of a green suite) *while* most of
+`doctest Nx` passes today (833 doctests, part of a green suite) *while* most of
 it runs on the host, because a host fallback returns a bit-identical result. Pass
 rate is an API-completeness signal, not a residency one.
 
@@ -156,10 +156,10 @@ what the number means):
 ```
 NXV_HOST_FALLBACK=raise NXV_DOCTEST_REGISTER=off \
     mix test test/nx_vulkan/nx_doctest_test.exs
-#=> 843 doctests, 524 failures
+#=> 833 doctests, 78 failures
 ```
 
-**319 of 843 (38%) of Nx's own doctests run entirely on the GPU.** That is the
+**755 of 833 (90.6%) of Nx's own doctests run entirely on the GPU.** That is the
 completeness number. It is blunt, it is reproducible in six seconds, it cannot
 be gamed by adding function heads, and it moves only when an op actually reaches
 the device.
@@ -167,18 +167,21 @@ the device.
 Three properties make it the right ratchet:
 
 - **It is honest about the biggest gap.** Nx's doctests are written in
-  `{:s, 32}` — and integer dtypes are precisely where this backend has almost no
-  GPU path (§3.1). The 524 failures are not noise; they are the gap, enumerated
-  by someone else.
+  `{:s, 32}` — and integer dtypes were precisely where this backend had almost
+  no GPU path (§3.1). The 524 failures were not noise; they were the gap,
+  enumerated by someone else. That is what the ratchet was pointed at, and the
+  gap is now mostly closed: s32 and u32 shaders across the elementwise, compare,
+  reduce and argreduce families, narrow ints widening through s32, and **78
+  failures left** where there were 524.
 - **It composes with the existing machinery.** `sh scripts/strict_test.sh` and
   `.github/workflows/strict-fallback.yml` already exist (T3) and already have
   the enforcement primitive.
 - **It exposed how narrow the ratchet was.** Before W2 the green strict run
   reported `843 doctests, 456 tests, 0 failures, **910 excluded**` — roughly 389
   of 1,299 assertions actually running under `:raise`, with the excluded
-  majority being exactly the integer-typed surface where the gap is. A ratchet
-  that excludes the gap is not a ratchet. It now reports **591 excluded**: the
-  319 resident doctests moved into the run.
+  majority being exactly the integer-typed surface where the gap was. A ratchet
+  that excludes the gap is not a ratchet. It now reports **163 excluded**: the
+  resident doctests — 755 of them now — moved into the run.
 
 ### 2.3 The definition of done — **DONE**, `main` @ W2
 
@@ -211,7 +214,7 @@ reason. That is now the state of the tree. The three artefacts:
    coverage would have dropped by 524 doctests. Prefer the register.
 
 2. **A residency rate recorded in CI**, printed by the same job:
-   `sh scripts/doctest_residency.sh` → `319 / 843 (37.8%)`. It fails in both
+   `sh scripts/doctest_residency.sh` → `755 / 833 (90.6%)`. It fails in both
    directions — a doctest not in the register that falls back is a regression, a
    doctest in the register that no longer falls back is a stale entry
    understating the rate — and prints the exact doctest names either way, so the
@@ -557,16 +560,17 @@ W5 is "`@integer_dtype` empties, 409 doctests", W1 and W8 are lines in
 
 ```
 mix test
-#=> 843 doctests, 456 tests, 0 failures        (31.4 s)
+#=> 833 doctests, 871 tests, 0 failures
 
 sh scripts/strict_test.sh
-#=> 843 doctests, 456 tests, 0 failures, 912 excluded    (27.8 s)
+#=> 833 doctests, 871 tests, 0 failures, 163 excluded
 ```
 
-The doctest count is **843**, down from 851 — moving `standard_deviation`,
-`covariance` and `variance` onto the GPU cost their doctests to the `@rounding`
-bucket, because a native f32 divide lands 1 ULP from a correctly-rounded one and
-the doctest compares `inspect` strings. **Expect this to keep happening**; the
+The doctest count is **833**, down from 851 by way of 843 — moving
+`standard_deviation`, `covariance` and `variance` onto the GPU cost their
+doctests to the `@rounding` bucket, because a native f32 divide lands 1 ULP from
+a correctly-rounded one and the doctest compares `inspect` strings. **Expect this
+to keep happening** — and it did, 843 to 833 since this was written; the
 bucket in `test/nx_vulkan/nx_doctest_test.exs` is the place to watch, and
 excepting a function drops *all* of its doctests, not just the one that drifted.
 
@@ -633,8 +637,10 @@ session does not have to rediscover them.
 1. **Three different suite counts are in circulation.** `README.md` says
    "851 doctests, 439 tests"; `ROADMAP.md` and `LIMITATIONS.md` say
    "851 doctests, 415 tests"; `PLAN_AFTER_BACKWARD_PASS.md` T11 says
-   "843 doctests / 423 tests". Measured today: **843 doctests, 456 tests.** All
-   three published figures are stale.
+   "843 doctests / 423 tests". Measured today: **833 doctests, 871 tests.** All
+   three published figures are stale. *(And so was this line's own "measured
+   today" figure, for about a month — a section about counts drifting is not
+   exempt from counts drifting. Re-measured on four boxes 2026-08-29.)*
 2. **`docs/PARITY_STATUS.md`'s central claim is true and useless.** "Every
    `Nx.Backend` callback is implemented" has been true since July while 42 of 96
    dtype × op cells run on the host (§3.1). The document is not wrong; it is
@@ -686,8 +692,10 @@ cannot run EXLA at all, and there the alternative is a pure-BEAM interpreter thi
 backend beats by up to 410×. What makes that reach worth having is
 **completeness**: every Nx op running correctly and on-device, so that a model
 does not silently fall off a two-order-of-magnitude cliff the first time it uses
-an op nobody thought about. Completeness is currently **38%** by the only metric
-that resists gaming — Nx's own doctests under `host_fallback: :raise`, 319 of 843
-— and the largest single gap is that integer dtypes have almost no GPU path at
-all, including in three shaders whose entire job is copying bytes from one index
-to another.
+an op nobody thought about. Completeness is currently **90.6%** by the only
+metric that resists gaming — Nx's own doctests under `host_fallback: :raise`,
+755 of 833. The integer gap that dominated this number is largely closed: s32
+and u32 shaders across the elementwise, compare, reduce and argreduce families,
+with narrow ints widening through s32. What is left is 1- and 2-byte dtypes on
+the word-copy paths, 64-bit integer arithmetic, and the host tail (`sort`,
+`argsort`, linalg, `atan2`).

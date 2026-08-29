@@ -4,7 +4,7 @@
 > it scopes shipped and is on `main`: the name-only Nx.Backend gap is
 > closed, and `conv` + `fft`/`ifft` are native GPU shaders (not "to
 > build"). Beyond parity, the `Nx.Vulkan.Compiler` fusion compiler and
-> native f32 landed. Current suite: **843 doctests, 456 tests, 0 failu0
+> native f32 landed. Current suite: **833 doctests, 871 tests, 0 failures**
 > failures** on the fleet. Kept for historical context — treat as an
 > archive, not a live task.
 
