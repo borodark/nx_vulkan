@@ -1042,6 +1042,39 @@ Re-run under 16 x 8 MiB (40/40 dirty), the Jetson is genuinely clean, so the
 conclusion stands. But it was *unestablished* while this section asserted it, and
 the Kepler result was carrying the claim alone.
 
+**And the cliff is not Tegra's.** The obvious reading of the above is that
+unified memory puts the boundary where it is, so a discrete box would have it
+somewhere else or not at all. Every box was asked, and the answer is a clean
+binary split at exactly 32 MiB with no gradient anywhere:
+
+    box                              6 x 32 MiB    sub-cliff schemes
+    mac-247   GT 650M   Kepler          0/40            40/40
+    mac-248   GT 750M   Kepler          0/40            40/40
+    super-io  RTX 3060  Ampere          0/40            40/40
+    jetson    Tegra X1  unified         0/40            20/20
+
+Different silicon, different drivers, two operating systems, discrete PCIe and
+unified LPDDR4 alike. **32 MiB is vulkano's dedicated-allocation threshold, not a
+memory-architecture artifact** — which means the vacuous scheme was never
+specific to the box that ran it, and any future poisoning attempt sized at the
+cliff is vacuous everywhere. That is the argument for `scripts/poison_control.exs`
+existing at all: the schemes lived in `/tmp` on three machines, so nobody could
+compare them, and the one that could not work looked exactly like the ones that
+could.
+
+**A third vacuity, found three times independently.** The lesson from the concat
+fix was to build test operands by COMPUTING them, because `Nx.tensor/2` uploads
+exact-sized buffers and only kernel-allocated ones carry padding. That lesson
+does not compose with `{:s,64}`: there is no s64 add shader, so `Nx.add` returns
+a host tensor, `all_vulkano?/1` is then false, and `concatenate` declines —
+correctly. All three re-verifying boxes wrote a concat residency assertion the
+assuming way, all three got a false failure on s64, and all three tracked it to
+a missing integer kernel one step upstream rather than to the guard. The
+standing trap: **any future concat test using computed s64 or u64 operands is
+silently vacuous for those types**, because the operands never reach the device.
+`poison_control.exs` had the same flaw and now measures operand residency
+instead of assuming it (`ca74518`).
+
 #### The prediction was wrong, and the reason is the interesting part
 
 I wrote that the Jetson would show the win most, having the slowest memory in
