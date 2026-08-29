@@ -248,25 +248,41 @@ typed_bad =
       _ = churn.()
       :erlang.garbage_collect()
 
-      build = fn b ->
-        x = Nx.tensor(Enum.map(1..n, &rem(&1 * 7, 100)), type: type, backend: b)
-        y = Nx.tensor(Enum.map(1..n, &rem(&1 * 13, 100)), type: type, backend: b)
-        z = Nx.tensor(Enum.map(1..n, &rem(&1 * 29, 100)), type: type, backend: b)
-        Nx.concatenate([x, y, z])
+      operands = fn b ->
+        [
+          Nx.tensor(Enum.map(1..n, &rem(&1 * 7, 100)), type: type, backend: b),
+          Nx.tensor(Enum.map(1..n, &rem(&1 * 13, 100)), type: type, backend: b),
+          Nx.tensor(Enum.map(1..n, &rem(&1 * 29, 100)), type: type, backend: b)
+        ]
       end
 
-      got = build.(VB)
+      vb_operands = operands.(VB)
+      got = Nx.concatenate(vb_operands)
       g = Nx.to_flat_list(got)
-      r = Nx.to_flat_list(build.(Nx.BinaryBackend))
+      r = Nx.to_flat_list(Nx.concatenate(operands.(Nx.BinaryBackend)))
 
       # Word-copyable types must ALSO stay resident: a silent fallback would
       # return the right answer off the GPU and hide the path under test.
+      #
+      # But demand that only when the OPERANDS are themselves resident, and
+      # measure it rather than assuming it. `concatenate` declines when
+      # `all_vulkano?/1` is false, which is correct behaviour, not a defect —
+      # and on a box missing an integer kernel (`Nx.add` on {:s,64} has none)
+      # an operand can arrive on the host without anyone intending it. Both
+      # Keplers and the Ampere box each independently wrote this assertion the
+      # assuming way first and each got a false failure out of it.
       word? = type in [{:f, 32}, {:f, 64}, {:s, 32}, {:u, 32}, {:s, 64}]
+      operands_resident? = Enum.all?(vb_operands, &match?(%VB{}, &1.data))
 
       cond do
-        g != r -> [{:value, type, n, g, r} | acc]
-        word? and not match?(%VB{}, got.data) -> [{:residency, type, n} | acc]
-        true -> acc
+        g != r ->
+          [{:value, type, n, g, r} | acc]
+
+        word? and operands_resident? and not match?(%VB{}, got.data) ->
+          [{:residency, type, n} | acc]
+
+        true ->
+          acc
       end
   end
 
