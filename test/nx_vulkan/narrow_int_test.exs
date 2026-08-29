@@ -350,6 +350,69 @@ defmodule Nx.Vulkan.NarrowIntTest do
     end
   end
 
+  # VALUES only, not residency. A bare number arrives as an {:s, 32} scalar, so
+  # `narrow_binary/5` — which requires both operands narrow — declines and the op
+  # host-falls-back. That fallback is exactly where the bug lived. Making this
+  # path resident is separate work; correctness first.
+  defp values_match(build) do
+    got = build.(VulkanoBackend)
+    ref = build.(Nx.BinaryBackend)
+    assert Nx.type(got) == Nx.type(ref)
+    assert Nx.to_flat_list(got) == Nx.to_flat_list(ref)
+  end
+
+  describe "a BARE Elixir number as the second operand" do
+    # `narrow_int_test.exs` already had a "tensor + scalar" case, and it wraps
+    # the scalar as `Nx.tensor(3, type: <same narrow>)` — which is the ONE
+    # spelling that avoids the bug below. A bare `3` takes a different path
+    # entirely, and forty-eight cells were wrong while this file was green.
+    #
+    # Nx declares `out.type` as the narrow type but hands the backend `b`
+    # already promoted to {:s, 32}, so the host fallback computed in s32 and
+    # `host_result/3` swapped a 4-byte-per-element buffer under a 2-byte
+    # template:
+    #
+    #     Nx.add(s16_tensor([0,1,2,3,4]), 1)  #=> [1, 0, 2, 0, 3]
+    #
+    # Right shape, right dtype, wrong numbers. Found by the Kepler fleet.
+    for type <- @types do
+      type = Macro.escape(type)
+
+      @tag :host_fallback_expected
+      test "#{inspect(type)} against a raw number, every arithmetic and bitwise op" do
+        type = unquote(type)
+        {as, _} = operands(type)
+
+        for op <- [
+              :add,
+              :subtract,
+              :multiply,
+              :quotient,
+              :remainder,
+              :max,
+              :min,
+              :bitwise_and,
+              :bitwise_or,
+              :bitwise_xor
+            ] do
+          values_match(fn b -> apply(Nx, op, [Nx.tensor(as, type: type, backend: b), 3]) end)
+        end
+
+        # Shifts take a small count so the result stays meaningful at 8 bits.
+        for op <- [:left_shift, :right_shift] do
+          values_match(fn b -> apply(Nx, op, [Nx.tensor(as, type: type, backend: b), 2]) end)
+        end
+      end
+    end
+
+    @tag :host_fallback_expected
+    test "the exact case that was wrong" do
+      got = Nx.add(Nx.tensor([0, 1, 2, 3, 4], type: {:s, 16}, backend: VulkanoBackend), 1)
+      assert Nx.to_flat_list(got) == [1, 2, 3, 4, 5]
+      assert Nx.type(got) == {:s, 16}
+    end
+  end
+
   describe "coerce_to — a narrow operand against a FLOAT output" do
     test "s8 / s8 is f32, which is Nx's divide doctest" do
       # Nx types integer division as a float, so the OUTPUT is f32 while both

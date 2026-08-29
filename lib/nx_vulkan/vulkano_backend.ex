@@ -4023,6 +4023,32 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # Strict mode found that — a censor that cries wolf gets switched off.
   defp host_result_recorded(%T{} = out, %T{} = result, op) do
     unless match?(%__MODULE__{}, result.data), do: Nx.Vulkan.Fallback.note(op, out)
+
+    # `%{out | data: result.data}` is a METADATA SWAP, not a conversion — it
+    # keeps `out`'s shape and type and adopts the host result's bytes. Sound
+    # only when the two types already agree, and for a narrow-int binary op
+    # against a bare Elixir number they do not.
+    #
+    # Nx declares `out.type` as {:s, 16} but hands the backend `b` already
+    # promoted to {:s, 32}, so `apply(Nx, op, [a_bin, b_bin])` computes in s32
+    # and returns four bytes per element. Swapping that under an s16 template
+    # reads 10 bytes of a 20-byte buffer at the wrong width:
+    #
+    #     Nx.add(s16_tensor([0,1,2,3,4]), 1)  #=> [1, 0, 2, 0, 3]
+    #                                          want [1, 2, 3, 4, 5]
+    #
+    # A wrong answer with the right shape AND the right dtype. Forty-eight cells
+    # were affected — twelve arithmetic and bitwise ops across the four narrow
+    # types — and the suite stayed green, because `narrow_int_test.exs`'s
+    # "tensor + scalar" case wraps the scalar as a same-type tensor, which is
+    # the one spelling that avoids the promotion.
+    #
+    # `Nx.as_type/2` would be a no-op when the types match, but the comparison
+    # is explicit so the common path allocates nothing. This closes the whole
+    # class rather than the instance that was found: every host fallback swaps
+    # metadata this way. Found by the Kepler fleet at `98af8b5`.
+    result = if result.type == out.type, do: result, else: Nx.as_type(result, out.type)
+
     %{out | data: result.data}
   end
 

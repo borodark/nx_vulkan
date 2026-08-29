@@ -251,8 +251,16 @@ defmodule Nx.Vulkan.ConcatTest do
         # anything not a multiple of 4; at 2 bytes, anything odd.
         for n <- [1, 2, 3, 5, 7, 9] do
           build = fn b ->
-            a = Nx.tensor(Enum.map(1..n, &rem(&1 * 7, 100)), type: type, backend: b)
-            c = Nx.tensor(Enum.map(1..n, &rem(&1 * 13, 100)), type: type, backend: b)
+            # COMPUTED, not uploaded. An `Nx.tensor(...)` buffer is exact-sized;
+            # padding exists only on KERNEL-ALLOCATED buffers, so operands built
+            # by upload cannot exercise the splice at all. The first version of
+            # this test used them and passed with the guard reverted — four of
+            # six cases were decorative. The fleet caught it by checking the
+            # tests bite rather than assuming they did.
+            x = Nx.tensor(Enum.map(1..n, &rem(&1 * 7, 50)), type: type, backend: b)
+            y = Nx.tensor(Enum.map(1..n, &rem(&1 * 13, 50)), type: type, backend: b)
+            a = Nx.add(x, x)
+            c = Nx.add(y, y)
             # THREE operands, and the third carries nonzero data past the second
             # splice. A two-way concat with an all-zero tail passes even when the
             # offsets are wrong — that false negative hid this during the fleet
