@@ -1023,8 +1023,24 @@ vacuous** — `buf_upload` buffers land in a different suballocator pool and cam
 back 0/24 dirty. Only after finding a scheme that produced 40/40 dirty
 reallocations did they trust the result: ~4,275 poisoned operations, zero
 defects, plus direct byte-level downloads of the PADDED buffers confirming every
-tail lane reads zero. The Jetson repeated it on unified memory with 6 x 32 MiB
-`0xFF` blocks churned before every case. Also clean.
+tail lane reads zero.
+
+The Jetson was then said to have repeated it on unified memory with 6 x 32 MiB
+`0xFF` blocks churned before every case, and to be "also clean". **That leg was
+vacuous corroboration, in the same paragraph that praises the Keplers for
+catching exactly this.** The 6 x 32 MiB scheme produces **0/40 dirty
+reallocations** on Tegra, and the reason is two subsections below: 32 MiB is
+precisely the dedicated-`vkAllocateMemory` cliff. At and above it vulkano stops
+suballocating, so the pages return to the driver on free and come back freshly
+zeroed — it is the one size class that *cannot* poison. A sweep confirms
+the boundary is the whole story:
+
+    6 x 32 MiB (the recorded scheme)                    0/20 dirty
+    16 x 8 MiB, 64 x 1 MiB, 512 x 64 KiB, 2048 x 4 KiB  20/20 dirty
+
+Re-run under 16 x 8 MiB (40/40 dirty), the Jetson is genuinely clean, so the
+conclusion stands. But it was *unestablished* while this section asserted it, and
+the Kepler result was carrying the claim alone.
 
 #### The prediction was wrong, and the reason is the interesting part
 
