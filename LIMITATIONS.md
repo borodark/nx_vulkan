@@ -197,14 +197,14 @@ correct but pays the GPU↔host round-trip on every call.
 
 | Callback | Why host | Proper fix |
 |---|---|---|
-| `concatenate/3` | ✅ GPU for `axis == 0` (buffer append, no shader needed); other axes host | `concat.comp` strided copy for inner axes |
+| `concatenate/3` | ✅ done both ways — `axis == 0` is a buffer append needing no shader (word-copyable types only; sub-word packing makes the splice unsound, so those host-fall-back), `axis > 0` uses `concat_nd.spv` (`c9b1a31`) | sub-word dtypes on axis 0 |
 | `stack/3` | no shader | composes from concatenate |
 | `pad/4` | ✅ done — `glsl/pad.comp`, 4/8-byte dtypes, rank ≤ 4, edge/interior/negative configs | — |
 | `slice/5` | ✅ done — `glsl/slice.comp`, static starts, 4/8-byte dtypes, rank ≤ 4 | — |
 | `put_slice/4` | ✅ done — `glsl/put_slice.comp` overlay, 4/8-byte dtypes, rank 1-4 (rank 0 raises in `BinaryBackend`, so it stays host) | — |
 | `gather/4` | ✅ done — `glsl/gather.comp` for the leading-prefix / default-axes case | other axis sets |
-| `indexed_put/5` | no shader | `scatter.comp` |
-| `indexed_add/5` | no shader (atomic adds needed) | `scatter_atomic.comp` |
+| `indexed_put/5` | ✅ done — `scatter.spv`, and `scatter_ordered.spv` when duplicate indices must resolve last-wins (`NXV_SCATTER_ORDERED=0` opts out). Index rank 2, k ≥ 1, target rank 1–4, 4/8-byte dtypes, 4-byte index type; non-prefix axes rotate | rank 5+; 1/2-byte dtypes |
+| `indexed_add/5` | ✅ done — same path, op code ≠ 0. Narrower than `indexed_put` by one condition: **4-byte integer dtypes only**, since the accumulate is an integer atomic | float and 8-byte accumulate (needs float atomics) |
 | `iota/3` | ✅ on-device (no shader needed) | — |
 | `eye/2` | tiny | trivial; not bandwidth-bound |
 | `broadcast/4` | ✅ done — `glsl/broadcast_nd.comp`, rank ≤ 4, any 4/8-byte dtype (W1) | rank 5+, 1/2-byte dtypes |
@@ -213,24 +213,23 @@ correct but pays the GPU↔host round-trip on every call.
 | `clip/4` | no shader, has compositional API | `clip.comp` |
 | `log1p/2` | no shader | extend `elementwise_unary` op 15 |
 | `is_infinity/2` | no shader | extend `elementwise_unary` |
-| `right_shift/3`, `left_shift/3`, `remainder/3`, `quotient/3` | no shader, integer ops | low priority |
-| `bitwise_and/3`, `bitwise_or/3`, `bitwise_xor/3` | no shader, integer ops | low priority |
+| `right_shift/3`, `left_shift/3`, `remainder/3`, `quotient/3` | ✅ done — `@binary_ops` codes 12, 13, 8, 7 into `elementwise_binary_{s32,u32}.spv`. Integer-only by Nx contract, and `binary_spv/2` refuses to pair them with a float shader (whose `default:` arm would return a silent 0.0) | narrow ints widen via s32; 64-bit ints host |
+| `bitwise_and/3`, `bitwise_or/3`, `bitwise_xor/3` | ✅ done — `@binary_ops` codes 9, 10, 11, same integer shaders and the same refusal | narrow ints widen via s32; 64-bit ints host |
 | `less_equal/3`, `greater_equal/3`, `not_equal/3` | ✅ done — `glsl/compare_f{32,64}.comp` spec constant, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
 | Per-axis reduction over **multiple** axes | ✅ done — contiguous axis sets rotate into a trailing-suffix reduce | non-contiguous patterns |
 | Linear algebra: `determinant`, `solve`, `cholesky`, `triangular_solve` | host BinaryBackend | LU/Cholesky shader (only wins at d ≥ 256, irrelevant for MCMC) |
 | `sort/3`, `argsort/3` | not implemented | `bitonic_sort.comp` |
-| `argmax/3`, `argmin/3` | not implemented | extend `reduce_axis.comp` to track index |
-| `all/3`, `any/3` | not implemented | reduce_axis variant |
-| `product/3` | not implemented | reduce_axis variant |
+| `argmax/3`, `argmin/3` | ✅ done — `argreduce_{f32,f64,s32,u32}.spv`, contiguous axis run, 4-byte integer out type; `tie_break: :high` is a spec-constant offset | s8/s16/u8/u16/s64/u64 inputs; non-contiguous axis sets |
+| `all/3`, `any/3` | ✅ done — `allany_{f32,f64,s32,u8}.spv` (u32 reuses the s32 kernel — the test is against zero, so signedness cannot reach the answer), contiguous axis run, `{:u,8}` out. The **one** call site needing `buf_alloc_zeroed/1`: the shader `atomicOr`s one thread per slot | s8/s16/u16/s64/u64 inputs; non-contiguous axis sets |
+| `product/3` | ✅ done — `reduce_axis_*.spv` op code 3, contiguous axis run; type pairs f32→f32, f64→f64, s32→s32, u32→u32, u8→u32 | other type pairs; non-contiguous axis sets |
 | `conv/4` | ✅ done — im2col + GEMM, f32/f64, both directions | grouped conv, rank 5+ |
 | `window_*/{4,6}` | ✅ done for non-overlapping windows, both directions | overlapping backward (needs float atomics) |
 | `lu/3`, `qr/3` | not implemented | host fallback acceptable for MCMC sizes |
 
-**The unwired broadcast shader is the highest-impact missing piece.**
-Spirit ships `elementwise_binary_broadcast.spv` but the backend's
-`do_binary` falls back to host whenever `a.shape != b.shape`. Adding
-the dispatch closes maybe 20–30 of the size_mismatch failures in the
-exmc suite.
+**The broadcast shader is wired.** This paragraph used to say it was the
+highest-impact missing piece — that the backend fell back to host whenever
+`a.shape != b.shape`. It dispatches: `gpu_bcast_binary/5` at line 538 into
+`elementwise_binary_bcast_{f32,f64,s32,u32}.spv`.
 
 ---
 
