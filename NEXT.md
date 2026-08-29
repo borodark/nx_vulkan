@@ -1051,14 +1051,17 @@ binary split at exactly 32 MiB with no gradient anywhere:
     mac-247   GT 650M   Kepler          0/40            40/40
     mac-248   GT 750M   Kepler          0/40            40/40
     super-io  RTX 3060  Ampere          0/40            40/40
-    jetson    Tegra X1  unified         0/40            20/20
+    jetson    Tegra X1  unified         0/40            40/40
 
 Different silicon, different drivers, two operating systems, discrete PCIe and
 unified LPDDR4 alike. **32 MiB is vulkano's dedicated-allocation threshold, not a
 memory-architecture artifact** — which means the vacuous scheme was never
 specific to the box that ran it, and any future poisoning attempt sized at the
-cliff is vacuous everywhere. That is the argument for `scripts/poison_control.exs`
-existing at all: the schemes lived in `/tmp` on three machines, so nobody could
+cliff is vacuous everywhere. All four rows are the same tracked script on the
+same commit, which is the point: the earlier per-box numbers were scored out of
+different denominators by different scratch files and could not be laid side by
+side at all. That is the argument for `scripts/poison_control.exs` existing at
+all: the schemes lived in `/tmp` on three machines, so nobody could
 compare them, and the one that could not work looked exactly like the ones that
 could.
 
