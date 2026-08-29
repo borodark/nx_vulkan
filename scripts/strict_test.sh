@@ -30,10 +30,10 @@
 #       plan item. Adding a tag is a visible line in a diff; that is the point.
 #
 #   test/nx_doctest_register.exs — `doctest Nx` USED to be under the first tag,
-#       843 doctests behind one line. It is not any more (W2). The register
-#       names the 488 that still leave the GPU, one line per op with a reason,
+#       all 833 doctests behind one line. It is not any more (W2). The register
+#       names the 78 that still leave the GPU, one line per op with a reason,
 #       and test_helper.exs applies it only when fallbacks are being refused.
-#       The other 355 run here like everything else. `sh
+#       The other 755 run here like everything else. `sh
 #       scripts/doctest_residency.sh` prints the rate and checks the register
 #       against reality in both directions.
 #
@@ -44,7 +44,7 @@ set -eu
 echo "==> mix test with host_fallback: :raise"
 echo "    excluding :host_fallback_expected (fallback is the test's subject)"
 echo "    excluding :host_fallback_open (tracked, open — see PLAN_AFTER_BACKWARD_PASS.md T12)"
-echo "    doctest Nx is IN, minus test/nx_doctest_register.exs (355 of 843 resident)"
+echo "    doctest Nx is IN, minus test/nx_doctest_register.exs (755 of 833 resident)"
 echo
 
 # Default the ExUnit timeout, and let the caller still override it.
