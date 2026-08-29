@@ -153,6 +153,24 @@ churn = fn -> poison.(count, size) end
 
 IO.puts("===== PADDING: which writers hand back a buffer larger than logical? =====\n")
 
+# The scheme score above proves the pool is dirty at 64 B and 4 KiB. The buffers
+# inspected BELOW are 4 B and 8 B, and nothing so far shows an allocation of THAT
+# size comes back dirty. Reading "padding is all zero" off probes whose sizes were
+# never shown to be poisonable is the same generalisation this file exists to
+# refuse, so measure it at the sizes actually used rather than leaning on 64 B.
+_ = churn.()
+:erlang.garbage_collect()
+pad_dirty = dirty_frac.(10, 4) + dirty_frac.(10, 8)
+
+IO.puts("  poisonability at the inspected sizes (4 B, 8 B): #{pad_dirty}/20")
+
+if pad_dirty == 0 do
+  IO.puts("  -> allocations at these sizes never came back dirty on this box.")
+  IO.puts("     A zero-padding result below is therefore UNPROVEN, not clean.\n")
+else
+  IO.puts("")
+end
+
 probe = fn label, t ->
   case t.data do
     %VB{ref: ref} ->
@@ -295,14 +313,29 @@ IO.puts("\n===== SUMMARY =====")
 IO.puts("  scheme:                #{label}")
 IO.puts("  effectiveness:         #{dirty}/40 dirty probes")
 IO.puts("  padded buffers seen:   #{padded} (non-zero padding: #{dirty_pad})")
+IO.puts("  padding-size probes:   #{pad_dirty}/20 dirty at 4 B / 8 B")
 IO.puts("  padded-writer concat:  #{length(padded_bad)} mismatches")
 IO.puts("  typed concat:          #{length(typed_bad)} problems")
 
 ok? = padded_bad == [] and typed_bad == [] and dirty_pad == 0
 
-if ok? do
-  IO.puts("\nPOISON CONTROL: PASS (scheme=#{label}, #{dirty}/40 dirty)")
-else
-  IO.puts("\nPOISON CONTROL: FAIL")
-  System.halt(1)
+cond do
+  not ok? ->
+    IO.puts("\nPOISON CONTROL: FAIL")
+    System.halt(1)
+
+  # Everything came back clean, but the padding leg could not have come back any
+  # other way. Say so rather than banking it: the concat results still stand on
+  # the 40/40 scheme, the padding result does not stand on anything.
+  pad_dirty == 0 ->
+    IO.puts(
+      "\nPOISON CONTROL: PASS with the padding leg UNPROVEN " <>
+        "(scheme=#{label}, #{dirty}/40 dirty, but 0/20 at 4 B / 8 B)"
+    )
+
+  true ->
+    IO.puts(
+      "\nPOISON CONTROL: PASS (scheme=#{label}, #{dirty}/40 dirty, " <>
+        "#{pad_dirty}/20 at padding sizes)"
+    )
 end
