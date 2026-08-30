@@ -216,7 +216,10 @@ IO.puts("gpu clock before: #{gpu_clock.()}")
 # ---------------------------------------------------------------------------
 
 n = 512
-ks = [4, 16, 64, 256, 1024]
+# Extra points below 64. The quantity that matters turned out to be the
+# INTERCEPT of ms = a + b*k (see the fit below), and a 5-point sweep with only
+# two points under 64 estimates it from almost nothing.
+ks = [1, 2, 4, 8, 16, 32, 64, 256, 1024]
 
 IO.puts("\n--- Race 1: arithmetic intensity (n = #{n}, f32 matmul) ---")
 IO.puts("     k   total_ms  host_ms   gpu_ms  host%   GFLOP/s(gpu)")
@@ -260,6 +263,49 @@ race1 =
   end
 
 # Normalised to this box's own k = 1024 point. THIS is the comparable number.
+# THE DISPATCH FLOOR — and this is the number the race is really about.
+#
+# mac-248 fitted ms = a + b*k on both discrete boxes and found the fixed term
+# nearly IDENTICAL (GT 750M a ~ 1.16 ms, RTX 3060 Ti a ~ 1.48 ms) while the
+# per-k rate differed 3.8x. So the whole normalised-curve shape falls out of the
+# single ratio a/b: the weaker card escapes its own floor at lower k purely
+# because its per-unit work is slower. That is a submission-overhead-to-
+# throughput ratio, NOT a memory-architecture signature.
+#
+# Two consequences, both bad for the original design. Race 1's shape comparison
+# has low power — two same-category discrete boxes already differ 4x at k=4 from
+# this ratio alone, so a Jetson difference has to clear that before it means
+# anything. And the sharper quantity is `a` itself: the fixed per-dispatch cost
+# is where host-to-device submission lives, and submission is precisely what
+# unified memory should move. The harness was not reporting it at all.
+#
+# Fitted on GPU-only time, so the host frontend is already excluded.
+fit = fn rows ->
+  n = length(rows)
+  xs = Enum.map(rows, &(&1.k * 1.0))
+  ys = Enum.map(rows, & &1.gpu_ms)
+  mx = Enum.sum(xs) / n
+  my = Enum.sum(ys) / n
+  num = Enum.zip(xs, ys) |> Enum.map(fn {x, y} -> (x - mx) * (y - my) end) |> Enum.sum()
+  den = xs |> Enum.map(fn x -> (x - mx) * (x - mx) end) |> Enum.sum()
+  b = if den == 0.0, do: 0.0, else: num / den
+  {my - b * mx, b}
+end
+
+{intercept, per_k} = fit.(race1)
+
+IO.puts("\n  dispatch floor, fitted gpu_ms = a + b*k over all #{length(ks)} points:")
+IO.puts("    a (fixed per-dispatch cost) = #{:erlang.float_to_binary(intercept, decimals: 4)} ms")
+IO.puts("    b (per unit of k)           = #{:erlang.float_to_binary(per_k, decimals: 5)} ms")
+
+IO.puts(
+  "    a/b                         = #{:erlang.float_to_binary(intercept / max(per_k, 1.0e-9), decimals: 1)}"
+)
+
+IO.puts("  `a` is the cross-box number to compare: it is the submission cost")
+IO.puts("  unified memory should reduce. The normalised curve below is a/b in")
+IO.puts("  disguise and mostly reflects GPU strength, not memory architecture.")
+
 # TILE QUANTISATION. If two adjacent k values take the same GPU time despite a
 # 4x difference in FLOPs, the kernel is padding small k up to a fixed workgroup
 # tile and the nominal arithmetic intensity at that point is FICTIONAL — it is
@@ -448,6 +494,8 @@ File.write!(
       reps: reps,
       race1: race1_norm,
       quantised_k_pairs: Enum.map(quantised, &Tuple.to_list/1),
+      dispatch_floor_ms: intercept,
+      per_k_ms: per_k,
       race1_normalised_to: "own k=1024 gflops",
       race4: race4,
       race4_slopes_ms_per_mib: slopes,
