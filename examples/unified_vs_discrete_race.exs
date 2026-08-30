@@ -549,8 +549,16 @@ floored = Enum.reject(race1b, &MapSet.member?(kept_ns, &1.n))
     {above_floor,
      "excluding #{length(floored)} floored point(s): n=#{Enum.map_join(floored, ",", &"#{&1.n}")}"}
   else
-    {race1b,
-     "WARNING: only #{length(above_floor)} point(s) above the quantisation floor — fitting ALL points, so s is contaminated by the floor"}
+    # Fall back to the LARGEST THREE points, not to all of them. mac-247 saw
+    # that under the 3.5 threshold its run A retained 2 points and run B only 1,
+    # so an "all points" fallback would have made two replicates of the same box
+    # take DIFFERENT paths — one fitting a stricter window, one fitting
+    # everything — and any movement in `s` between them would then be the
+    # fallback rule rather than the box. The largest three are the least
+    # floored available whatever the ratios say, and every run takes the same
+    # path.
+    {Enum.take(Enum.sort_by(race1b, & &1.n, :desc), 3) |> Enum.sort_by(& &1.n),
+     "only #{length(above_floor)} point(s) cleared the floor test — falling back to the largest 3, so s is contaminated"}
   end
 
 # FIXED window for the headline, detector as diagnostic. mac-247 replicated on
