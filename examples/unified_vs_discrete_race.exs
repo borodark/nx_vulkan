@@ -116,7 +116,48 @@ end
 # is absorbed silently and the run still reports RACE: OK — a contaminated
 # slope that looks clean. Every Race 4 number taken before this fix is void,
 # super-io's included.
+# CLOCK PINNING. The Jetson traced devfreq during an actual race and found full
+# clock takes 2.25 s, not the ~500 ms its earlier probe suggested — because that
+# probe used k=1024, which pins the GPU at 99.7% load, while the race's low-k
+# points only reach 50-65% duty (the 3-6 ms host gap between dispatches idles
+# the GPU, and nvhost_podgov ramps on UTILISATION). So k=1 was measured at
+# ~384-460 MHz and k=8 onward at 614.4 MHz, and the non-monotonic gpu_ms column
+# it saw (12.7 -> 9.2 -> 9.1 -> 6.9 -> 6.8) was the clock climbing, not the
+# workload. Every low-k point — the ones with leverage on the intercept — was
+# fitted through a contaminated left edge.
+#
+# Fix: before each measurement, run a SATURATING workload to pull the clock up,
+# rather than relying on the op under test to do it. A small op cannot warm the
+# clock it needs, because being small is what keeps the clock down.
+#
+# This does not fully rescue the smallest points. The Jetson pinned to 614 MHz
+# and still watched the clock fall to 230 MHz DURING a k=1 measurement: low
+# utilisation is what the governor reacts to, so on an integrated DVFS part the
+# dispatch floor and the clock governor are coupled. Kepler never leaves P0 and
+# has no such coupling — a methodological asymmetry that would masquerade as a
+# memory-architecture difference if left unsaid.
+pin_a = Nx.iota({512, 512}, type: {:f, 32}, backend: VB)
+pin_b = Nx.iota({512, 512}, type: {:f, 32}, backend: VB)
+:ok = NativeV.flush()
+
+pin_clock = fn ->
+  until = System.monotonic_time(:millisecond) + 800
+
+  loop = fn self ->
+    if System.monotonic_time(:millisecond) < until do
+      _ = Nx.dot(pin_a, pin_b)
+      :ok = NativeV.flush()
+      :erlang.garbage_collect()
+      self.(self)
+    end
+  end
+
+  loop.(loop)
+end
+
 measure = fn fun ->
+  pin_clock.()
+
   # 600 ms and at least 3 iterations. The Tegra needs ~500 ms to reach its boost
   # state, and a single k=1024 dot there takes 365 ms — so the old 250 ms budget
   # ran exactly ONE warm iteration on the box that most needed warming, and
@@ -197,13 +238,13 @@ IO.puts("box:    #{box}")
 IO.puts("device: #{device}")
 IO.puts("reps:   #{reps}")
 
-gpu_clock = fn ->
+gpu_clock_smi = fn ->
   case System.cmd(
          "nvidia-smi",
          # Kepler on FreeBSD HAS nvidia-smi but reports [N/A] for clocks.sm, so
-         # the no-nvidia-smi branch never fires and the output is a row of
-         # [N/A]. Ask for temperature and pstate too: those boxes do report
-         # them, and they are a usable throttle proxy when clocks are absent.
+         # a "does nvidia-smi exist" test is not enough to know whether clock
+         # telemetry is available. Ask for temperature and pstate too: those
+         # boxes do report them, and they are a usable throttle proxy.
          [
            "--query-gpu=clocks.sm,clocks.max.sm,utilization.gpu,temperature.gpu,pstate",
            "--format=csv,noheader"
@@ -211,7 +252,36 @@ gpu_clock = fn ->
          stderr_to_stdout: true
        ) do
     {out, 0} -> String.trim(out)
-    _ -> "n/a (no nvidia-smi)"
+    _ -> "n/a (nvidia-smi failed)"
+  end
+end
+
+gpu_clock = fn ->
+  # `System.cmd/3` RAISES :enoent when the binary is missing — it does NOT
+  # return an error tuple — so the "n/a (no nvidia-smi)" fallback was
+  # unreachable and this function CRASHED the entire run on any box without it.
+  # Tegra ships tegrastats, not nvidia-smi, so the harness could not run on the
+  # TREATMENT box at all: the Jetson had to shim a fake nvidia-smi into PATH to
+  # produce any result. Guard with find_executable, and read Tegra's real clock
+  # from sysfs, which is where it actually lives.
+  tegra = "/sys/class/devfreq/57000000.gpu/cur_freq"
+
+  cond do
+    File.exists?(tegra) ->
+      case File.read(tegra) do
+        {:ok, hz} ->
+          mhz = (hz |> String.trim() |> String.to_integer()) / 1_000_000
+          "#{:erlang.float_to_binary(mhz, decimals: 1)} MHz (tegra devfreq)"
+
+        _ ->
+          "n/a (tegra devfreq unreadable)"
+      end
+
+    System.find_executable("nvidia-smi") == nil ->
+      "n/a (no nvidia-smi)"
+
+    true ->
+      gpu_clock_smi.()
   end
 end
 
@@ -369,6 +439,80 @@ race1_norm =
   end
 
 # ---------------------------------------------------------------------------
+# RACE 1b — SEPARATING SUBMISSION FROM FIXED GPU WORK (the Jetson's design).
+#
+# `a` from the fit above is NOT a clean cross-box number, and the Jetson showed
+# why. Against super-io its throughput term b is 23.3x, its fitted a is 11.2x
+# and its empirical floor 14x. If the floor were purely GPU-side padded-tile
+# work it would scale like b (23x); if purely host-to-device submission it would
+# scale ~1x. It sits between, so `a` is a MIXTURE of the two, and comparing raw
+# `a` across boxes differing 23x in throughput conflates them. Normalising by b
+# instead (a/b: 15.6 vs 32) just picks the other convention and flips the
+# apparent direction. Neither is evidence.
+#
+# The separation is available WITHIN a box, with no cross-box assumption at all:
+# hold k small and fixed (inside the quantised region, where GPU time does not
+# depend on k) and sweep n. Padded-tile GPU work scales with the n^2 output;
+# host submission does not scale with n at all. So
+#
+#     floor(n) = s + c*n^2
+#
+# and `s` is the submission cost alone — which is the term unified memory should
+# move, and the only one comparable across boxes on its own terms.
+# ---------------------------------------------------------------------------
+
+k_fixed = 8
+ns = [64, 128, 256, 512, 1024]
+
+IO.puts("\n--- Race 1b: submission vs fixed GPU work (k = #{k_fixed}, sweeping n) ---")
+IO.puts("      n    gpu_ms   host_ms")
+
+race1b =
+  for nn <- ns do
+    a = Nx.iota({nn, k_fixed}, type: {:f, 32}, backend: VB)
+    b = Nx.iota({k_fixed, nn}, type: {:f, 32}, backend: VB)
+    :ok = NativeV.flush()
+    m = measure.(fn -> Nx.dot(a, b) end)
+
+    IO.puts(
+      "  #{String.pad_leading("#{nn}", 5)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(m.gpu, decimals: 3), 8)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(m.enqueue, decimals: 3), 8)}"
+    )
+
+    %{n: nn, gpu_ms: m.gpu, host_ms: m.enqueue}
+  end
+
+# Fit gpu_ms = s + c*n^2. The intercept is submission; the slope is per-output-
+# element GPU work.
+fit_n2 = fn rows ->
+  cnt = length(rows)
+  xs = Enum.map(rows, &(&1.n * &1.n * 1.0))
+  ys = Enum.map(rows, & &1.gpu_ms)
+  mx = Enum.sum(xs) / cnt
+  my = Enum.sum(ys) / cnt
+  num = Enum.zip(xs, ys) |> Enum.map(fn {x, y} -> (x - mx) * (y - my) end) |> Enum.sum()
+  den = xs |> Enum.map(fn x -> (x - mx) * (x - mx) end) |> Enum.sum()
+  c = if den == 0.0, do: 0.0, else: num / den
+  {my - c * mx, c}
+end
+
+{submission_ms, per_elem_ms} = fit_n2.(race1b)
+
+IO.puts("\n  fitted gpu_ms = s + c*n^2:")
+
+IO.puts(
+  "    s (SUBMISSION cost, n-independent) = #{:erlang.float_to_binary(submission_ms, decimals: 4)} ms"
+)
+
+IO.puts(
+  "    c (per output element)             = #{:erlang.float_to_binary(per_elem_ms * 1.0e6, decimals: 4)} ns"
+)
+
+IO.puts("  `s` is the cross-box number. It is the part of the dispatch floor that")
+IO.puts("  does NOT scale with GPU work, i.e. the part unified memory can move.")
+
+# ---------------------------------------------------------------------------
 # RACE 4 — the allocation cliff's SLOPE.
 #
 # Four boxes have already settled that the cliff exists at 32 MiB and is
@@ -508,6 +652,9 @@ File.write!(
       race1: race1_norm,
       quantised_k_pairs: Enum.map(quantised, &Tuple.to_list/1),
       dispatch_floor_ms: intercept,
+      race1b: race1b,
+      submission_ms: submission_ms,
+      per_output_elem_ns: per_elem_ms * 1.0e6,
       per_k_ms: per_k,
       race1_normalised_to: "own k=1024 gflops",
       race4: race4,
