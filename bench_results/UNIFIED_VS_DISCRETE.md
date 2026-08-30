@@ -1,0 +1,126 @@
+# Unified memory vs dedicated GPU RAM — Races 1, 1b and 4
+
+**Status: NO ANSWER YET, and the control arm says why.**
+Runs at `d4ca422`, four boxes, replicated. Harness `examples/unified_vs_discrete_race.exs`.
+
+---
+
+## The result that decides whether there is a result
+
+The experiment's design rests on the two Keplers agreeing. They are the same
+architecture, both discrete, both idle, both holding P0 throughout — so the
+spread between them is the noise floor against which any Jetson difference must
+be judged. They do not agree.
+
+| box | s (submission, ms) | c (per output element, ns) | within-box spread on s |
+|---|---|---|---|
+| mac-247  GT 650M | 0.1603 / 0.1496 | 3.611 / 3.645 | 6.9% |
+| mac-248  GT 750M | 0.0814 / 0.0788 | 3.559 / 3.543 | 3.2% |
+| jetson   Tegra X1 | 0.6804 / 0.7767 | 22.30 / 22.25 | 14.2% |
+| super-io RTX 3060 Ti | upper bound only | 0.38–1.06 | — |
+
+**The two controls differ on `s` by 1.9x while agreeing on `c` to 1.7%.** Their
+total dispatch floors differ by only ~12% (a = 0.56 vs 0.50). So the *sum* is
+consistent across the pair and the GPU-work term is consistent, but the split
+between submission and fixed GPU work is not.
+
+The Jetson's `s` is 5–9x the Keplers', which looks like a large effect. It is
+not reportable, for three independent reasons, any one of which is sufficient:
+
+1. **The control pair disagrees by 1.9x**, so there is no scale on which to
+   judge a difference.
+2. **Submission is host work**, and the Jetson's host is `--disable-jit` on 2
+   cores at 5 W. A slow host inflates `s` with identical memory architecture.
+3. **`s` is an extrapolated intercept**, biased upward by residual quantisation
+   floor by 10–20% on mac-248 — and by a *different* amount on each box, since
+   the floor's extent is a property of that box's tile geometry.
+
+---
+
+## What the sweep can and cannot reach
+
+Doubling n quadruples the output, so a point in the true n² regime is 4.00x the
+one below it. Anything well under 4 is still on the tile-quantisation plateau.
+
+    box        64->128  128->256  256->512  512->1024  1024->2048
+    mac-248      1.41      2.17      3.21       3.67       3.98
+    super-io     1.03      1.20      1.24       2.68       2.60
+
+mac-248 reaches the regime near n=2048. **super-io never reaches it at all** —
+its `s` fit exceeds its own smallest measured dispatch, which is impossible
+since submission is a component of every dispatch, so the harness now reports it
+as an upper bound rather than a measurement.
+
+The fast box would need n >= 4096. Its 64 MiB output sits **above the 32 MiB
+allocator cliff**, so Race 1b cannot simply be extended into it without
+confounding Race 1b with Race 4's regime. That is a design problem, not a
+tuning problem.
+
+---
+
+## What IS established
+
+**The 32 MiB allocator cliff is vulkano's, not any memory architecture's.**
+Reproduced 6/6 across every commit and every box: `buf_alloc` flat at
+0.006–0.14 ms below it with a slope of 0.0000, then a step of 226x–3400x at
+exactly 32 MiB. Discrete PCIe and unified LPDDR4 alike, two operating systems,
+three GPU generations.
+
+**Race 4 below-cliff is now reportable; above-cliff is not.** At 25 reps
+`zeroed_below` replicates to 1.9% (it was 73% at 9 reps). `zeroed_above` did
+**not** improve — 1.88x between two quiet consecutive runs at 25 reps — so the
+variance is not sampling noise but something about allocator state above the
+dedicated-allocation threshold. It is excluded from all conclusions.
+
+**DVFS cuts across the discrete/unified split, not along it.** Kepler holds P0
+through 80 s of idle sampling and never enters a low-power state; its k=1024
+GPU time reads 57.524 / 57.497 / 57.507 / 57.537 / 57.505 ms across six runs at
+four commits — a 0.07% band. Ampere drops to P8/210 MHz of a 2100 MHz maximum;
+Tegra idles to 76.8 MHz of 614.4. **The boosting parts are Ampere and Tegra; the
+one that does not is Kepler.**
+
+**Neither discrete box is near a roofline** — 1.3% and 0.4% of peak f32. The
+k-sweep does not walk an arithmetic-intensity roofline; "arithmetic intensity"
+oversells what it isolates.
+
+---
+
+## Eleven harness defects, and what each would have produced
+
+Every one biased the answer. Three were introduced while fixing the previous one.
+
+| defect | what it would have shown |
+|---|---|
+| Single warmup vs GPU clock idling to 10% | 288% "thermal drift" on an idle box; unified memory winning short bursts because the Ampere was asleep |
+| Warm loop never GC'd | Race 4 dead on both Keplers; on an 8 GB card, silent contamination that still printed RACE: OK |
+| Rule 6 — "normalising cancels a slow host" | Host was 50–61% of measurement below k=32; the left of every curve was Nx frontend |
+| Endpoint slope estimator | Kepler/Ampere zeroed ratio 9.9x vs 4.8x — a factor of two from the estimator |
+| Difference of medians on a bimodal host | Up to the whole 0.6 ms mode gap, 50% of GPU time at k=4 |
+| Tile quantisation unflagged | The low-k end — where unified memory should appear — is measuring padding |
+| `System.cmd` raises on missing binary | Harness could not run on the treatment box at all |
+| Negative-slope check on an O(1) series | Voided two healthy runs |
+| Adaptive floor detector | Flipped its own answer between replicates minutes apart |
+| Host normaliser as median of bimodal, n-dependent draws | 33% step from the draw alone; bias the size of the effect |
+| n=2048 added "for leverage" | Top point dominates OLS leverage; steeper bandwidth-bound slope extrapolated to zero inflates the intercept |
+
+---
+
+## What would make this answerable
+
+1. **Fix the control pair first.** Until two same-architecture boxes agree on `s`
+   to better than their own noise floors, no cross-box number means anything.
+   The 1.9x Kepler disagreement is the blocking issue, not the Jetson.
+2. **Reach the n² regime on the fast box** without crossing the 32 MiB cliff.
+   Raising `k` rather than `n` makes each output element cost more, so the
+   regime starts at smaller n — but changes what is held fixed, and larger
+   operands may themselves cost more to submit. Needs thought before it is run.
+3. **Race 5 (MCMC) is untouched.** Nothing in this repo calls
+   `leapfrog_chain_synth_f64`, and the templated path emits f32 while the active
+   NIF wants f64. The call convention has to be established before four boxes
+   run it.
+
+**The honest summary: the plan's Race 1 measured a submission-to-throughput
+ratio while claiming to measure arithmetic intensity; Race 1b is the right
+construct and is not yet precise enough to use; Race 4's one solid result says
+the thing everyone assumed was a unified-memory story is a vulkano suballocator
+threshold.**
