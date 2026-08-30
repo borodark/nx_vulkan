@@ -881,6 +881,127 @@ IO.puts("  on the quantisation floor, or on which points enter the fit. This is"
 IO.puts("  the number the control pair should agree on.")
 
 # ---------------------------------------------------------------------------
+# RACE 2 — THE PRICE OF CROSSING THE BOUNDARY, measured WITHIN one box.
+#
+# This is the design the cross-box approach should have been from the start.
+# Races 1, 1b and 1c all ended up comparing a number from one machine against a
+# number from another, and that failed for a reason no estimator could fix: the
+# two Keplers disagree 1.39x on submission cost, they are different SKUs on
+# different Mac hosts, one idles into P8 and the other never leaves P0. "Same
+# architecture" was never "same hardware", and every quantity we tried to
+# compare was host- and driver-dominated.
+#
+# So compare nothing across boxes. Run BOTH arms on the SAME machine:
+#
+#   (a) resident:   upload once -> N ops on device -> download once
+#   (b) round-trip: N x (upload -> 1 op -> download)
+#
+# Both do exactly N ops. (b) additionally pays N-1 extra uploads and downloads,
+# so
+#
+#   boundary cost per crossing = (b - a) / (N - 1)
+#   compute cost per op        = a / N          (approximately)
+#   PRICE = boundary / compute
+#
+# PRICE is dimensionless: how many ops-worth of time one host<->device round trip
+# costs on this box. Host speed, GPU speed, driver overhead and SKU all appear in
+# BOTH terms and cancel to first order — which is exactly what defeated the
+# cross-box comparisons. It is the ratio the original plan called for and the
+# only quantity in this experiment that does not need two machines to mean
+# something.
+#
+# What unified memory predicts: on a discrete card a crossing pays PCIe while
+# compute does not, so PRICE should be large and should GROW with transfer size.
+# On unified memory there is no bus to pay, so PRICE should be smaller and
+# flatter in size. The SHAPE of PRICE against size is the answer, measured
+# independently on each box and never subtracted across them.
+# ---------------------------------------------------------------------------
+
+n_ops = 32
+sizes_kib = [64, 256, 1024, 4096, 16384]
+
+IO.puts("\n--- Race 2: price of a host<->device round trip, in ops (within-box) ---")
+IO.puts("     KiB   resident_ms  roundtrip_ms   boundary_ms   compute_ms    PRICE")
+
+race2 =
+  for kib <- sizes_kib do
+    bytes = kib * 1024
+    bin = :binary.copy(<<0, 0, 128, 63>>, div(bytes, 4))
+
+    resident = fn ->
+      t = Nx.from_binary(bin, {:f, 32}, backend: VB)
+      out = Enum.reduce(1..n_ops, t, fn _, acc -> Nx.multiply(acc, 1.0) end)
+      _ = Nx.backend_transfer(out, Nx.BinaryBackend)
+      :ok
+    end
+
+    roundtrip = fn ->
+      Enum.each(1..n_ops, fn _ ->
+        t = Nx.from_binary(bin, {:f, 32}, backend: VB)
+        o = Nx.multiply(t, 1.0)
+        _ = Nx.backend_transfer(o, Nx.BinaryBackend)
+      end)
+    end
+
+    a = measure.(resident)
+    :erlang.garbage_collect()
+    b = measure.(roundtrip)
+    :erlang.garbage_collect()
+
+    boundary = (b.median - a.median) / (n_ops - 1)
+    compute = a.median / n_ops
+    price = boundary / max(compute, 1.0e-9)
+
+    IO.puts(
+      "  #{String.pad_leading("#{kib}", 6)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(a.median, decimals: 3), 11)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(b.median, decimals: 3), 12)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(boundary, decimals: 4), 12)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(compute, decimals: 4), 11)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(price, decimals: 2), 8)}"
+    )
+
+    %{
+      kib: kib,
+      resident_ms: a.median,
+      roundtrip_ms: b.median,
+      boundary_ms: boundary,
+      compute_ms: compute,
+      price: price
+    }
+  end
+
+# A negative boundary cost is impossible: (b) does strictly more work than (a).
+race2_anomaly = Enum.filter(race2, &(&1.boundary_ms < 0.0))
+
+if race2_anomaly != [] do
+  IO.puts(
+    "\n  !! NEGATIVE BOUNDARY COST at KiB=" <>
+      Enum.map_join(race2_anomaly, ",", &"#{&1.kib}") <>
+      " — impossible, (b) does strictly more work than (a). Run not usable."
+  )
+end
+
+price_lo = hd(race2).price
+price_hi = List.last(race2).price
+
+IO.puts(
+  "\n  PRICE at #{hd(race2).kib} KiB = #{:erlang.float_to_binary(price_lo, decimals: 2)} ops"
+)
+
+IO.puts(
+  "  PRICE at #{List.last(race2).kib} KiB = #{:erlang.float_to_binary(price_hi, decimals: 2)} ops"
+)
+
+IO.puts(
+  "  growth over the sweep       = #{:erlang.float_to_binary(price_hi / max(price_lo, 1.0e-9), decimals: 2)}x"
+)
+
+IO.puts("  A crossing costs this many ops-worth of time ON THIS BOX. Both terms")
+IO.puts("  share the same host, driver, SKU and GPU, so those cancel — which is")
+IO.puts("  what no cross-box quantity in this experiment managed.")
+
+# ---------------------------------------------------------------------------
 # RACE 4 — the allocation cliff's SLOPE.
 #
 # Four boxes have already settled that the cliff exists at 32 MiB and is
@@ -1100,7 +1221,8 @@ IO.puts(
     "   (24 MiB zeroed: #{:erlang.float_to_binary(alloc_first, decimals: 3)} -> #{:erlang.float_to_binary(alloc_control.median, decimals: 3)} ms)"
 )
 
-void? = drift > 0.10 or slope_anomaly != [] or marginal_anomaly != []
+void? =
+  drift > 0.10 or slope_anomaly != [] or marginal_anomaly != [] or race2_anomaly != []
 
 cond do
   drift > 0.10 ->
@@ -1141,6 +1263,11 @@ File.write!(
       h0_host_floor_ms: host_ref,
       leverage_share: leverage_share,
       race1c: race1c,
+      race2: race2,
+      race2_price_low_kib: price_lo,
+      race2_price_high_kib: price_hi,
+      race2_price_growth: price_hi / max(price_lo, 1.0e-9),
+      race2_negative_boundary: length(race2_anomaly),
       s_flush_us: s_flush * 1000,
       s_flush_ols_us: s_flush_ols * 1000,
       race1c_marginals_us: Enum.map(marginals, &(&1 * 1000)),
