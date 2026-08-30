@@ -683,6 +683,112 @@ IO.puts("  place of the GPU-speed one it removes — compare s/host_ms across bo
 IO.puts("  not raw s.")
 
 # ---------------------------------------------------------------------------
+# RACE 1c — SUBMISSION AS A SLOPE, not an intercept.
+#
+# This exists because the control pair failed. The two Keplers agree on `c` to
+# 1.7% and on their total dispatch floor to 12%, but differ on `s` by 1.9x —
+# and with no agreement between two same-architecture controls there is no scale
+# on which to judge the Jetson.
+#
+# The cause is conditioning, not physics. `s` is an INTERCEPT extrapolated back
+# to n=0 from points that are all far from it; mac-248 measured `c` (a slope)
+# to 0.44% and `s` (an intercept) to 8.8% ON THE SAME DATA. Intercepts are
+# ill-conditioned and every defect found so far — leverage concentration, a
+# non-constant c, residual quantisation floor — lands on the intercept.
+#
+# So measure it as a slope instead. `flush_locked` records every queued dispatch
+# into ONE command buffer and does ONE submit_and_wait, so flushes are
+# countable: run a FIXED number of dispatches split across a VARYING number of
+# flushes, and
+#
+#     total(F) = base + F * s_flush
+#
+# where base is all the per-dispatch record and GPU work (constant, since the
+# dispatch count is fixed) and the slope is the per-submission cost. That is the
+# ~170 us floor DTrace already attributed 75% of to vkQueueWaitIdle, and it is
+# the term a bus crossing lives in — i.e. the one unified memory should move.
+#
+# No extrapolation to zero, no dependence on the quantisation floor, and the
+# quantity is read off a slope.
+# ---------------------------------------------------------------------------
+
+n_1c = 256
+dispatch_count = 32
+flush_counts = [1, 2, 4, 8, 16, 32]
+
+IO.puts(
+  "\n--- Race 1c: submission as a slope (#{dispatch_count} dispatches, varying flushes) ---"
+)
+
+IO.puts("  flushes    total_ms   ms/flush-step")
+
+c1 = Nx.iota({n_1c, 8}, type: {:f, 32}, backend: VB)
+c2 = Nx.iota({8, n_1c}, type: {:f, 32}, backend: VB)
+:ok = NativeV.flush()
+
+race1c =
+  for f <- flush_counts do
+    per_flush = div(dispatch_count, f)
+
+    run = fn ->
+      Enum.each(1..f, fn _ ->
+        Enum.each(1..per_flush, fn _ -> Nx.dot(c1, c2) end)
+        :ok = NativeV.flush()
+      end)
+    end
+
+    pin_clock.()
+    # warm
+    run.()
+    run.()
+
+    samples =
+      for _ <- 1..reps do
+        :erlang.garbage_collect()
+        t0 = System.monotonic_time(:microsecond)
+        run.()
+        t1 = System.monotonic_time(:microsecond)
+        (t1 - t0) / 1000.0
+      end
+
+    med = median.(samples)
+
+    IO.puts(
+      "  #{String.pad_leading("#{f}", 7)}   #{String.pad_leading(:erlang.float_to_binary(med, decimals: 3), 9)}"
+    )
+
+    %{flushes: f, total_ms: med}
+  end
+
+fit_lin = fn rows, xf ->
+  cnt = length(rows)
+  xs = Enum.map(rows, xf)
+  ys = Enum.map(rows, & &1.total_ms)
+  mx = Enum.sum(xs) / cnt
+  my = Enum.sum(ys) / cnt
+  num = Enum.zip(xs, ys) |> Enum.map(fn {x, y} -> (x - mx) * (y - my) end) |> Enum.sum()
+  den = xs |> Enum.map(fn x -> (x - mx) * (x - mx) end) |> Enum.sum()
+  b = if den == 0.0, do: 0.0, else: num / den
+  {my - b * mx, b}
+end
+
+{base_ms, s_flush} = fit_lin.(race1c, &(&1.flushes * 1.0))
+
+IO.puts("\n  fitted total_ms = base + F * s_flush:")
+
+IO.puts(
+  "    s_flush (PER-SUBMISSION cost) = #{:erlang.float_to_binary(s_flush * 1000, decimals: 1)} us"
+)
+
+IO.puts(
+  "    base (#{dispatch_count} dispatches of work)     = #{:erlang.float_to_binary(base_ms, decimals: 4)} ms"
+)
+
+IO.puts("  s_flush is a SLOPE, so it does not depend on extrapolating to zero,")
+IO.puts("  on the quantisation floor, or on which points enter the fit. This is")
+IO.puts("  the number the control pair should agree on.")
+
+# ---------------------------------------------------------------------------
 # RACE 4 — the allocation cliff's SLOPE.
 #
 # Four boxes have already settled that the cliff exists at 32 MiB and is
@@ -917,6 +1023,9 @@ File.write!(
       submission_adaptive_ms: submission_adaptive,
       h0_host_floor_ms: host_ref,
       leverage_share: leverage_share,
+      race1c: race1c,
+      s_flush_us: s_flush * 1000,
+      race1c_base_ms: base_ms,
       min_dispatch_ms: min_dispatch,
       s_exceeds_min_dispatch: submission_ms > min_dispatch,
       floored_in_fixed_window: Enum.map(floored_in_window, & &1.n),
