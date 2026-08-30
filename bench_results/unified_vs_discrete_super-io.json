@@ -1,0 +1,114 @@
+{
+  "device": "NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)",
+  "reps": 9,
+  "box": "super-io",
+  "race1": [
+    {
+      "k": 4,
+      "gflops": 2.5890765432098766,
+      "gbs": 1.3147654320987654,
+      "ms": 0.81,
+      "ms_min": 0.779,
+      "ms_max": 0.882,
+      "rel_to_k1024": 0.035373263888888895
+    },
+    {
+      "k": 16,
+      "gflops": 9.89222641509434,
+      "gbs": 1.3138113207547168,
+      "ms": 0.848,
+      "ms_min": 0.797,
+      "ms_max": 1.817,
+      "rel_to_k1024": 0.1351525648584906
+    },
+    {
+      "k": 64,
+      "gflops": 18.703696767001112,
+      "gbs": 0.730613154960981,
+      "ms": 1.794,
+      "ms_min": 1.602,
+      "ms_max": 2.326,
+      "rel_to_k1024": 0.25553929765886285
+    },
+    {
+      "k": 256,
+      "gflops": 51.62220307692308,
+      "gbs": 0.8065969230769231,
+      "ms": 2.6,
+      "ms_min": 2.562,
+      "ms_max": 3.105,
+      "rel_to_k1024": 0.7052884615384617
+    },
+    {
+      "k": 1024,
+      "gflops": 73.19303503749147,
+      "gbs": 0.7147757327880028,
+      "ms": 7.335,
+      "ms_min": 7.287,
+      "ms_max": 9.352,
+      "rel_to_k1024": 1.0
+    }
+  ],
+  "race4": [
+    {
+      "mib": 24,
+      "alloc_ms": 0.019,
+      "zeroed_ms": 2.884
+    },
+    {
+      "mib": 26,
+      "alloc_ms": 0.018,
+      "zeroed_ms": 4.174
+    },
+    {
+      "mib": 28,
+      "alloc_ms": 0.018,
+      "zeroed_ms": 4.984
+    },
+    {
+      "mib": 30,
+      "alloc_ms": 0.019,
+      "zeroed_ms": 5.261
+    },
+    {
+      "mib": 32,
+      "alloc_ms": 15.587,
+      "zeroed_ms": 14.872
+    },
+    {
+      "mib": 34,
+      "alloc_ms": 11.311,
+      "zeroed_ms": 20.438
+    },
+    {
+      "mib": 36,
+      "alloc_ms": 11.684,
+      "zeroed_ms": 22.199
+    },
+    {
+      "mib": 38,
+      "alloc_ms": 14.342,
+      "zeroed_ms": 26.976
+    },
+    {
+      "mib": 40,
+      "alloc_ms": 21.983,
+      "zeroed_ms": 29.268
+    }
+  ],
+  "load_after": ": 7.43, 3.16, 1.89",
+  "race1_normalised_to": "own k=1024 gflops",
+  "race4_slopes_ms_per_mib": {
+    "alloc_below": 0.0,
+    "alloc_above": 0.7995000000000001,
+    "zeroed_below": 0.3961666666666667,
+    "zeroed_above": 1.7995
+  },
+  "thermal_control": {
+    "void": false,
+    "drift": 0.08684389911383783,
+    "first_ms": 7.335,
+    "last_ms": 7.972
+  },
+  "gpu_clock_after": "1740 MHz, 2100 MHz, 0 %"
+}
