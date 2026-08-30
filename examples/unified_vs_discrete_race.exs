@@ -528,7 +528,12 @@ above_floor =
   sorted_desc
   |> Enum.chunk_every(2, 1, :discard)
   |> Enum.reduce_while([hd(sorted_desc)], fn [bigger, smaller], acc ->
-    if bigger.gpu_ms / max(smaller.gpu_ms, 1.0e-9) >= 2.0 do
+    # 3.5, matching the annotation below. These were 2.0 and 3.5 — two
+    # thresholds for one concept — so the table marked a step floored while the
+    # fit kept the point. 247's n=256 sits at 2.89 against 248's 3.21: both
+    # admitted by the >= 2.0 rule while differently contaminated, which is
+    # exactly how two same-architecture controls disagree on `s`.
+    if bigger.gpu_ms / max(smaller.gpu_ms, 1.0e-9) >= 3.5 do
       {:cont, [smaller | acc]}
     else
       {:halt, acc}
@@ -608,11 +613,12 @@ IO.puts(
 # reproducibility from 12.8% to 3.9%.
 h0_rows = if floored != [], do: floored, else: Enum.take(Enum.sort_by(race1b, & &1.n), 2)
 
-host_ref =
-  h0_rows
-  |> Enum.map(& &1.host_ms)
-  |> Enum.sort()
-  |> Enum.at(div(length(h0_rows), 2))
+# MIN, not median. Taking the median over the floored rows did not fix the
+# lottery: 247 drew h0 = 0.641 and 1.223 on consecutive runs — the two host
+# levels exactly, one each — and s/h0 then read 0.2150 and 0.1160, a 60% spread
+# against raw s's 2.9%. The minimum tracks the low mode and replicates to 3.4%
+# where the median gives 8.3%.
+host_ref = h0_rows |> Enum.map(& &1.host_ms) |> Enum.min()
 
 IO.puts(
   "    s (adaptive window, diagnostic)    = #{:erlang.float_to_binary(submission_adaptive, decimals: 4)} ms"
@@ -772,16 +778,53 @@ fit_lin = fn rows, xf ->
   {my - b * mx, b}
 end
 
-{base_ms, s_flush} = fit_lin.(race1c, &(&1.flushes * 1.0))
+{base_ms, s_flush_ols} = fit_lin.(race1c, &(&1.flushes * 1.0))
 
-IO.puts("\n  fitted total_ms = base + F * s_flush:")
+# MEDIAN OF ADJACENT MARGINALS, not OLS. 247's recommendation, and its data
+# makes the case. Within a run the estimator is excellent — residuals +/-0.125 ms
+# on values spanning 19-36 ms, and s_flush moving 0.5% across fit windows where
+# `s` moved 5x. But ONE contaminated point wrecks the OLS: its run B read F=2 at
+# 28.4 ms where the trend says 19.6 (+45%), and since each point is a median of
+# 9 reps that is a sustained block anomaly, not a spike — the same sticky-block
+# pathology behind the bimodal host levels and Race 4's cold first size.
+#
+#   OLS over all six      532.8 vs 412.5   25.4% between replicates
+#   OLS dropping F=2      534.4 vs 515.6    3.6%
+#   median of marginals   532.9 vs 522.1    2.0%
+#
+# The median needs no window choice and no outlier detector: a corrupted point
+# poisons two adjacent pairs and the median walks past both. 247's run B
+# marginals were 9399, -3414, 281, 540, 522 us — the median lands on 522.
+marginals =
+  race1c
+  |> Enum.sort_by(& &1.flushes)
+  |> Enum.chunk_every(2, 1, :discard)
+  |> Enum.map(fn [a, b] -> (b.total_ms - a.total_ms) / (b.flushes - a.flushes) end)
+
+s_flush = median.(marginals)
+
+IO.puts("\n  total_ms = base + F * s_flush:")
 
 IO.puts(
-  "    s_flush (PER-SUBMISSION cost) = #{:erlang.float_to_binary(s_flush * 1000, decimals: 1)} us"
+  "    s_flush (PER-SUBMISSION cost) = #{:erlang.float_to_binary(s_flush * 1000, decimals: 1)} us   [median of adjacent marginals]"
 )
 
 IO.puts(
-  "    base (#{dispatch_count} dispatches of work)     = #{:erlang.float_to_binary(base_ms, decimals: 4)} ms"
+  "    s_flush (OLS, diagnostic)     = #{:erlang.float_to_binary(s_flush_ols * 1000, decimals: 1)} us"
+)
+
+IO.puts(
+  "    adjacent marginals (us)       = " <>
+    Enum.map_join(marginals, ", ", &:erlang.float_to_binary(&1 * 1000, decimals: 0))
+)
+
+# `base` is a FREE contamination detector, also 247's: the dispatch count is
+# fixed, so base must be identical across replicates of the same box. Its runs
+# read 18.677 vs 21.340 (14% apart) with the bad point and 18.640 vs 18.838
+# (0.9%) without — so a base disagreement between replicates flags a bad Race 1c
+# run without needing to know which point went wrong.
+IO.puts(
+  "    base (#{dispatch_count} dispatches of work)     = #{:erlang.float_to_binary(base_ms, decimals: 4)} ms   [across replicates: should be identical]"
 )
 
 IO.puts("  s_flush is a SLOPE, so it does not depend on extrapolating to zero,")
@@ -1025,6 +1068,10 @@ File.write!(
       leverage_share: leverage_share,
       race1c: race1c,
       s_flush_us: s_flush * 1000,
+      s_flush_ols_us: s_flush_ols * 1000,
+      race1c_marginals_us: Enum.map(marginals, &(&1 * 1000)),
+      s_flush_ols_us: s_flush_ols * 1000,
+      race1c_marginals_us: Enum.map(marginals, &(&1 * 1000)),
       race1c_base_ms: base_ms,
       min_dispatch_ms: min_dispatch,
       s_exceeds_min_dispatch: submission_ms > min_dispatch,
