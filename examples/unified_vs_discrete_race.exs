@@ -236,7 +236,10 @@ end
 IO.puts("\n=== unified vs discrete: Races 1 and 4 ===")
 IO.puts("box:    #{box}")
 IO.puts("device: #{device}")
-IO.puts("reps:   #{reps}")
+
+IO.puts(
+  "reps:   #{reps} (race 4: #{String.to_integer(System.get_env("NXV_RACE_ALLOC_REPS") || "25")})"
+)
 
 gpu_clock_smi = fn ->
   case System.cmd(
@@ -462,7 +465,14 @@ race1_norm =
 # ---------------------------------------------------------------------------
 
 k_fixed = 8
-ns = [64, 128, 256, 512, 1024]
+# n=2048 added because the fast boxes need leverage. The Jetson pointed out that
+# super-io's n=64/128/256 all flattened to ~0.255 ms — THREE points sitting on
+# the tile-quantisation floor — leaving only n=512 and n=1024 carrying real n^2
+# signal. That is an exactly-determined two-point fit with no redundancy, and it
+# means super-io's s was largely reading its quantisation floor rather than its
+# submission cost. Output at n=2048 is 16 MiB, comfortably under the 32 MiB
+# allocator cliff and within the Jetson's memory.
+ns = [64, 128, 256, 512, 1024, 2048]
 
 IO.puts("\n--- Race 1b: submission vs fixed GPU work (k = #{k_fixed}, sweeping n) ---")
 IO.puts("      n    gpu_ms   host_ms")
@@ -497,9 +507,50 @@ fit_n2 = fn rows ->
   {my - c * mx, c}
 end
 
-{submission_ms, per_elem_ms} = fit_n2.(race1b)
+# EXCLUDE FLOORED POINTS FROM THE FIT. A point whose gpu_ms sits on the
+# quantisation plateau carries no n^2 information — 4x the output for 2% more
+# time is padding, not work — and because those are the SMALL-n points they have
+# the most leverage on the intercept. Fitting through them makes `s` read the
+# floor. Keep points at least 2x above the observed floor, and fall back to the
+# full set (loudly) if that leaves too few to fit.
+# Walk DOWN from the largest n and keep points while they actually scale with
+# n^2. Doubling n quadruples the output, so a real point should be ~4x the one
+# below it; allow >= 2x for noise. The first pair that fails is where the
+# quantisation plateau starts, and everything below it is floor.
+#
+# A "2x the minimum" test is not good enough: super-io measured n=64 at 0.557 ms
+# ABOVE n=128's 0.265 ms — a noisy point that such a test admits precisely
+# because the noise made it large, and it has the most leverage on the intercept
+# of any point in the sweep.
+sorted_desc = Enum.sort_by(race1b, & &1.n, :desc)
 
-IO.puts("\n  fitted gpu_ms = s + c*n^2:")
+above_floor =
+  sorted_desc
+  |> Enum.chunk_every(2, 1, :discard)
+  |> Enum.reduce_while([hd(sorted_desc)], fn [bigger, smaller], acc ->
+    if bigger.gpu_ms / max(smaller.gpu_ms, 1.0e-9) >= 2.0 do
+      {:cont, [smaller | acc]}
+    else
+      {:halt, acc}
+    end
+  end)
+  |> Enum.sort_by(& &1.n)
+
+kept_ns = MapSet.new(above_floor, & &1.n)
+floored = Enum.reject(race1b, &MapSet.member?(kept_ns, &1.n))
+
+{fit_rows, fit_note} =
+  if length(above_floor) >= 3 do
+    {above_floor,
+     "excluding #{length(floored)} floored point(s): n=#{Enum.map_join(floored, ",", &"#{&1.n}")}"}
+  else
+    {race1b,
+     "WARNING: only #{length(above_floor)} point(s) above the quantisation floor — fitting ALL points, so s is contaminated by the floor"}
+  end
+
+{submission_ms, per_elem_ms} = fit_n2.(fit_rows)
+
+IO.puts("\n  fitted gpu_ms = s + c*n^2  (#{fit_note}):")
 
 IO.puts(
   "    s (SUBMISSION cost, n-independent) = #{:erlang.float_to_binary(submission_ms, decimals: 4)} ms"
@@ -509,8 +560,26 @@ IO.puts(
   "    c (per output element)             = #{:erlang.float_to_binary(per_elem_ms * 1.0e6, decimals: 4)} ns"
 )
 
-IO.puts("  `s` is the cross-box number. It is the part of the dispatch floor that")
-IO.puts("  does NOT scale with GPU work, i.e. the part unified memory can move.")
+# `s` is HOST work, so it carries a host-speed confound in place of the GPU-speed
+# one it removes: a 2x slower host yields a 2x higher s with identical memory
+# architecture. The Jetson is --disable-jit on 2 cores at 5W, so this is not
+# hypothetical — its s/super-io ratio (2.0x) is about what its host alone would
+# predict. Dividing by the box's own measured host time gives a figure that does
+# not move with host speed.
+host_ref =
+  race1b
+  |> Enum.map(& &1.host_ms)
+  |> Enum.sort()
+  |> Enum.at(div(length(race1b), 2))
+
+IO.puts(
+  "    s / host_ms                        = #{:erlang.float_to_binary(submission_ms / max(host_ref, 1.0e-9), decimals: 4)}"
+)
+
+IO.puts("  `s` is the part of the dispatch floor that does NOT scale with GPU")
+IO.puts("  work. But s is HOST work, so raw s carries a host-speed confound in")
+IO.puts("  place of the GPU-speed one it removes — compare s/host_ms across boxes,")
+IO.puts("  not raw s.")
 
 # ---------------------------------------------------------------------------
 # RACE 4 — the allocation cliff's SLOPE.
@@ -525,12 +594,63 @@ IO.puts("  does NOT scale with GPU work, i.e. the part unified memory can move."
 IO.puts("\n--- Race 4: allocation cliff slope (24-40 MiB, 2 MiB steps) ---")
 IO.puts("     MiB   alloc ms  zeroed ms")
 
+# Warm the allocator before the FIRST timed size. mac-247 measured 24 MiB
+# zeroed at 2.656 ms against 1.208/1.211/1.224 in three prior runs — a 2.2x cold
+# spike on whichever size is measured first. With only four points below the
+# cliff, one cold first point is enough to flip the fitted slope's SIGN, and it
+# did: that run reported zeroed_below = -0.1633 ms/MiB. Zeroing more memory
+# cannot take less time.
+#
+# `measure` already warms per-call, but the first call of a new NIF in a fresh
+# process pays driver first-touch that per-call warming does not cover, and
+# Race 1b now runs between Race 1 and Race 4, so the allocator arrives in a
+# different state than it used to.
+for _ <- 1..3 do
+  {:ok, _} = NativeV.buf_alloc(24 * 1024 * 1024)
+  {:ok, _} = NativeV.buf_alloc_zeroed(24 * 1024 * 1024)
+  :erlang.garbage_collect()
+end
+
+# Race 4 gets its OWN rep count and no clock pin.
+#
+# No pin because allocation is driver and host work, not shader work — pinning
+# the GPU clock cannot help it, and mac-248 showed it actively perturbs: its
+# above-cliff zeroed times shifted 25-30% systematically once Race 1b began
+# running between Race 1 and Race 4, changing the allocator state Race 4
+# inherits.
+#
+# More reps because at 9 the zeroed slope is not measurable. mac-248 ran four
+# times on a quiet box and got zeroed_above of 1.91 / 2.46 / 1.10 / 1.56 — a
+# 2.24x spread, which makes any cross-box comparison of that number meaningless.
+# alloc_below is the solid one: 0.0000-0.0001 every run, with the 32 MiB cliff
+# reproducing 4/4.
+alloc_reps = String.to_integer(System.get_env("NXV_RACE_ALLOC_REPS") || "25")
+
+measure_alloc = fn fun ->
+  for _ <- 1..3 do
+    _ = fun.()
+    :erlang.garbage_collect()
+  end
+
+  samples =
+    for _ <- 1..alloc_reps do
+      :erlang.garbage_collect()
+      t0 = System.monotonic_time(:microsecond)
+      _ = fun.()
+      :ok = NativeV.flush()
+      t1 = System.monotonic_time(:microsecond)
+      (t1 - t0) / 1000.0
+    end
+
+  %{median: median.(samples), min: Enum.min(samples), max: Enum.max(samples)}
+end
+
 race4 =
   for mib <- 24..40//2 do
     bytes = mib * 1024 * 1024
-    a = measure.(fn -> {:ok, _} = NativeV.buf_alloc(bytes) end)
+    a = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc(bytes) end)
     :erlang.garbage_collect()
-    z = measure.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(bytes) end)
+    z = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(bytes) end)
     :erlang.garbage_collect()
 
     IO.puts(
@@ -577,6 +697,36 @@ slopes = %{
   zeroed_below: slope.(below, :zeroed_ms),
   zeroed_above: slope.(above, :zeroed_ms)
 }
+
+# A negative slope is physically impossible — zeroing more memory cannot take
+# less time — so it is a measurement fault, not a finding. The run that produced
+# one still printed RACE: OK, because the thermal control re-measures a Race 1
+# MATMUL and so certified 1.6% drift while the headline Race 4 slope was
+# negative. The control was watching the wrong race. A sign check costs nothing.
+# Only the ZEROED series. Zeroing more memory must take longer, so a negative
+# slope there is physically impossible and indicates a measurement fault — which
+# is what mac-247 hit with zeroed_below = -0.1633 after a cold first sample.
+#
+# `buf_alloc` is different in kind: below the cliff it is genuinely O(1), flat at
+# 0.006-0.02 ms with a slope of 0.0000 on every box. Its fitted slope is noise
+# about zero and goes negative roughly half the time, so checking its sign voids
+# healthy runs for a quantity that has no sign to check. super-io produced
+# -0.0005 and -0.0007 on consecutive clean runs.
+slope_anomaly =
+  slopes
+  |> Map.to_list()
+  |> Enum.filter(fn {k, v} -> v < 0.0 and String.starts_with?(Atom.to_string(k), "zeroed") end)
+
+if slope_anomaly != [] do
+  IO.puts("\n  !! NEGATIVE SLOPE — physically impossible, this is a measurement fault:")
+
+  Enum.each(slope_anomaly, fn {k, v} ->
+    IO.puts("     #{k} = #{:erlang.float_to_binary(v, decimals: 4)} ms/MiB")
+  end)
+
+  IO.puts("     Race 4 for this run is not usable. The thermal control cannot")
+  IO.puts("     see this — it re-measures a Race 1 matmul, not an allocation.")
+end
 
 IO.puts("\n  ms per MiB:")
 
@@ -629,10 +779,18 @@ IO.puts(
 
 IO.puts("  drift: #{:erlang.float_to_binary(drift * 100, decimals: 1)}%")
 
-void? = drift > 0.10
+void? = drift > 0.10 or slope_anomaly != []
 
-if void?,
-  do: IO.puts("  *** DRIFT > 10% — THIS RUN IS VOID, the box throttled or was contended ***")
+cond do
+  drift > 0.10 ->
+    IO.puts("  *** DRIFT > 10% — THIS RUN IS VOID, the box throttled or was contended ***")
+
+  slope_anomaly != [] ->
+    IO.puts("  *** VOID — Race 4 produced a negative slope (see above) ***")
+
+  true ->
+    :ok
+end
 
 load_after = load.()
 clock_after = gpu_clock.()
@@ -654,12 +812,16 @@ File.write!(
       dispatch_floor_ms: intercept,
       race1b: race1b,
       submission_ms: submission_ms,
+      submission_over_host: submission_ms / max(host_ref, 1.0e-9),
+      race1b_fit_note: fit_note,
+      race1b_floored_ns: Enum.map(floored, & &1.n),
       per_output_elem_ns: per_elem_ms * 1.0e6,
       per_k_ms: per_k,
       race1_normalised_to: "own k=1024 gflops",
       race4: race4,
       race4_slopes_ms_per_mib: slopes,
       thermal_control: %{first_ms: first, last_ms: control.median, drift: drift, void: void?},
+      slope_anomaly: Enum.map(slope_anomaly, fn {k, v} -> %{series: k, ms_per_mib: v} end),
       load_after: String.trim(load_after),
       gpu_clock_after: clock_after
     },
@@ -668,4 +830,11 @@ File.write!(
 )
 
 IO.puts("wrote #{path}")
-IO.puts(if void?, do: "\nRACE: VOID (thermal drift)", else: "\nRACE: OK")
+
+IO.puts(
+  cond do
+    drift > 0.10 -> "\nRACE: VOID (thermal drift)"
+    slope_anomaly != [] -> "\nRACE: VOID (negative Race 4 slope)"
+    true -> "\nRACE: OK"
+  end
+)
