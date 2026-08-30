@@ -549,9 +549,24 @@ fn alloc_buffer_zeroed(
     .map_err(|e| format!("alloc zeroed buffer: {e}"))
 }
 
-fn download_buffer(buf: Subbuffer<[u8]>) -> Result<Vec<u8>, String> {
+/// Copy a device buffer straight into a freshly allocated BEAM binary.
+///
+/// This used to return `Vec<u8>`, whose only callers then copied it again into a
+/// BEAM binary — so every download copied the data TWICE: once out of the
+/// mapped buffer into a Vec, and again out of the Vec into the binary. The
+/// Vec was pure overhead on every box; on unified memory, where the mapped
+/// buffer is already host DRAM, it was a full DRAM-to-DRAM memcpy of bytes that
+/// had not moved anywhere. The leapfrog chain NIFs pay this four times per
+/// dispatch over `3*K*d*8 + K*8` bytes of trajectory, which is where it bit
+/// hardest.
+///
+/// One copy is still required: a BEAM binary must own its memory, and the
+/// device buffer can be recycled the moment the guard drops.
+fn download_buffer<'a>(env: Env<'a>, buf: Subbuffer<[u8]>) -> Result<Binary<'a>, String> {
     let guard = buf.read().map_err(|e| format!("read buffer: {e}"))?;
-    Ok(guard.to_vec())
+    let mut bin = NewBinary::new(env, guard.len());
+    bin.as_mut_slice().copy_from_slice(&guard[..]);
+    Ok(bin.into())
 }
 
 /// Run a K-step leapfrog dispatch against the synthesised SPV.
@@ -596,7 +611,7 @@ fn leapfrog_chain_synth<'a>(
         }
     };
 
-    let result = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let result = (|| -> Result<(Binary<'a>, Binary<'a>, Binary<'a>, Binary<'a>), String> {
         let cached = get_or_create_pipeline(&spv_path, None)?;
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
@@ -679,29 +694,19 @@ fn leapfrog_chain_synth<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(q_chain_buf)?,
-            download_buffer(p_chain_buf)?,
-            download_buffer(grad_chain_buf)?,
-            download_buffer(logp_chain_buf)?,
+            download_buffer(env, q_chain_buf)?,
+            download_buffer(env, p_chain_buf)?,
+            download_buffer(env, grad_chain_buf)?,
+            download_buffer(env, logp_chain_buf)?,
         ))
     })();
 
     match result {
-        Ok((q, p, g, l)) => {
-            let q_bin = bytes_to_nif_binary(env, &q);
-            let p_bin = bytes_to_nif_binary(env, &p);
-            let g_bin = bytes_to_nif_binary(env, &g);
-            let l_bin = bytes_to_nif_binary(env, &l);
+        Ok((q_bin, p_bin, g_bin, l_bin)) => {
             Ok((atoms::ok(), (q_bin, p_bin, g_bin, l_bin)).encode(env))
         }
         Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
     }
-}
-
-fn bytes_to_nif_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
-    let mut bin = NewBinary::new(env, bytes.len());
-    bin.as_mut_slice().copy_from_slice(bytes);
-    bin.into()
 }
 
 /// Plan A* — boundary-cast f64 variant of leapfrog_chain_synth.
@@ -761,7 +766,7 @@ fn leapfrog_chain_synth_f64<'a>(
         }
     };
 
-    let result = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let result = (|| -> Result<(Binary<'a>, Binary<'a>, Binary<'a>, Binary<'a>), String> {
         let cached = get_or_create_pipeline(&spv_path, None)?;
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
@@ -844,19 +849,15 @@ fn leapfrog_chain_synth_f64<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(q_chain_buf)?,
-            download_buffer(p_chain_buf)?,
-            download_buffer(grad_chain_buf)?,
-            download_buffer(logp_chain_buf)?,
+            download_buffer(env, q_chain_buf)?,
+            download_buffer(env, p_chain_buf)?,
+            download_buffer(env, grad_chain_buf)?,
+            download_buffer(env, logp_chain_buf)?,
         ))
     })();
 
     match result {
-        Ok((q, p, g, l)) => {
-            let q_bin = bytes_to_nif_binary(env, &q);
-            let p_bin = bytes_to_nif_binary(env, &p);
-            let g_bin = bytes_to_nif_binary(env, &g);
-            let l_bin = bytes_to_nif_binary(env, &l);
+        Ok((q_bin, p_bin, g_bin, l_bin)) => {
             Ok((atoms::ok(), (q_bin, p_bin, g_bin, l_bin)).encode(env))
         }
         Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
@@ -917,7 +918,7 @@ fn leapfrog_chain_synth_batch<'a>(
         }
     };
 
-    let result = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let result = (|| -> Result<(Binary<'a>, Binary<'a>, Binary<'a>, Binary<'a>), String> {
         let cached = get_or_create_pipeline(&spv_path, None)?;
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
@@ -1003,19 +1004,15 @@ fn leapfrog_chain_synth_batch<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(q_chain_buf)?,
-            download_buffer(p_chain_buf)?,
-            download_buffer(grad_chain_buf)?,
-            download_buffer(logp_chain_buf)?,
+            download_buffer(env, q_chain_buf)?,
+            download_buffer(env, p_chain_buf)?,
+            download_buffer(env, grad_chain_buf)?,
+            download_buffer(env, logp_chain_buf)?,
         ))
     })();
 
     match result {
-        Ok((q, p, g, l)) => {
-            let q_bin = bytes_to_nif_binary(env, &q);
-            let p_bin = bytes_to_nif_binary(env, &p);
-            let g_bin = bytes_to_nif_binary(env, &g);
-            let l_bin = bytes_to_nif_binary(env, &l);
+        Ok((q_bin, p_bin, g_bin, l_bin)) => {
             Ok((atoms::ok(), (q_bin, p_bin, g_bin, l_bin)).encode(env))
         }
         Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
@@ -1222,12 +1219,14 @@ fn buf_download<'a>(env: Env<'a>, tensor: ResourceArc<VulkanoTensor>) -> NifResu
     if let Err(e) = flush_pending() {
         return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
     }
-    let bytes = match tensor.buf.read() {
-        Ok(guard) => guard.to_vec(),
+    // One copy, not two — see `download_buffer` for what the Vec was costing.
+    let guard = match tensor.buf.read() {
+        Ok(guard) => guard,
         Err(_) => return Ok((atoms::error(), atoms::download_failed()).encode(env)),
     };
-    let bin = bytes_to_nif_binary(env, &bytes);
-    Ok((atoms::ok(), bin).encode(env))
+    let mut bin = NewBinary::new(env, guard.len());
+    bin.as_mut_slice().copy_from_slice(&guard[..]);
+    Ok((atoms::ok(), Binary::from(bin)).encode(env))
 }
 
 /// Tensor's buffer size in bytes.
