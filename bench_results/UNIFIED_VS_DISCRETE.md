@@ -236,6 +236,39 @@ Every one biased the answer. Three were introduced while fixing the previous one
 
 ---
 
+## Staged and unrun: the Race 1c clock trace
+
+`/tmp/run_trace.sh` and `/tmp/run_trace.README` on the Jetson (192.168.0.250),
+staged and never fired — the box was held for 95+ minutes by another user's
+`mix test` in `~/exmc_oss`, which exercises `nx_vulkan` and therefore contends
+for the GPU, the exact resource the question depends on. **These are /tmp files
+and will not survive a reboot.**
+
+It samples devfreq at 250 ms with every harness output line wall-clock stamped,
+so the clock trace can be sliced into Race 1c's per-F windows (each `F total_ms`
+row prints after that F is measured, so F[i]'s window runs from the F[i-1] stamp
+to the F[i] stamp). It carries a self-abort guard that re-checks for competing
+work immediately before measuring and exits 9 rather than produce a contended
+table.
+
+**What it would decide:**
+
+* Clock RISES with F → Race 1c is DVFS-confounded on an integrated part and
+  needs redesign: larger n to raise duty, or interleaved saturating work to hold
+  the clock across all F.
+* Clock FLAT and the marginals still bend → the cause is something else, and
+  that is the more interesting answer, because it would constrain the Kepler
+  disagreement too.
+
+Reference clock behaviour already measured on that box: idle 76.8 MHz, cap 614.4
+MHz; 2.25 s to full clock at 50-65% duty against ~500 ms at 99.7%; and Race 1b
+holding 614.4 MHz on every sample at 70-80% duty — which is precisely why Race
+1c's lower duty is the open question.
+
+The limitation stands without the trace. A negative marginal is impossible, so
+Race 1c cannot be trusted to measure submission on that box at these sizes. The
+trace would name the mechanism, not establish the fault.
+
 ## What would make this answerable
 
 1. **Fix the control pair first.** Until two same-architecture boxes agree on `s`
