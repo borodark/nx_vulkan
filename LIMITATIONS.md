@@ -197,8 +197,8 @@ correct but pays the GPU↔host round-trip on every call.
 
 | Callback | Why host | Proper fix |
 |---|---|---|
-| `concatenate/3` | ✅ done both ways — `axis == 0` is a buffer append needing no shader (word-copyable types only; sub-word packing makes the splice unsound, so those host-fall-back), `axis > 0` uses `concat_nd.spv` (`c9b1a31`) | sub-word dtypes on axis 0 |
-| `stack/3` | no shader | composes from concatenate |
+| `concatenate/3` | ✅ done both ways — `axis == 0` is a buffer append needing no shader (word-copyable types only), `axis > 0` uses `concat_nd.spv` (`c9b1a31`). **The sub-word restriction is dtype-wide, not axis-0-specific** — `concat_nd` carries the same gate, so s8/u8/s16/u16/f16/bf16 fall back on every axis | sub-word dtypes, all axes |
+| `stack/3` | ✅ done — reshapes and delegates to `concatenate/3`; resident at any axis for word-copyable types. Reaches `stack_host_fallback` only when coercion fails | sub-word dtypes, inherited from `concatenate/3` and attributed to it |
 | `pad/4` | ✅ done — `glsl/pad.comp`, 4/8-byte dtypes, rank ≤ 4, edge/interior/negative configs | — |
 | `slice/5` | ✅ done — `glsl/slice.comp`, static starts, 4/8-byte dtypes, rank ≤ 4 | — |
 | `put_slice/4` | ✅ done — `glsl/put_slice.comp` overlay, 4/8-byte dtypes, rank 1-4 (rank 0 raises in `BinaryBackend`, so it stays host) | — |
@@ -210,18 +210,19 @@ correct but pays the GPU↔host round-trip on every call.
 | `broadcast/4` | ✅ done — `glsl/broadcast_nd.comp`, rank ≤ 4, any 4/8-byte dtype (W1) | rank 5+, 1/2-byte dtypes |
 | `transpose/3` (rank ≥ 3) | ✅ done — `glsl/transpose_nd.comp`, rank ≤ 4, any 4/8-byte dtype (W1) | rank 5+, 1/2-byte dtypes |
 | `select/4` | ✅ done — `glsl/select_f{32,64}.comp`, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
-| `clip/4` | no shader, has compositional API | `clip.comp` |
+| `clip/4` | ✅ done — composes `Nx.min(Nx.max(t, lo), hi)` from the broadcast max/min shaders and never leaves the device. Resident on u8, s8, u16, s16, u32, s32, f32, f64. **Mixed-type bounds do NOT fall back** — Nx promotes them before the callback | `{:s,64}`, where the composed max/min have no kernel |
 | `log1p/2` | no shader | extend `elementwise_unary` op 15 |
-| `is_infinity/2` | no shader | extend `elementwise_unary` |
-| `right_shift/3`, `left_shift/3`, `remainder/3`, `quotient/3` | ✅ done — `@binary_ops` codes 12, 13, 8, 7 into `elementwise_binary_{s32,u32}.spv`. Integer-only by Nx contract, and `binary_spv/2` refuses to pair them with a float shader (whose `default:` arm would return a silent 0.0) | narrow ints widen via s32; 64-bit ints host |
-| `bitwise_and/3`, `bitwise_or/3`, `bitwise_xor/3` | ✅ done — `@binary_ops` codes 9, 10, 11, same integer shaders and the same refusal | narrow ints widen via s32; 64-bit ints host |
+| `is_infinity/2`, `is_nan/2` | ✅ done — `@predicate_unary_ops` codes 10 and 9 (W5), f32/f64 | non-float dtypes |
+| `right_shift/3`, `left_shift/3`, `remainder/3`, `quotient/3` | ✅ done — `@binary_ops` codes 12, 13, 8, 7 into `elementwise_binary_{s32,u32}.spv`. Integer-only by Nx contract, and `binary_spv/2` refuses to pair them with a float shader (whose `default:` arm would return a silent 0.0) | 64-bit ints host. (Narrow ints s8/u8/s16/u16 are already resident, widening through s32 with the dtype preserved — done, not pending) |
+| `bitwise_and/3`, `bitwise_or/3`, `bitwise_xor/3` | ✅ done — `@binary_ops` codes 9, 10, 11, same integer shaders and the same refusal | 64-bit ints host; narrow ints already resident via s32 |
 | `less_equal/3`, `greater_equal/3`, `not_equal/3` | ✅ done — `glsl/compare_f{32,64}.comp` spec constant, rank 0-4 (rank 0 since T11) | rank 5+, non-f32/f64 |
 | Per-axis reduction over **multiple** axes | ✅ done — contiguous axis sets rotate into a trailing-suffix reduce | non-contiguous patterns |
 | Linear algebra: `determinant`, `solve`, `cholesky`, `triangular_solve` | host BinaryBackend | LU/Cholesky shader (only wins at d ≥ 256, irrelevant for MCMC) |
 | `sort/3`, `argsort/3` | not implemented | `bitonic_sort.comp` |
-| `argmax/3`, `argmin/3` | ✅ done — `argreduce_{f32,f64,s32,u32}.spv`, contiguous axis run, 4-byte integer out type; `tie_break: :high` is a spec-constant offset | s8/s16/u8/u16/s64/u64 inputs; non-contiguous axis sets |
-| `all/3`, `any/3` | ✅ done — `allany_{f32,f64,s32,u8}.spv` (u32 reuses the s32 kernel — the test is against zero, so signedness cannot reach the answer), contiguous axis run, `{:u,8}` out. The **one** call site needing `buf_alloc_zeroed/1`: the shader `atomicOr`s one thread per slot | s8/s16/u16/s64/u64 inputs; non-contiguous axis sets |
-| `product/3` | ✅ done — `reduce_axis_*.spv` op code 3, contiguous axis run; type pairs f32→f32, f64→f64, s32→s32, u32→u32, u8→u32 | other type pairs; non-contiguous axis sets |
+| `atan2/3` | host — the only member of `@host_fallback_binary_ops`. A genuine two-argument transcendental, and GLSL.std.450 has no f64 form | — |
+| `argmax/3`, `argmin/3` | ✅ done — `argreduce_{f32,f64,s32,u32}.spv`, contiguous axis run, 4-byte integer out type; `tie_break: :high` is a spec-constant offset | s8/s16/u8/u16/s64/u64/f16/bf16 inputs; non-contiguous axis sets |
+| `all/3`, `any/3` | ✅ done — `allany_{f32,f64,s32,u8}.spv` (u32 reuses the s32 kernel — the test is against zero, so signedness cannot reach the answer), contiguous axis run, `{:u,8}` out. The **one** call site needing `buf_alloc_zeroed/1`: the shader `atomicOr`s one thread per slot | s8/s16/u16/s64/u64/f16/bf16 inputs; non-contiguous axis sets |
+| `product/3` | ✅ done — `reduce_axis_*.spv` op code 3, contiguous axis run; type pairs f32→f32, f64→f64, s32→s32, u32→u32, u8→u32, s8→s32, s16→s32, u16→u32 | `{:s,64}`/`{:u,64}`; non-contiguous axis sets **(contested — one box measured `product` resident on rank-3 `[0,2]`, which `classify_reduce_axes/2` should refuse; unresolved)** |
 | `conv/4` | ✅ done — im2col + GEMM, f32/f64, both directions | grouped conv, rank 5+ |
 | `window_*/{4,6}` | ✅ done for non-overlapping windows, both directions | overlapping backward (needs float atomics) |
 | `lu/3`, `qr/3` | not implemented | host fallback acceptable for MCMC sizes |

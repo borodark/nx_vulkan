@@ -3176,8 +3176,14 @@ defmodule Nx.Vulkan.VulkanoBackend do
   @impl true
   def clip(out, tensor, min, max) do
     # clip = min(max(t, lo), hi) — composes from our broadcast max/min, so it
-    # stays on the GPU (same-type f32/f64) instead of host round-tripping. Mixed
-    # types (e.g. f32 tensor, integer bounds) fall back per-op, still correct.
+    # stays on the GPU instead of host round-tripping.
+    #
+    # This comment used to say "same-type f32/f64" and that mixed types "fall
+    # back per-op". Both halves were wrong, and two boxes measured it: u8, s8,
+    # u16, s16, u32 and s32 are all resident, and `Nx.clip(f32_tensor, 2, 4)` —
+    # the comment's own example — stays resident at fb=0, because Nx promotes
+    # the bounds to the tensor's type BEFORE the callback ever sees them. The
+    # only fallback is {:s,64}, where the composed max/min have no kernel.
     t = ensure_on_backend(tensor)
     lo = ensure_on_backend(min)
     hi = ensure_on_backend(max)
