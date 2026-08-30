@@ -58,6 +58,29 @@ tuning problem.
 
 ---
 
+## The control-pair test: half answered
+
+`s_flush` — per-submission cost, measured as the median of adjacent marginal
+slopes over a fixed 32 dispatches split across a varying flush count. A slope,
+not an intercept, so it does not depend on extrapolating to zero, on the
+quantisation floor, or on which points enter a fit.
+
+    mac-247   4f23e59 A   532.9 us
+              4f23e59 B   522.1 us
+              6848e19 P   549.6 us
+              mean        534.9 us, 5.1% spread over three valid runs
+
+Against `s`, which disagreed 1.9x between the two Keplers, and against OLS on
+the same three runs (532.8 / 412.5 / 518.0), that is a usable quantity.
+
+**mac-248's `s_flush` is the missing half.** If it lands near 535 us the control
+pair agrees and the Jetson becomes judgeable for the first time. If it lands at
+half or double, the disagreement is deeper than the estimator and Race 1c has
+not fixed it either.
+
+super-io is out as a reference: 355 / 622 / 767 us across three runs at load
+3-5.
+
 ## What IS established
 
 **The 32 MiB allocator cliff is vulkano's, not any memory architecture's.**

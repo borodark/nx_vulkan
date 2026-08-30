@@ -1027,7 +1027,24 @@ b0 = Nx.iota({k0, n}, type: {:f, 32}, backend: VB)
 control = measure.(fn -> Nx.dot(a0, b0) end)
 
 first = Enum.find(race1, &(&1.k == k0)).ms
-drift = abs(control.median - first) / first
+drift_compute = abs(control.median - first) / first
+
+# AN ALLOCATION CONTROL TOO. The compute control certified mac-247's run Q at
+# 1.6% drift while that run's allocation was 2.2x slow across every below-cliff
+# point and its submission cost was inflated 60%. Race 1's matmuls were simply
+# fine while the two things Races 1c and 4 measure were both bad.
+#
+# That is the same blind spot as before in a new place: a control has to
+# re-measure the KIND of work whose result it is certifying. Three independent
+# checks caught run Q — the negative-slope check, the `base` mismatch, and the
+# uniform inflation of the Race 4 series — but the one the harness calls "the
+# thermal control" was not among them, and it is the one that decides
+# RACE: OK.
+alloc_first = Enum.find(race4, &(&1.mib == 24)).zeroed_ms
+alloc_control = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(24 * 1024 * 1024) end)
+drift_alloc = abs(alloc_control.median - alloc_first) / alloc_first
+
+drift = max(drift_compute, drift_alloc)
 
 IO.puts("\n--- Thermal control (k = #{k0}, the compute-dominated point, repeated last) ---")
 
@@ -1035,7 +1052,12 @@ IO.puts(
   "  first: #{:erlang.float_to_binary(first, decimals: 3)} ms   last: #{:erlang.float_to_binary(control.median, decimals: 3)} ms"
 )
 
-IO.puts("  drift: #{:erlang.float_to_binary(drift * 100, decimals: 1)}%")
+IO.puts("  compute drift:    #{:erlang.float_to_binary(drift_compute * 100, decimals: 1)}%")
+
+IO.puts(
+  "  allocation drift: #{:erlang.float_to_binary(drift_alloc * 100, decimals: 1)}%" <>
+    "   (24 MiB zeroed: #{:erlang.float_to_binary(alloc_first, decimals: 3)} -> #{:erlang.float_to_binary(alloc_control.median, decimals: 3)} ms)"
+)
 
 void? = drift > 0.10 or slope_anomaly != []
 
@@ -1098,7 +1120,16 @@ File.write!(
       race1_normalised_to: "own k=1024 gflops",
       race4: race4,
       race4_slopes_ms_per_mib: slopes,
-      thermal_control: %{first_ms: first, last_ms: control.median, drift: drift, void: void?},
+      thermal_control: %{
+        first_ms: first,
+        last_ms: control.median,
+        drift: drift,
+        drift_compute: drift_compute,
+        drift_alloc: drift_alloc,
+        alloc_first_ms: alloc_first,
+        alloc_last_ms: alloc_control.median,
+        void: void?
+      },
       slope_anomaly: Enum.map(slope_anomaly, fn {k, v} -> %{series: k, ms_per_mib: v} end),
       load_after: String.trim(load_after),
       gpu_clock_after: clock_after
