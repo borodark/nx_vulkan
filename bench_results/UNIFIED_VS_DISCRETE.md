@@ -72,8 +72,32 @@ three GPU generations.
 variance is not sampling noise but something about allocator state above the
 dedicated-allocation threshold. It is excluded from all conclusions.
 
-**DVFS is on all three architectures. RETRACTED: this section previously said
-Kepler had none.**
+**DVFS on Kepler: UNKNOWN, and pstate cannot settle it. This section has now
+been wrong twice in opposite directions — both corrections are below.**
+
+**Correction 2 (current).** The retraction below is also wrong. With the
+third-party job gone, the GPU at 0 MiB and no clients, mac-247's Kepler reads a
+stable **P0** for 54+ seconds at 56 C. Its resting state with no client is P0.
+The P8 readings that motivated correction 1 were recorded while a third-party
+job was cycling the GPU — it was observed driving P8→P0→P1→P5→P8 with
+temperature swinging 59→69→59 C and 6 MiB resident — and were misattributed to
+"the GPU left alone for 15 minutes". The box was busy.
+
+So neither previous statement holds. The field is not inert (it takes P0, P1,
+P5, P8), but because the no-client resting state IS P0, **observing P0 tells you
+nothing about whether the GPU was boosted or cold**. Pstate on this
+Kepler/470/FreeBSD combination cannot certify a cold measurement in either
+direction. The original caution was right for the wrong reason.
+
+My "an 80-second idle sample is not an idle sample" framing does not hold
+either: a genuine ramp-down was captured twice inside the contaminated window
+and runs P0→P1→P5→P8 in ~10-15 s. When it happens it is fast — it just requires
+a client present.
+
+Anyone re-sampling pstate must first verify no other process is touching the
+GPU, or they will reproduce this mistake.
+
+**Correction 1 (superseded, kept because the error is instructive).**
 
 The claim was that Kepler holds P0 through 80 s of idle sampling and never
 enters a low-power state, so the boosting parts were Ampere and Tegra and the
