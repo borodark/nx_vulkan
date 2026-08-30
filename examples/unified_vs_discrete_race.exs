@@ -163,20 +163,32 @@ measure = fn fun ->
       t1 = System.monotonic_time(:microsecond)
       :ok = NativeV.flush()
       t2 = System.monotonic_time(:microsecond)
-      {(t1 - t0) / 1000.0, (t2 - t0) / 1000.0}
+      # Per-rep GPU time is t2-t1, kept as its own sample. Do NOT reconstruct it
+      # as median(total) - median(enqueue): that is a difference of medians, and
+      # host time here is BIMODAL — mac-247 measured clean modes at ~0.61 ms and
+      # ~1.23 ms, almost exactly 2x apart, with the median landing on whichever
+      # dominates a given sample and flipping between runs and between k. A
+      # difference of medians can then be off by the whole 0.6 ms mode gap,
+      # which at k=4 is 50% of the GPU time — precisely where it matters most.
+      # Taking the median of the per-rep differences removes the exposure for
+      # free, and is what the two quantities were always meant to be.
+      {(t1 - t0) / 1000.0, (t2 - t0) / 1000.0, (t2 - t1) / 1000.0}
     end
 
   enq = Enum.map(samples, &elem(&1, 0))
   tot = Enum.map(samples, &elem(&1, 1))
-  med_tot = median.(tot)
-  med_enq = median.(enq)
+  gpu = Enum.map(samples, &elem(&1, 2))
 
   %{
-    median: med_tot,
+    median: median.(tot),
     min: Enum.min(tot),
     max: Enum.max(tot),
-    enqueue: med_enq,
-    gpu: med_tot - med_enq
+    enqueue: median.(enq),
+    # Reported alongside the median because the host distribution is bimodal:
+    # a single host% figure is not "value +/- noise", it is one of two modes.
+    # mac-247's k=4 host share is properly 33-50% depending on which one lands.
+    enqueue_min: Enum.min(enq),
+    gpu: median.(gpu)
   }
 end
 
@@ -255,6 +267,7 @@ race1 =
       ms_min: m.min,
       ms_max: m.max,
       host_ms: m.enqueue,
+      host_ms_min: m.enqueue_min,
       gpu_ms: gpu_ms,
       host_pct: host_pct,
       gflops: gflops,
