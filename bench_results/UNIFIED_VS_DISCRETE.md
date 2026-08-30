@@ -81,6 +81,47 @@ not fixed it either.
 super-io is out as a reference: 355 / 622 / 767 us across three runs at load
 3-5.
 
+### VERDICT: the pair disagrees, and it is not an artifact of the estimator
+
+    mac-247   532.9 / 522.1 / 549.6 us   mean 534.9
+    mac-248   396.5 / 372.0 us           mean 384.2
+    gap       1.39x — far outside 247's 5.1% and 248's 6.4%
+
+Race 1c did not rescue the control pair. It did something more useful: it made
+the disagreement diagnosable.
+
+**mac-248's discriminator settles what `s_flush` is measuring.** `base` is the
+per-dispatch record and GPU work at a fixed dispatch count, so if `s_flush` were
+still a mixture the box with more GPU work would carry the higher `s_flush`.
+The opposite holds:
+
+    box       base/dispatch    s_flush
+    mac-247      0.585 ms       535 us
+    mac-248      0.730 ms       384 us
+
+248 does **1.25x more GPU work per dispatch and has 1.39x LOWER submission
+cost**. The two move in opposite directions, so `s_flush` is separating
+something real from GPU work — the disagreement lives in the submission path
+itself, not in a residual mixture. That is the decomposition working and the
+control pair failing, at the same time.
+
+**"Same architecture" was never "same hardware", and that assumption was mine.**
+248 is right to flag it: a GT 650M and a GT 750M are different SKUs on different
+Mac hosts, and `s_flush` is a host-and-driver-dominated quantity. Agreement to a
+few percent was an assumption stated as a null hypothesis.
+
+**The pstate difference is real and is a candidate mechanism.** Under an
+identical 20-minute idle protocol, 41 consecutive samples, thermally settled at
+56 C by t+9:30, mac-248's GT 750M **never leaves P0** while mac-247's GT 650M
+reaches a stable P8. If 247's card sits in P8 between measurements and 248's
+never does, the two are not interchangeable controls — 247's clocks may still be
+ramping through part of its measurement. Sampling pstate *during* Race 1c rather
+than at idle would settle it.
+
+Excluding F=1 (below) tightens both boxes' within-run spread but does **not**
+close the gap: at F>=2 the pair reads ~528 vs ~366, a 1.44x ratio. The
+disagreement is robust to the estimator.
+
 ### The criterion, stated before 248's number is known
 
 mac-247 proposed this while its own result was the only one in hand, and it is

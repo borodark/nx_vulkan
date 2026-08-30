@@ -803,9 +803,23 @@ end
 # The median needs no window choice and no outlier detector: a corrupted point
 # poisons two adjacent pairs and the median walks past both. 247's run B
 # marginals were 9399, -3414, 281, 540, 522 us — the median lands on 522.
+# F=1 IS A SEPARATE REGIME AND IS EXCLUDED. mac-248 measured the F=1->2 marginal
+# at 839 and 933 us against a settled ~350 — reproducible across both runs, so
+# structural rather than a spike. With a single flush the one submit_and_wait
+# overlaps all 32 dispatches; at F=2 a mid-sequence sync is forced that cannot
+# overlap. That step is real physics but it is not the per-submission cost, and
+# including it inflates the estimate.
+#
+# Both Keplers show the same shape — 247's first marginals are 751 and 727
+# against its settled ~530 — so this is not one box's quirk. Dropping F=1
+# tightens 248's between-run spread from 6.4% to 2.4%, matching 247's quality.
+# super-io curves the OTHER way (its low-F points sit below its slope), so the
+# exclusion is justified on the control boxes and simply removes a point
+# elsewhere.
 marginals =
   race1c
   |> Enum.sort_by(& &1.flushes)
+  |> Enum.filter(&(&1.flushes >= 2))
   |> Enum.chunk_every(2, 1, :discard)
   |> Enum.map(fn [a, b] -> (b.total_ms - a.total_ms) / (b.flushes - a.flushes) end)
 
@@ -818,7 +832,8 @@ IO.puts(
 )
 
 IO.puts(
-  "    s_flush (OLS, diagnostic)     = #{:erlang.float_to_binary(s_flush_ols * 1000, decimals: 1)} us"
+  "    s_flush (OLS, diagnostic)     = #{:erlang.float_to_binary(s_flush_ols * 1000, decimals: 1)} us" <>
+    "   [read TOGETHER with the median: agreement = clean, divergence = contaminated]"
 )
 
 IO.puts(
