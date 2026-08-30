@@ -92,9 +92,15 @@ end
 # the driver holds gigabytes.
 #
 # Without the collect below, this loop killed Race 4 outright on both Keplers
-# with "alloc buffer: a non-validation error occurred". The loop is FLUSH-bound,
-# not alloc-bound — ~36 iterations in 250 ms at ~7 ms each — so it retains about
-# 0.9 GiB per `measure` call at 26 MiB.
+# with "alloc buffer: a non-validation error occurred".
+#
+# The iteration counts are worth stating carefully, because the obvious reading
+# is wrong. The BROKEN loop managed only ~40 iterations in 250 ms — but not
+# because each one was slow in itself. Retained allocations degrade the next
+# allocation, so the loop grinds to a halt and then fails. Remove the leak and
+# the SAME loop, still flushing, does ~22,000 iterations in the same 250 ms.
+# `flush` is not the cost: `buf_alloc` enqueues no GPU work for it to drain, and
+# it measures 7.5 us on the Ampere and 3 us on a Kepler.
 #
 # It is NOT simple VRAM exhaustion, and it is worth saying so because that was
 # the first diagnosis and it was wrong. Both boxes failed at the identical
@@ -111,30 +117,67 @@ end
 # slope that looks clean. Every Race 4 number taken before this fix is void,
 # super-io's included.
 measure = fn fun ->
-  warm_until = System.monotonic_time(:millisecond) + 250
+  # 600 ms and at least 3 iterations. The Tegra needs ~500 ms to reach its boost
+  # state, and a single k=1024 dot there takes 365 ms — so the old 250 ms budget
+  # ran exactly ONE warm iteration on the box that most needed warming, and
+  # crossed the boost threshold only because that one cold dot happened to take
+  # 698 ms. Marginal by luck, not by design.
+  warm_until = System.monotonic_time(:millisecond) + 600
 
-  warm = fn self ->
-    if System.monotonic_time(:millisecond) < warm_until do
+  warm = fn self, iters ->
+    if System.monotonic_time(:millisecond) < warm_until or iters < 3 do
       _ = fun.()
       :ok = NativeV.flush()
       :erlang.garbage_collect()
-      self.(self)
+      self.(self, iters + 1)
     end
   end
 
-  warm.(warm)
+  warm.(warm, 0)
 
+  # TWO timers per rep, and the split is the point.
+  #
+  # `enqueue` is everything before the queue is submitted: the Nx frontend,
+  # shape and type checks, buffer binding, command recording — all HOST work.
+  # `total` adds the flush, i.e. the GPU actually doing it.
+  #
+  # This exists because the plan's rule 6 was wrong, and it was my rule. It said
+  # normalising to the box's own baseline cancels the crippled host. That holds
+  # only for a MULTIPLICATIVE host factor. Measured on the Jetson, host cost is
+  # roughly CONSTANT and ADDITIVE (~3-6 ms regardless of k), so it does not
+  # cancel in a ratio at all — it depresses the small-k points far more than
+  # k=1024, in proportion to how slow the host is: 28-30% of measured time at
+  # k=4 on a --disable-jit 5W box against 1.6% at k=1024, and a fraction of a
+  # percent on a fast host. The two leftmost points were not cross-box
+  # comparable even after normalising.
+  #
+  # Direction matters: unified memory should make the Jetson look relatively
+  # BETTER at small k, while this confound pushes it WORSE there. So it biases
+  # against the hypothesis — a positive effect would be a lower bound, but a
+  # null at small k would have been uninterpretable.
   samples =
     for _ <- 1..reps do
       :erlang.garbage_collect()
       t0 = System.monotonic_time(:microsecond)
       _ = fun.()
-      :ok = NativeV.flush()
       t1 = System.monotonic_time(:microsecond)
-      (t1 - t0) / 1000.0
+      :ok = NativeV.flush()
+      t2 = System.monotonic_time(:microsecond)
+      {(t1 - t0) / 1000.0, (t2 - t0) / 1000.0}
     end
 
-  %{median: median.(samples), min: Enum.min(samples), max: Enum.max(samples)}
+  enq = Enum.map(samples, &elem(&1, 0))
+  tot = Enum.map(samples, &elem(&1, 1))
+  med_tot = median.(tot)
+  med_enq = median.(enq)
+
+  %{
+    median: med_tot,
+    min: Enum.min(tot),
+    max: Enum.max(tot),
+    enqueue: med_enq,
+    gpu: med_tot - med_enq
+  }
 end
 
 IO.puts("\n=== unified vs discrete: Races 1 and 4 ===")
@@ -176,7 +219,7 @@ n = 512
 ks = [4, 16, 64, 256, 1024]
 
 IO.puts("\n--- Race 1: arithmetic intensity (n = #{n}, f32 matmul) ---")
-IO.puts("     k      ms    GFLOP/s     GB/s")
+IO.puts("     k   total_ms  host_ms   gpu_ms  host%   GFLOP/s(gpu)")
 
 race1 =
   for k <- ks do
@@ -189,19 +232,68 @@ race1 =
 
     flops = 2 * n * n * k
     bytes = (2 * n * k + n * n) * 4
-    gflops = flops / (m.median / 1000.0) / 1.0e9
-    gbs = bytes / (m.median / 1000.0) / 1.0e9
+    gpu_ms = max(m.gpu, 0.001)
+    gflops = flops / (gpu_ms / 1000.0) / 1.0e9
+    gbs = bytes / (gpu_ms / 1000.0) / 1.0e9
+    host_pct = m.enqueue / m.median * 100
 
     IO.puts(
-      "  #{String.pad_leading("#{k}", 4)}  #{:erlang.float_to_binary(m.median, decimals: 3)}" <>
-        "  #{:erlang.float_to_binary(gflops, decimals: 2)}" <>
-        "  #{:erlang.float_to_binary(gbs, decimals: 3)}"
+      "  #{String.pad_leading("#{k}", 4)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(m.median, decimals: 3), 8)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(m.enqueue, decimals: 3), 7)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(gpu_ms, decimals: 3), 7)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(host_pct, decimals: 1), 5)}%" <>
+        "  #{:erlang.float_to_binary(gflops, decimals: 2)}"
     )
 
-    %{k: k, ms: m.median, ms_min: m.min, ms_max: m.max, gflops: gflops, gbs: gbs}
+    %{
+      k: k,
+      ms: m.median,
+      ms_min: m.min,
+      ms_max: m.max,
+      host_ms: m.enqueue,
+      gpu_ms: gpu_ms,
+      host_pct: host_pct,
+      gflops: gflops,
+      gbs: gbs
+    }
   end
 
 # Normalised to this box's own k = 1024 point. THIS is the comparable number.
+# TILE QUANTISATION. If two adjacent k values take the same GPU time despite a
+# 4x difference in FLOPs, the kernel is padding small k up to a fixed workgroup
+# tile and the nominal arithmetic intensity at that point is FICTIONAL — it is
+# measuring padding, not intensity. Both Keplers show k=4 and k=16 within a
+# fraction of a percent of each other (1.830 vs 1.838 ms; 1.457 vs 1.454) while
+# doing 4x the work, so this is not hypothetical and it is not box-specific.
+#
+# It matters because the low-k end is exactly where a transfer-dominated regime
+# would live, i.e. exactly where unified memory should show up. A sweep whose
+# left edge is quantised cannot answer the question there.
+quantised =
+  race1
+  |> Enum.chunk_every(2, 1, :discard)
+  |> Enum.filter(fn [a, b] ->
+    # Two signatures, and the second is the stronger one. NEAR-EQUAL: same GPU
+    # time for 4x the FLOPs. INVERTED: the larger k is actually FASTER, which no
+    # amount of arithmetic intensity can explain and only padding can. super-io
+    # shows the inversion (k=4 0.818 ms vs k=16 0.599 ms); both Keplers show the
+    # near-equality. The first detector caught only the Keplers' shape.
+    near_equal = abs(b.gpu_ms - a.gpu_ms) / max(a.gpu_ms, 0.001) < 0.10
+    inverted = b.gpu_ms < a.gpu_ms
+    near_equal or inverted
+  end)
+  |> Enum.map(fn [a, b] -> {a.k, b.k} end)
+
+if quantised != [] do
+  IO.puts("\n  !! TILE QUANTISATION suspected between k pairs: #{inspect(quantised)}")
+  IO.puts("     Those points take the same GPU time for 4x the FLOPs, so their")
+  IO.puts("     nominal arithmetic intensity is fictional. Do not read the left")
+  IO.puts("     edge of this sweep as a transfer-dominated regime.")
+end
+
+# Normalised on the GPU-ONLY figure, not the total — see the note in `measure`
+# about why the total does not normalise away a slow host.
 base1 = Enum.find(race1, &(&1.k == 1024)).gflops
 
 IO.puts("\n  normalised to this box's own k=1024 GFLOP/s (the cross-box comparable):")
@@ -249,15 +341,30 @@ race4 =
 below = Enum.filter(race4, &(&1.mib < 32))
 above = Enum.filter(race4, &(&1.mib >= 32))
 
+# Least-squares fit, not endpoint-to-endpoint. The endpoint form is a two-point
+# estimate in which a single ragged interior sample sets the whole answer, and
+# Race 4 has ragged samples: mac-247 measured 38 MiB at 121.8 ms against 36's
+# 64.1 and 40's 73.5. A fit uses every point and degrades gracefully; the
+# endpoint version would have reported that box's slope off two numbers, one of
+# which happens to sit next to an outlier.
 slope = fn rows, key ->
-  case rows do
-    [] ->
-      0.0
+  n = length(rows)
 
-    _ ->
-      {lo, hi} = {List.first(rows), List.last(rows)}
-      d = hi.mib - lo.mib
-      if d == 0, do: 0.0, else: (Map.get(hi, key) - Map.get(lo, key)) / d
+  if n < 2 do
+    0.0
+  else
+    xs = Enum.map(rows, & &1.mib)
+    ys = Enum.map(rows, &Map.get(&1, key))
+    mx = Enum.sum(xs) / n
+    my = Enum.sum(ys) / n
+
+    num =
+      Enum.zip(xs, ys)
+      |> Enum.map(fn {x, y} -> (x - mx) * (y - my) end)
+      |> Enum.sum()
+
+    den = xs |> Enum.map(fn x -> (x - mx) * (x - mx) end) |> Enum.sum()
+    if den == 0.0, do: 0.0, else: num / den
   end
 end
 
@@ -340,6 +447,7 @@ File.write!(
       device: device,
       reps: reps,
       race1: race1_norm,
+      quantised_k_pairs: Enum.map(quantised, &Tuple.to_list/1),
       race1_normalised_to: "own k=1024 gflops",
       race4: race4,
       race4_slopes_ms_per_mib: slopes,
