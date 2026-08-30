@@ -236,6 +236,43 @@ Every one biased the answer. Three were introduced while fixing the previous one
 
 ---
 
+## The pstate question, resolved on the third attempt
+
+This document was wrong about Kepler DVFS twice, in opposite directions. The
+coherent version is that **pstate alone cannot certify anything, but pstate
+together with `memory.used` detects a foreign GPU client**:
+
+    0 MiB resident, P0, no beam.smp at high CPU   -> genuinely free
+    6 MiB resident, P8, sustained                 -> another client is attached
+
+That is the signature mac-247 misread as "a long idle produced P8". It was a
+third-party job holding the card. The card's own resting state with no client is
+P0, so observing P0 tells you nothing about whether a measurement was warm — but
+observing P8 *with memory resident* reliably tells you someone else is there.
+
+**Check `nvidia-smi --query-gpu=pstate,memory.used` before any timing on this
+fleet.** A quiet CPU does not mean a free card.
+
+## Race 2's cancellation argument has a limit, and it is not symmetric
+
+PRICE cancels host speed, GPU speed, driver overhead and SKU because they appear
+in both arms — but that holds only if contamination is **symmetric**. A foreign
+GPU client is not: it shares the PCIe path, the driver submission queues and the
+DMA staging, all of which the round-trip arm uses far more than the resident arm.
+So interference inflates `boundary` while leaving `compute` comparatively
+intact, and since PRICE is `boundary/compute` the contamination multiplies
+straight into the headline instead of cancelling.
+
+mac-247 demonstrated this shape already: its `6848e19` run Q had allocation and
+submission both ~2x slow while Race 1's matmuls stayed clean at 1.6% drift. A
+one-sided inflation of exactly that kind would produce a plausible PRICE curve
+with a wrong growth factor — and the growth factor is the robust part the
+prediction rests on.
+
+**So Race 2 needs a genuinely free GPU more than the earlier races did, not
+less.** Its within-box design removes the cross-box confounds; it does not remove
+this one.
+
 ## Staged and unrun: the Race 1c clock trace
 
 `/tmp/run_trace.sh` and `/tmp/run_trace.README` on the Jetson (192.168.0.250),
