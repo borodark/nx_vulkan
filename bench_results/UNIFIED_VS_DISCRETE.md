@@ -251,6 +251,48 @@ discrete Ampere** — on both discriminators. Two unrelated discrete cards do no
 agree on the shape, so the shape belongs to super-io rather than to paying a bus.
 That is the control doing its job, and the answer is negative.
 
+### Dividing out GPU throughput does not change the answer — and shows why
+
+Both Race 2 terms move the same bytes (the crossing is upload+download of
+`size`; one op is read+write of `size`), so expressing each as a **bandwidth**
+divides out GPU compute throughput by construction. That is the only
+normalisation available which does not compare a bandwidth against a FLOPs rate.
+At 16 MiB:
+
+    box                    memory    cross GB/s   "dev" GB/s   ratio
+    super-io RTX 3060 Ti   discrete      5.63        16.01      0.35
+    mac-247  GT 650M       discrete      6.64         6.05      1.10
+    mac-248  GT 750M       discrete      7.91         6.31      1.25
+    jetson   Tegra X1      UNIFIED       2.07         2.02      1.03
+
+The ordering is unchanged: the two discrete Keplers still sit with the unified
+Jetson and super-io is still the outlier. Normalising properly did not rescue
+the comparison.
+
+**And the reason is now measurable. The denominator is not a bandwidth.** A
+direct probe of the elementwise path on super-io, GC'd per iteration:
+
+    4 MiB   0.633 ms/op   12.3 GB/s
+   16 MiB   1.907 ms/op   16.4 GB/s
+   64 MiB  40.382 ms/op    3.1 GB/s   <- output crosses the 32 MiB cliff
+
+It plateaus at **16.4 GB/s against a 448 GB/s card — 27x off memory
+bandwidth** — and collapses above the allocation cliff. So `dev GB/s` is a
+dispatch-bound quantity wearing bandwidth units, and it differs across boxes for
+reasons that have nothing to do with memory architecture.
+
+That is precisely why the Keplers read ~1.0. It is a **coincidence**: their
+elementwise path happens to be about as slow as their PCIe link, so crossing and
+compute land together. The Jetson's ~1.0 is meaningful — same physical RAM — but
+the measurement cannot distinguish "same memory" from "compute as slow as the
+bus", and on this fleet three of four boxes are in the second category.
+
+**So the blocker is not the experimental design any more. It is that
+nx_vulkan's elementwise path runs 27x below memory bandwidth.** Until the
+denominator saturates, no ratio built on it can separate a memory architecture
+from a slow shader. That is a finding about the backend, and it is actionable in
+a way the race never was.
+
 ### mac-248 confirms it independently, and sharpens the mechanism
 
     box                    64 KiB   1 MiB   16 MiB   growth

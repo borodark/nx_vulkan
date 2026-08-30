@@ -921,7 +921,10 @@ n_ops = 32
 sizes_kib = [64, 256, 1024, 4096, 16384]
 
 IO.puts("\n--- Race 2: price of a host<->device round trip, in ops (within-box) ---")
-IO.puts("     KiB   resident_ms  roundtrip_ms   boundary_ms   compute_ms    PRICE")
+
+IO.puts(
+  "     KiB   resident_ms  roundtrip_ms   boundary_ms   compute_ms    PRICE   cross_GB/s   dev_GB/s"
+)
 
 race2 =
   for kib <- sizes_kib do
@@ -948,6 +951,18 @@ race2 =
     b = measure.(roundtrip)
     :erlang.garbage_collect()
 
+    # Both terms move the SAME bytes — the crossing is upload+download of `bytes`,
+    # one op is read+write of `bytes` — so expressing each as a bandwidth divides
+    # out GPU compute throughput by construction. That is what "divide out GPU
+    # throughput" means here, and it is the only normalisation available that
+    # does not compare a bandwidth against a FLOPs rate.
+    #
+    # It also makes the blocking problem visible: `device_gbs` below is NOT
+    # device memory bandwidth. On super-io the elementwise path plateaus at
+    # 16.4 GB/s against a 448 GB/s card — 27x off — and collapses to 3.1 GB/s
+    # once the output crosses the 32 MiB allocation cliff. The denominator is a
+    # dispatch-bound quantity wearing bandwidth units.
+    moved_gib = 2.0 * bytes / (1024 * 1024 * 1024)
     boundary = (b.median - a.median) / (n_ops - 1)
 
     # compute = (a - boundary) / N, NOT a / N. mac-248 caught this: arm (a) is
@@ -959,6 +974,8 @@ race2 =
     # rather than arguing about.
     compute = (a.median - boundary) / n_ops
     price = boundary / max(compute, 1.0e-9)
+    crossing_gbs = moved_gib / max(boundary / 1000.0, 1.0e-12)
+    device_gbs = moved_gib / max(compute / 1000.0, 1.0e-12)
 
     IO.puts(
       "  #{String.pad_leading("#{kib}", 6)}" <>
@@ -966,7 +983,9 @@ race2 =
         "  #{String.pad_leading(:erlang.float_to_binary(b.median, decimals: 3), 12)}" <>
         "  #{String.pad_leading(:erlang.float_to_binary(boundary, decimals: 4), 12)}" <>
         "  #{String.pad_leading(:erlang.float_to_binary(compute, decimals: 4), 11)}" <>
-        "  #{String.pad_leading(:erlang.float_to_binary(price, decimals: 2), 8)}"
+        "  #{String.pad_leading(:erlang.float_to_binary(price, decimals: 2), 8)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(crossing_gbs, decimals: 2), 11)}" <>
+        "  #{String.pad_leading(:erlang.float_to_binary(device_gbs, decimals: 2), 9)}"
     )
 
     %{
@@ -975,7 +994,9 @@ race2 =
       roundtrip_ms: b.median,
       boundary_ms: boundary,
       compute_ms: compute,
-      price: price
+      price: price,
+      crossing_gbs: crossing_gbs,
+      device_gbs: device_gbs
     }
   end
 
