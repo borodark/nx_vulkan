@@ -128,13 +128,40 @@ IO.puts("\n===== CONTROL: can this box's allocator be poisoned at all? =====\n")
     end
   end
 
+# Effectiveness is a SAMPLE, not a property of the box. The Jetson scored the
+# same 16 x 8 MiB scheme 40/40 in one run and 20/40 in the next, and its sweep
+# then picked a different winner than its fast path did. So a single 0 is not
+# proof the pool cannot be dirtied — and a false vacuous-FAIL is its own wrong
+# answer, condemning a box that poisons perfectly well. Re-sample every
+# candidate before declaring anything.
+{label, count, size, dirty} =
+  if dirty > 0 do
+    {label, count, size, dirty}
+  else
+    IO.puts("\n  0/40 on the first sample — re-sampling before declaring vacuous\n")
+
+    Enum.reduce_while(1..3, {label, count, size, 0}, fn round, _acc ->
+      best =
+        candidates
+        |> Enum.map(fn {l, c, sz} ->
+          d = score.(c, sz)
+          IO.puts("  round #{round}: #{String.pad_trailing(l, 50)} #{d}/40")
+          {l, c, sz, d}
+        end)
+        |> Enum.max_by(fn {_, _, _, d} -> d end)
+
+      if elem(best, 3) > 0, do: {:halt, best}, else: {:cont, best}
+    end)
+  end
+
 if dirty == 0 do
   IO.puts("""
 
   !! NO SCHEME DIRTIED THE POOL ON THIS BOX.
 
-     Every freed buffer came back zeroed, so a shader that depends on zeroed
-     memory would pass here regardless. This run can neither confirm nor deny
+     Every freed buffer came back zeroed across FOUR independent samples of
+     every candidate scheme, so a shader that depends on zeroed memory would
+     pass here regardless. This run can neither confirm nor deny
      the uninitialised-allocator claim — it is VACUOUS, and a vacuous control
      must not be recorded as a clean result.
 
@@ -311,7 +338,12 @@ Enum.each(typed_bad, fn m -> IO.puts("    #{inspect(m)}") end)
 
 IO.puts("\n===== SUMMARY =====")
 IO.puts("  scheme:                #{label}")
-IO.puts("  effectiveness:         #{dirty}/40 dirty probes")
+
+IO.puts(
+  "  effectiveness:         #{dirty}/40 dirty probes" <>
+    if(dirty < 40, do: " (a sample — this varies run to run)", else: "")
+)
+
 IO.puts("  padded buffers seen:   #{padded} (non-zero padding: #{dirty_pad})")
 IO.puts("  padding-size probes:   #{pad_dirty}/20 dirty at 4 B / 8 B")
 IO.puts("  padded-writer concat:  #{length(padded_bad)} mismatches")
