@@ -3170,9 +3170,10 @@ defmodule Nx.Vulkan.VulkanoBackend do
     end
   end
 
-  # clip: elementwise clip to [min, max]. min and max arrive as
-  # scalar tensors. Could decompose to two elementwise ops on the
-  # GPU later; for now, Tier 1 host fallback keeps the contract.
+  # clip: elementwise clip to [min, max]. min and max arrive as scalar tensors.
+  # (This block used to end "for now, Tier 1 host fallback keeps the contract",
+  # contradicting the implementation immediately below it — the decomposition it
+  # calls future work had already shipped.)
   @impl true
   def clip(out, tensor, min, max) do
     # clip = min(max(t, lo), hi) — composes from our broadcast max/min, so it
