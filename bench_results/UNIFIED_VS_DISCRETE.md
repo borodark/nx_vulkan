@@ -72,12 +72,36 @@ three GPU generations.
 variance is not sampling noise but something about allocator state above the
 dedicated-allocation threshold. It is excluded from all conclusions.
 
-**DVFS cuts across the discrete/unified split, not along it.** Kepler holds P0
-through 80 s of idle sampling and never enters a low-power state; its k=1024
-GPU time reads 57.524 / 57.497 / 57.507 / 57.537 / 57.505 ms across six runs at
-four commits — a 0.07% band. Ampere drops to P8/210 MHz of a 2100 MHz maximum;
-Tegra idles to 76.8 MHz of 614.4. **The boosting parts are Ampere and Tegra; the
-one that does not is Kepler.**
+**DVFS is on all three architectures. RETRACTED: this section previously said
+Kepler had none.**
+
+The claim was that Kepler holds P0 through 80 s of idle sampling and never
+enters a low-power state, so the boosting parts were Ampere and Tegra and the
+one that did not was Kepler — cutting across the discrete/unified split. That
+was wrong, and mac-247 retracted it against its own earlier evidence.
+
+Left alone for ~15 minutes, that Kepler reads a stable **P8**, sampled five
+times. Every prior reading was taken within a couple of minutes of a GPU
+workload, i.e. inside the ramp-down window, which is why they were all P0. An
+80-second idle sample is not an idle sample on this hardware. The field was
+never inert; a null was over-read.
+
+Consequences:
+
+* Clock pinning is **load-bearing on Kepler too**, not the no-op predicted.
+* The −10.8% that pinning moved on that box's small-k plateau (against +0.11% on
+  its throughput region) was attributed to a warm-pipeline effect on the grounds
+  that "a clock change would scale the throughput region too". With DVFS
+  present that is no longer the only candidate — a P8→P0 transition plausibly
+  hits the dispatch floor harder, since a long compute-bound dispatch has time
+  to ramp within itself and a 1 ms one does not. **Unresolved.**
+* What survives is the operational conclusion, on better grounds: prefer `s` and
+  `s_flush` over any empirical floor, because the floor is what moves — not
+  because the pstate field is useless, but because these boxes genuinely change
+  power state and cold floors are therefore untrustworthy.
+
+mac-248's P0 readings carry the same defect and want re-sampling after a long
+idle before its pstate data is used for anything.
 
 **Neither discrete box is near a roofline** — 1.3% and 0.4% of peak f32. The
 k-sweep does not walk an arithmetic-intensity roofline; "arithmetic intensity"
