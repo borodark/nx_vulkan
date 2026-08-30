@@ -81,6 +81,25 @@ not fixed it either.
 super-io is out as a reference: 355 / 622 / 767 us across three runs at load
 3-5.
 
+### The criterion, stated before 248's number is known
+
+mac-247 proposed this while its own result was the only one in hand, and it is
+recorded here before the comparison exists so the threshold cannot be chosen to
+suit the answer:
+
+* **Within ~10% of 535 us → the control pair is consistent**, and the Jetson
+  becomes judgeable for the first time.
+* **Outside ~10% → do not conclude the pair disagrees yet.** Take a fourth
+  mac-247 run on a verified-quiet window first.
+
+The asymmetry is deliberate and is 247's own reasoning: its 5.1% is three runs
+rather than a distribution, and two of them came from the same session minutes
+apart. It also now knows first-hand how easily third-party GPU work hides inside
+a nominally idle reading — its second pstate error was *more* confident than its
+first precisely because it had fresh data and did not ask where the data came
+from. A disagreement is therefore the claim that needs the extra run, not the
+agreement.
+
 ## What IS established
 
 **The 32 MiB allocator cliff is vulkano's, not any memory architecture's.**
