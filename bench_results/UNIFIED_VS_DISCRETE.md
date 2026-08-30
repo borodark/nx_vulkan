@@ -236,6 +236,60 @@ Every one biased the answer. Three were introduced while fixing the previous one
 
 ---
 
+## RACE 2 RESULT: the within-box ratio does not isolate memory architecture either
+
+Three boxes, replicated, with the DVFS confound measured directly on the two
+that could show it:
+
+    box                    memory     c ns/el   PRICE >=1MiB   low-to-mid rise
+    super-io RTX 3060 Ti   discrete      1.06        3.05           2.34x
+    mac-247  GT 650M       discrete      3.61        1.22           0.74x
+    jetson   Tegra X1      UNIFIED      22.30        0.97           0.86x
+
+**mac-247 is discrete and it groups with the unified Jetson, not with the
+discrete Ampere** — on both discriminators. Two unrelated discrete cards do not
+agree on the shape, so the shape belongs to super-io rather than to paying a bus.
+That is the control doing its job, and the answer is negative.
+
+### Why: PRICE inherits the same flaw as `a` and as rule 6
+
+PRICE is `boundary / compute`, and the cancellation argument was that host, GPU,
+driver and SKU appear in both terms so they divide out. **They do not, because
+the two terms are different physics.** The boundary term is bus- or
+memcpy-bandwidth-bound; the compute term is GPU-throughput-bound. A fast GPU
+shrinks the denominator without shrinking the numerator, so it raises PRICE with
+no change in memory architecture whatsoever.
+
+The data says exactly that. Compute per element spans **21x** across the fleet
+(1.06 → 22.30 ns) and PRICE spans **3.1x in the opposite direction**. PRICE
+tracks GPU speed, and the discrete/unified split does not predict it.
+
+This is the third instance of the same error, all mine:
+
+* **rule 6** — "normalising to a box's own baseline cancels a slow host". False:
+  host cost is additive, not multiplicative.
+* **`a`** — assumed to be submission cost. Actually a mixture of submission and
+  fixed GPU work, which is why it scaled at 14x where throughput scaled at 23x.
+* **PRICE** — assumed to cancel because both terms share a machine. They share a
+  machine and not a mechanism.
+
+Each time the mistake was asserting that terms appearing on both sides cancel,
+without checking they were the same kind of quantity.
+
+### What the boxes established along the way
+
+* **The per-arm clock confound is real on discrete hardware.** mac-247 measured
+  its round-trip arm spending 65-75% of its time in P1 at 1 MiB while the
+  resident arm never left P0, reproducible across two probes. At 16 MiB both
+  arms hold P0. The Jetson measured a flat 614.4 MHz in every arm at every size.
+  Direction is conservative in both cases: a sagging clock in the low-duty arm
+  inflates PRICE, so both boxes' low values are upper bounds.
+* **End-to-end growth is not a usable statistic.** mac-247's two largest sizes
+  replicate at 57% and 64%, with one large point corrupted per run in opposite
+  positions — end-to-end growth read 0.68x and 1.29x on the same box. The 64 and
+  256 KiB points replicate to 2.2% and 4.9%, so the low-to-mid rise is the part
+  that survives. The harness now reports both, labelled.
+
 ## The pstate question, resolved on the third attempt
 
 This document was wrong about Kepler DVFS twice, in opposite directions. The

@@ -993,8 +993,20 @@ IO.puts(
   "  PRICE at #{List.last(race2).kib} KiB = #{:erlang.float_to_binary(price_hi, decimals: 2)} ops"
 )
 
+# LOW-TO-MID RISE, not end-to-end growth. mac-247 replicated Race 2 and its two
+# largest sizes came back 57% and 64% apart, with one large point corrupted per
+# run in OPPOSITE positions — so end-to-end growth read 0.68x and 1.29x on the
+# same box. The 64 and 256 KiB points replicate to 2.2% and 4.9%, and the
+# low-to-mid rise lives entirely in sizes that replicate under 5%.
+price_mid = Enum.find(race2, &(&1.kib == 1024)).price
+lo_mid_rise = price_mid / max(price_lo, 1.0e-9)
+
 IO.puts(
-  "  growth over the sweep       = #{:erlang.float_to_binary(price_hi / max(price_lo, 1.0e-9), decimals: 2)}x"
+  "  low-to-mid rise (64->1024)  = #{:erlang.float_to_binary(lo_mid_rise, decimals: 2)}x   [replicates <5%]"
+)
+
+IO.puts(
+  "  end-to-end growth           = #{:erlang.float_to_binary(price_hi / max(price_lo, 1.0e-9), decimals: 2)}x   [does NOT replicate — large sizes swing 57-64%]"
 )
 
 IO.puts("  A crossing costs this many ops-worth of time ON THIS BOX. Both terms")
@@ -1025,7 +1037,7 @@ IO.puts("     MiB   alloc ms  zeroed ms")
 # process pays driver first-touch that per-call warming does not cover, and
 # Race 1b now runs between Race 1 and Race 4, so the allocator arrives in a
 # different state than it used to.
-for _ <- 1..3 do
+for _ <- 1..12 do
   {:ok, _} = NativeV.buf_alloc(24 * 1024 * 1024)
   {:ok, _} = NativeV.buf_alloc_zeroed(24 * 1024 * 1024)
   :erlang.garbage_collect()
@@ -1202,9 +1214,16 @@ drift_compute = abs(control.median - first) / first
 # uniform inflation of the Race 4 series — but the one the harness calls "the
 # thermal control" was not among them, and it is the one that decides
 # RACE: OK.
-alloc_first = Enum.find(race4, &(&1.mib == 24)).zeroed_ms
-alloc_control = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(24 * 1024 * 1024) end)
+# Anchored at 28 MiB, MID-sweep, not at 24 which is the first size measured.
+# mac-247 recorded 54% allocation drift on a VERIFIED-FREE box, load 0.13-0.54
+# throughout — and the allocation got FASTER over the run, 2.646 -> 1.216 ms.
+# That is a cold-allocator warm-up transient on whichever size goes first, not
+# throttling or contention, and anchoring the control there false-VOIDs healthy
+# runs. Exactly the failure the k=4-anchored thermal control had.
+alloc_first = Enum.find(race4, &(&1.mib == 28)).zeroed_ms
+alloc_control = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(28 * 1024 * 1024) end)
 drift_alloc = abs(alloc_control.median - alloc_first) / alloc_first
+alloc_got_faster = alloc_control.median < alloc_first
 
 drift = max(drift_compute, drift_alloc)
 
@@ -1225,6 +1244,13 @@ void? =
   drift > 0.10 or slope_anomaly != [] or marginal_anomaly != [] or race2_anomaly != []
 
 cond do
+  drift > 0.10 and drift_alloc > drift_compute and alloc_got_faster ->
+    IO.puts(
+      "  *** VOID — allocation got FASTER over the run, so this is a cold-allocator" <>
+        " warm-up artifact, NOT throttling or contention. The early Race 4 sizes are" <>
+        " the contaminated ones. ***"
+    )
+
   drift > 0.10 ->
     IO.puts("  *** DRIFT > 10% — THIS RUN IS VOID, the box throttled or was contended ***")
 
@@ -1267,6 +1293,8 @@ File.write!(
       race2_price_low_kib: price_lo,
       race2_price_high_kib: price_hi,
       race2_price_growth: price_hi / max(price_lo, 1.0e-9),
+      race2_low_to_mid_rise: lo_mid_rise,
+      race2_alloc_got_faster: alloc_got_faster,
       race2_negative_boundary: length(race2_anomaly),
       s_flush_us: s_flush * 1000,
       s_flush_ols_us: s_flush_ols * 1000,
