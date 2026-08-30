@@ -548,7 +548,32 @@ floored = Enum.reject(race1b, &MapSet.member?(kept_ns, &1.n))
      "WARNING: only #{length(above_floor)} point(s) above the quantisation floor — fitting ALL points, so s is contaminated by the floor"}
   end
 
-{submission_ms, per_elem_ms} = fit_n2.(fit_rows)
+# FIXED window for the headline, detector as diagnostic. mac-247 replicated on
+# an idle box minutes apart and the DETECTOR ITSELF flipped — run 1 excluded
+# n=64 and 128, run 2 only n=64. That discrete choice moves `s`, and a fixed
+# window is actually tighter (5.7% vs 6.9%). It also gives every box identical
+# treatment, which is the argument for one tracked harness.
+fixed_rows = Enum.filter(race1b, &(&1.n >= 256))
+{submission_ms, per_elem_ms} = fit_n2.(fixed_rows)
+{submission_adaptive, _} = fit_n2.(fit_rows)
+floored_in_window = Enum.filter(floored, &(&1.n >= 256))
+
+# LEVERAGE SHARE. The Jetson showed adding n=2048 for "leverage" partly
+# backfired: with x = n^2 spanning 16384..4194304, the top point alone carries
+# ~94% of the OLS leverage, so the line is set by the largest one or two points
+# and `s` is a long extrapolation back to x=0. And `c` is NOT constant — its
+# residuals put small-n systematically below the line because the large-n regime
+# is bandwidth-bound and steeper. A steeper high-n slope extrapolated to zero
+# inflates the intercept. That is part of why s moved 0.454 -> 0.680 there and
+# 0.226 -> 0.303 on super-io: some of that is the floored-point fix working, and
+# some is this artifact, and they are currently entangled.
+#
+# Not solved here. Reported, so nobody reads `s` as a direct measurement.
+lev_xs = Enum.map(fixed_rows, &(&1.n * &1.n * 1.0))
+lev_mx = Enum.sum(lev_xs) / length(lev_xs)
+lev_tot = lev_xs |> Enum.map(fn x -> (x - lev_mx) * (x - lev_mx) end) |> Enum.sum()
+lev_max = lev_xs |> Enum.map(fn x -> (x - lev_mx) * (x - lev_mx) end) |> Enum.max()
+leverage_share = if lev_tot > 0.0, do: lev_max / lev_tot, else: 1.0
 
 IO.puts("\n  fitted gpu_ms = s + c*n^2  (#{fit_note}):")
 
@@ -566,15 +591,91 @@ IO.puts(
 # hypothetical — its s/super-io ratio (2.0x) is about what its host alone would
 # predict. Dividing by the box's own measured host time gives a figure that does
 # not move with host speed.
+# h0 — the n-INDEPENDENT host floor, not a median over the whole sweep.
+#
+# Two separate defects in the old median. 247: host time is drawn from a sticky
+# two-level distribution, so a median of six draws is a lottery — one different
+# draw would have stepped s/host_ms by 33% with no change in physics. And the
+# Jetson: `host_ms` is not n-independent at all, rising 5.4x across the sweep
+# (1.20 -> 6.59 ms) as Nx frontend work grows with tensor size, so the median
+# lands mid-slope. Dividing an n-independent numerator by an n-dependent
+# denominator is only comparable across boxes if host_ms rises by the SAME
+# factor on each — and a fast JIT host is flatter, which would bias the ratio by
+# about the size of the effect being measured.
+#
+# h0 = the median host_ms over the flat low-n points, which the floor filter has
+# already identified. Both terms n-independent. On the Jetson this took
+# reproducibility from 12.8% to 3.9%.
+h0_rows = if floored != [], do: floored, else: Enum.take(Enum.sort_by(race1b, & &1.n), 2)
+
 host_ref =
-  race1b
+  h0_rows
   |> Enum.map(& &1.host_ms)
   |> Enum.sort()
-  |> Enum.at(div(length(race1b), 2))
+  |> Enum.at(div(length(h0_rows), 2))
 
 IO.puts(
-  "    s / host_ms                        = #{:erlang.float_to_binary(submission_ms / max(host_ref, 1.0e-9), decimals: 4)}"
+  "    s (adaptive window, diagnostic)    = #{:erlang.float_to_binary(submission_adaptive, decimals: 4)} ms"
 )
+
+IO.puts(
+  "    h0 (n-independent host floor)      = #{:erlang.float_to_binary(host_ref, decimals: 4)} ms"
+)
+
+IO.puts(
+  "    s / h0                             = #{:erlang.float_to_binary(submission_ms / max(host_ref, 1.0e-9), decimals: 4)}"
+)
+
+IO.puts(
+  "    top-point leverage share           = #{:erlang.float_to_binary(leverage_share * 100, decimals: 1)}%"
+)
+
+# PER-BOX SCALING RATIOS. Doubling n quadruples the output, so a point in the
+# true n^2 regime is 4.00x the one below it. Anything well under 4 is still on
+# the quantisation plateau.
+#
+# This is printed because the EXTENT of the floor is a property of each box's
+# tile geometry, and that is the residual structural risk in `s`. mac-248
+# measured 1.41 / 2.17 / 3.21 / 3.67 / 3.98 — its true n^2 regime only begins
+# near n=1024, so a fixed window at n>=256 still carries floored points and
+# leaves s biased upward 10-20% there. If the floor reaches to a DIFFERENT n on
+# another box, the same rule biases each box's s by a different amount, which is
+# a reduced version of the structural problem that sank `a`.
+#
+# Excluding further is not free: through n=256 leaves only three points and 248's
+# replicates then diverged 14%, worse than the bias removed. The window is a
+# bias-variance tradeoff, so print the ratios and let the bias be visible rather
+# than assumed equal across boxes.
+IO.puts("\n  n^2 scaling ratios (4.00 = true n^2 regime, well under = still floored):")
+
+race1b
+|> Enum.sort_by(& &1.n)
+|> Enum.chunk_every(2, 1, :discard)
+|> Enum.each(fn [a, b] ->
+  r = b.gpu_ms / max(a.gpu_ms, 1.0e-9)
+
+  IO.puts(
+    "    n=#{String.pad_leading("#{a.n}", 4)} -> #{String.pad_leading("#{b.n}", 4)}   " <>
+      "#{:erlang.float_to_binary(r, decimals: 2)}" <>
+      if(r < 3.5, do: "   <- floored", else: "")
+  )
+end)
+
+# `s` is a component of every dispatch, so it cannot exceed the smallest
+# dispatch measured. The Jetson fitted s = 0.7767 ms on a run whose own n=64
+# dispatch took 0.568 ms — the fitted submission cost exceeding a whole dispatch
+# by 37%. The floored points are poor data but an excellent BOUND.
+min_dispatch = race1b |> Enum.map(& &1.gpu_ms) |> Enum.min()
+
+if submission_ms > min_dispatch do
+  IO.puts(
+    "  !! s = #{:erlang.float_to_binary(submission_ms, decimals: 4)} ms EXCEEDS the smallest measured dispatch " <>
+      "(#{:erlang.float_to_binary(min_dispatch, decimals: 4)} ms)."
+  )
+
+  IO.puts("     Submission cannot cost more than a whole dispatch, so this fit is")
+  IO.puts("     over-extrapolated and s is an upper bound, not a measurement.")
+end
 
 IO.puts("  `s` is the part of the dispatch floor that does NOT scale with GPU")
 IO.puts("  work. But s is HOST work, so raw s carries a host-speed confound in")
@@ -813,6 +914,19 @@ File.write!(
       race1b: race1b,
       submission_ms: submission_ms,
       submission_over_host: submission_ms / max(host_ref, 1.0e-9),
+      submission_adaptive_ms: submission_adaptive,
+      h0_host_floor_ms: host_ref,
+      leverage_share: leverage_share,
+      min_dispatch_ms: min_dispatch,
+      s_exceeds_min_dispatch: submission_ms > min_dispatch,
+      floored_in_fixed_window: Enum.map(floored_in_window, & &1.n),
+      n2_scaling_ratios:
+        race1b
+        |> Enum.sort_by(& &1.n)
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.map(fn [a, b] ->
+          %{from: a.n, to: b.n, ratio: b.gpu_ms / max(a.gpu_ms, 1.0e-9)}
+        end),
       race1b_fit_note: fit_note,
       race1b_floored_ns: Enum.map(floored, & &1.n),
       per_output_elem_ns: per_elem_ms * 1.0e6,

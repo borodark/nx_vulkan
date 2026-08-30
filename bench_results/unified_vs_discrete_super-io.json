@@ -5,204 +5,205 @@
   "race1": [
     {
       "k": 1,
-      "gpu_ms": 0.347,
-      "gflops": 1.5109164265129682,
-      "gbs": 3.0336368876080693,
-      "host_pct": 70.86092715231787,
-      "ms": 1.208,
-      "ms_min": 1.164,
-      "ms_max": 5.554,
-      "host_ms": 0.856,
-      "host_ms_min": 0.833,
-      "rel_to_k1024": 0.01948059257925072
+      "gpu_ms": 0.228,
+      "gflops": 2.2995087719298244,
+      "gbs": 4.6169824561403505,
+      "host_pct": 67.24137931034484,
+      "ms": 0.696,
+      "ms_min": 0.667,
+      "ms_max": 0.721,
+      "host_ms": 0.468,
+      "host_ms_min": 0.441,
+      "rel_to_k1024": 0.027656421326754384
     },
     {
       "k": 2,
-      "gpu_ms": 0.346,
-      "gflops": 3.0305664739884395,
-      "gbs": 3.0542427745664744,
-      "host_pct": 71.96180555555556,
-      "ms": 1.152,
-      "ms_min": 1.056,
-      "ms_max": 1.248,
-      "host_ms": 0.829,
-      "host_ms_min": 0.76,
-      "rel_to_k1024": 0.039073789739884394
+      "gpu_ms": 0.224,
+      "gflops": 4.6811428571428575,
+      "gbs": 4.717714285714286,
+      "host_pct": 67.01337295690935,
+      "ms": 0.673,
+      "ms_min": 0.657,
+      "ms_max": 4.291,
+      "host_ms": 0.451,
+      "host_ms_min": 0.432,
+      "rel_to_k1024": 0.056300571986607144
     },
     {
       "k": 4,
-      "gpu_ms": 0.334,
-      "gflops": 6.278898203592814,
-      "gbs": 3.1885029940119756,
-      "host_pct": 72.2972972972973,
-      "ms": 1.184,
-      "ms_min": 1.113,
-      "ms_max": 5.683,
-      "host_ms": 0.856,
-      "host_ms_min": 0.779,
-      "rel_to_k1024": 0.08095527694610777
+      "gpu_ms": 0.225,
+      "gflops": 9.320675555555555,
+      "gbs": 4.733155555555555,
+      "host_pct": 66.86478454680534,
+      "ms": 0.673,
+      "ms_min": 0.66,
+      "ms_max": 4.379,
+      "host_ms": 0.45,
+      "host_ms_min": 0.439,
+      "rel_to_k1024": 0.11210069444444444
     },
     {
       "k": 8,
-      "gpu_ms": 0.351,
-      "gflops": 11.949584045584047,
-      "gbs": 3.080752136752137,
-      "host_pct": 69.68215158924205,
-      "ms": 1.227,
-      "ms_min": 1.159,
-      "ms_max": 5.544,
-      "host_ms": 0.855,
-      "host_ms_min": 0.819,
-      "rel_to_k1024": 0.15406873219373218
+      "gpu_ms": 0.262,
+      "gflops": 16.00879389312977,
+      "gbs": 4.127267175572519,
+      "host_pct": 64.33289299867899,
+      "ms": 0.757,
+      "ms_min": 0.696,
+      "ms_max": 4.318,
+      "host_ms": 0.487,
+      "host_ms_min": 0.438,
+      "rel_to_k1024": 0.19253936068702288
     },
     {
       "k": 16,
-      "gpu_ms": 0.363,
-      "gflops": 23.109112947658403,
-      "gbs": 3.069179063360882,
-      "host_pct": 67.7445432497979,
-      "ms": 1.237,
-      "ms_min": 1.125,
-      "ms_max": 1.359,
-      "host_ms": 0.838,
-      "host_ms_min": 0.788,
-      "rel_to_k1024": 0.29795110192837465
+      "gpu_ms": 0.285,
+      "gflops": 29.433712280701755,
+      "gbs": 3.909164912280702,
+      "host_pct": 62.905317769130995,
+      "ms": 0.771,
+      "ms_min": 0.713,
+      "ms_max": 4.954,
+      "host_ms": 0.485,
+      "host_ms_min": 0.451,
+      "rel_to_k1024": 0.3540021929824561
     },
     {
       "k": 32,
-      "gpu_ms": 0.449,
-      "gflops": 37.36573719376391,
-      "gbs": 2.6272783964365254,
-      "host_pct": 63.378176382660676,
-      "ms": 1.338,
-      "ms_min": 1.282,
-      "ms_max": 1.384,
-      "host_ms": 0.848,
-      "host_ms_min": 0.824,
-      "rel_to_k1024": 0.48176503340757226
+      "gpu_ms": 0.376,
+      "gflops": 44.62025531914894,
+      "gbs": 3.13736170212766,
+      "host_pct": 54.51428571428571,
+      "ms": 0.875,
+      "ms_min": 0.843,
+      "ms_max": 0.903,
+      "host_ms": 0.477,
+      "host_ms_min": 0.467,
+      "rel_to_k1024": 0.5366522606382979
     },
     {
       "k": 64,
-      "gpu_ms": 0.743,
-      "gflops": 45.16074293405115,
-      "gbs": 1.764091520861373,
-      "host_pct": 53.7647790914748,
-      "ms": 1.607,
-      "ms_min": 1.53,
-      "ms_max": 1.747,
-      "host_ms": 0.864,
-      "host_ms_min": 0.846,
-      "rel_to_k1024": 0.5822678331090175
+      "gpu_ms": 0.709,
+      "gflops": 47.326420310296186,
+      "gbs": 1.848688293370945,
+      "host_pct": 51.91292875989446,
+      "ms": 1.516,
+      "ms_min": 1.405,
+      "ms_max": 1.573,
+      "host_ms": 0.787,
+      "host_ms_min": 0.723,
+      "rel_to_k1024": 0.5691995768688293
     },
     {
       "k": 256,
-      "gpu_ms": 1.964,
-      "gflops": 68.33896537678207,
-      "gbs": 1.0677963340122198,
-      "host_pct": 30.855148342059337,
-      "ms": 2.865,
-      "ms_min": 2.742,
-      "ms_max": 3.054,
-      "host_ms": 0.884,
-      "host_ms_min": 0.858,
-      "rel_to_k1024": 0.8811099796334011
+      "gpu_ms": 1.953,
+      "gflops": 68.72387506400409,
+      "gbs": 1.073810547875064,
+      "host_pct": 33.208062862999654,
+      "ms": 2.927,
+      "ms_min": 2.861,
+      "ms_max": 3.348,
+      "host_ms": 0.972,
+      "host_ms_min": 0.946,
+      "rel_to_k1024": 0.8265488991295442
     },
     {
       "k": 1024,
-      "gpu_ms": 6.922,
-      "gflops": 77.56008552441492,
-      "gbs": 0.7574227101993645,
-      "host_pct": 11.470813153199083,
-      "ms": 7.846,
-      "ms_min": 7.26,
-      "ms_max": 8.661,
-      "host_ms": 0.9,
-      "host_ms_min": 0.838,
+      "gpu_ms": 6.457,
+      "gflops": 83.14556481338083,
+      "gbs": 0.8119684063806721,
+      "host_pct": 12.586558044806518,
+      "ms": 7.365,
+      "ms_min": 7.32,
+      "ms_max": 8.345,
+      "host_ms": 0.927,
+      "host_ms_min": 0.898,
       "rel_to_k1024": 1.0
     }
   ],
   "race1b": [
     {
       "n": 64,
-      "gpu_ms": 0.242,
-      "host_ms": 0.829
+      "gpu_ms": 0.177,
+      "host_ms": 0.453
     },
     {
       "n": 128,
-      "gpu_ms": 0.267,
-      "host_ms": 0.847
+      "gpu_ms": 0.183,
+      "host_ms": 0.446
     },
     {
       "n": 256,
-      "gpu_ms": 0.265,
-      "host_ms": 0.926
+      "gpu_ms": 0.22,
+      "host_ms": 0.458
     },
     {
       "n": 512,
-      "gpu_ms": 0.417,
-      "host_ms": 0.925
+      "gpu_ms": 0.273,
+      "host_ms": 0.437
     },
     {
       "n": 1024,
-      "gpu_ms": 0.745,
-      "host_ms": 0.877
+      "gpu_ms": 0.732,
+      "host_ms": 0.826
     },
     {
       "n": 2048,
-      "gpu_ms": 1.881,
-      "host_ms": 0.912
+      "gpu_ms": 1.902,
+      "host_ms": 0.891
     }
   ],
-  "submission_ms": 0.27553860449400236,
+  "submission_ms": 0.21538805970149255,
+  "leverage_share": 0.7131255487269534,
   "race4": [
     {
       "mib": 24,
       "alloc_ms": 0.017,
-      "zeroed_ms": 2.463
+      "zeroed_ms": 2.804
     },
     {
       "mib": 26,
-      "alloc_ms": 0.017,
-      "zeroed_ms": 2.703
+      "alloc_ms": 0.016,
+      "zeroed_ms": 4.283
     },
     {
       "mib": 28,
       "alloc_ms": 0.016,
-      "zeroed_ms": 3.221
+      "zeroed_ms": 5.067
     },
     {
       "mib": 30,
       "alloc_ms": 0.016,
-      "zeroed_ms": 3.831
+      "zeroed_ms": 5.715
     },
     {
       "mib": 32,
-      "alloc_ms": 10.744,
-      "zeroed_ms": 22.757
+      "alloc_ms": 10.694,
+      "zeroed_ms": 14.172
     },
     {
       "mib": 34,
-      "alloc_ms": 15.969,
-      "zeroed_ms": 24.786
+      "alloc_ms": 12.687,
+      "zeroed_ms": 16.066
     },
     {
       "mib": 36,
-      "alloc_ms": 17.192,
-      "zeroed_ms": 26.887
+      "alloc_ms": 12.625,
+      "zeroed_ms": 16.02
     },
     {
       "mib": 38,
-      "alloc_ms": 18.3,
-      "zeroed_ms": 28.968
+      "alloc_ms": 13.753,
+      "zeroed_ms": 23.827
     },
     {
       "mib": 40,
-      "alloc_ms": 19.587,
-      "zeroed_ms": 30.443
+      "alloc_ms": 14.829,
+      "zeroed_ms": 18.63
     }
   ],
   "slope_anomaly": [],
-  "load_after": "1.94, 2.26, 2.95",
+  "load_after": "2.73, 3.56, 3.53",
   "quantised_k_pairs": [
     [
       1,
@@ -213,37 +214,66 @@
       4
     ],
     [
-      4,
-      8
-    ],
-    [
       8,
       16
     ]
   ],
-  "dispatch_floor_ms": 0.3025050214240508,
-  "submission_over_host": 0.302125662822371,
-  "race1b_fit_note": "WARNING: only 2 point(s) above the quantisation floor — fitting ALL points, so s is contaminated by the floor",
+  "dispatch_floor_ms": 0.23489800232396485,
+  "submission_over_host": 0.475470330466871,
+  "submission_adaptive_ms": 0.23099999999999987,
+  "h0_host_floor_ms": 0.453,
+  "min_dispatch_ms": 0.177,
+  "s_exceeds_min_dispatch": true,
+  "floored_in_fixed_window": [
+    256
+  ],
+  "n2_scaling_ratios": [
+    {
+      "to": 128,
+      "from": 64,
+      "ratio": 1.033898305084746
+    },
+    {
+      "to": 256,
+      "from": 128,
+      "ratio": 1.2021857923497268
+    },
+    {
+      "to": 512,
+      "from": 256,
+      "ratio": 1.240909090909091
+    },
+    {
+      "to": 1024,
+      "from": 512,
+      "ratio": 2.681318681318681
+    },
+    {
+      "to": 2048,
+      "from": 1024,
+      "ratio": 2.598360655737705
+    }
+  ],
+  "race1b_fit_note": "excluding 3 floored point(s): n=64,128,256",
   "race1b_floored_ns": [
     64,
     128,
-    256,
-    512
+    256
   ],
-  "per_output_elem_ns": 0.38700641974229943,
-  "per_k_ms": 0.006465142009369965,
+  "per_output_elem_ns": 0.40668222964908907,
+  "per_k_ms": 0.006115791029910673,
   "race1_normalised_to": "own k=1024 gflops",
   "race4_slopes_ms_per_mib": {
-    "alloc_below": -2.0000000000000017e-4,
-    "alloc_above": 1.0008500000000002,
-    "zeroed_below": 0.2311,
-    "zeroed_above": 0.9776999999999999
+    "alloc_below": -1.5000000000000012e-4,
+    "alloc_above": 0.4668,
+    "zeroed_below": 0.47585,
+    "zeroed_above": 0.83385
   },
   "thermal_control": {
     "void": false,
-    "drift": 0.06410910017843488,
-    "first_ms": 7.846,
-    "last_ms": 7.343
+    "drift": 0.005702647657841116,
+    "first_ms": 7.365,
+    "last_ms": 7.323
   },
-  "gpu_clock_after": "1935 MHz, 2100 MHz, 83 %, 57, P0"
+  "gpu_clock_after": "1935 MHz, 2100 MHz, 93 %, 56, P0"
 }
