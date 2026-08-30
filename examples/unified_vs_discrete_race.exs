@@ -46,8 +46,14 @@ device =
 
 load = fn ->
   case System.cmd("uptime", [], stderr_to_stdout: true) do
-    {out, 0} -> out |> String.trim() |> String.split("load average") |> List.last()
-    _ -> "unavailable"
+    {out, 0} ->
+      case Regex.run(~r/load averages?:\s*(.*)$/, String.trim(out)) do
+        [_, nums] -> String.trim(nums)
+        _ -> String.trim(out)
+      end
+
+    _ ->
+      "unavailable"
   end
 end
 
@@ -79,14 +85,44 @@ end
 # cost curve" finding this plan exists to avoid.
 #
 # So: warm until the clock has had time to ramp, not just once.
+# THE WARM LOOP MUST DROP WHAT IT ALLOCATES. `buf_alloc` returns a Rustler
+# resource freed only when the owning process is GC'd. Binding it to `_` makes
+# it garbage instantly, but garbage is not freed until a collection runs — and a
+# magic ref is a few words on the BEAM heap, so the VM feels no pressure while
+# the driver holds gigabytes.
+#
+# Without the collect below, this loop killed Race 4 outright on both Keplers
+# with "alloc buffer: a non-validation error occurred". The loop is FLUSH-bound,
+# not alloc-bound — ~36 iterations in 250 ms at ~7 ms each — so it retains about
+# 0.9 GiB per `measure` call at 26 MiB.
+#
+# It is NOT simple VRAM exhaustion, and it is worth saying so because that was
+# the first diagnosis and it was wrong. Both boxes failed at the identical
+# retained allocation (#49) despite having 981 MiB and 1999 MiB of VRAM, and
+# 48 x 26 MiB = 1.22 GiB already exceeds the smaller card entirely. So the
+# ceiling does not scale with capacity: it is an allocator/driver bookkeeping
+# limit, plausibly because uninitialised `buf_alloc` pages never commit. The GC
+# fixes it either way, but do not reason about it as a memory-pressure problem.
+#
+# The subtle part, and why this was never merely a small-card bug: the retained
+# footprint grows with the buffer size being measured, so the self-inflicted
+# pressure is COLLINEAR with Race 4's independent variable. On an 8 GB card it
+# is absorbed silently and the run still reports RACE: OK — a contaminated
+# slope that looks clean. Every Race 4 number taken before this fix is void,
+# super-io's included.
 measure = fn fun ->
   warm_until = System.monotonic_time(:millisecond) + 250
 
-  Stream.repeatedly(fn ->
-    _ = fun.()
-    :ok = NativeV.flush()
-  end)
-  |> Enum.take_while(fn _ -> System.monotonic_time(:millisecond) < warm_until end)
+  warm = fn self ->
+    if System.monotonic_time(:millisecond) < warm_until do
+      _ = fun.()
+      :ok = NativeV.flush()
+      :erlang.garbage_collect()
+      self.(self)
+    end
+  end
+
+  warm.(warm)
 
   samples =
     for _ <- 1..reps do
@@ -109,7 +145,14 @@ IO.puts("reps:   #{reps}")
 gpu_clock = fn ->
   case System.cmd(
          "nvidia-smi",
-         ["--query-gpu=clocks.sm,clocks.max.sm,utilization.gpu", "--format=csv,noheader"],
+         # Kepler on FreeBSD HAS nvidia-smi but reports [N/A] for clocks.sm, so
+         # the no-nvidia-smi branch never fires and the output is a row of
+         # [N/A]. Ask for temperature and pstate too: those boxes do report
+         # them, and they are a usable throttle proxy when clocks are absent.
+         [
+           "--query-gpu=clocks.sm,clocks.max.sm,utilization.gpu,temperature.gpu,pstate",
+           "--format=csv,noheader"
+         ],
          stderr_to_stdout: true
        ) do
     {out, 0} -> String.trim(out)
