@@ -949,7 +949,15 @@ race2 =
     :erlang.garbage_collect()
 
     boundary = (b.median - a.median) / (n_ops - 1)
-    compute = a.median / n_ops
+
+    # compute = (a - boundary) / N, NOT a / N. mac-248 caught this: arm (a) is
+    # one crossing PLUS N ops, so a/N carries an extra crossing/N and inflates
+    # the denominator, compressing PRICE. Subtracting the one crossing arm (a)
+    # actually pays removes it for free. Its algebra: P_true = 32*P/(32 - P),
+    # which moves its own 0.65x to 0.64x and super-io's 2.29x to 2.42x — small
+    # enough to change no conclusion, which is exactly why it is worth fixing
+    # rather than arguing about.
+    compute = (a.median - boundary) / n_ops
     price = boundary / max(compute, 1.0e-9)
 
     IO.puts(

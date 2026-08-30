@@ -251,6 +251,38 @@ discrete Ampere** — on both discriminators. Two unrelated discrete cards do no
 agree on the shape, so the shape belongs to super-io rather than to paying a bus.
 That is the control doing its job, and the answer is negative.
 
+### mac-248 confirms it independently, and sharpens the mechanism
+
+    box                    64 KiB   1 MiB   16 MiB   growth
+    super-io  discrete       1.24    2.90     2.84     2.30x
+    mac-247   discrete       1.36    1.00     1.34     0.68/1.29x
+    mac-248   discrete       1.21    0.65     0.79     0.65x  (replicates 0.0%)
+    jetson    UNIFIED        1.18    1.01     0.94     0.75-0.85x
+
+Its growth factor lands on **0.65x twice**, so the statistic is solid and the
+disagreement with super-io's 2.30x is not noise. Two discrete Keplers, measured
+independently, both contradict the discrete Ampere.
+
+**The striking detail is where they agree.** At 64 KiB every box reads ~1.2 —
+super-io 1.24, mac-248 1.21, mac-247 1.36, jetson 1.18 — and they diverge
+monotonically from there. 248's explanation: at 64 KiB both terms are dominated
+by fixed dispatch and submission overhead, which is similar everywhere. As size
+grows `boundary` becomes bus-bandwidth-bound while `compute` becomes
+GPU-bandwidth-bound, so the boxes separate according to their own bus-to-GPU
+ratio — not according to whether a bus exists.
+
+Its algebra states the flaw exactly:
+
+    PRICE_1 / PRICE_2 = (bus_1 / bus_2) x (op_2 / op_1)
+
+The denominator is GPU strength, undivided. Its Kepler runs 9.3 GFLOP/s against
+super-io's 73 — 7.8x slower — which alone pushes its PRICE far below, and does.
+
+**PRICE remains a genuinely useful WITHIN-box number.** It answers "should I
+chunk transfers on this machine" directly, and on mac-248 the answer is that a
+crossing costs less than one op at every size above 64 KiB. It is simply not a
+box-independent property of a bus.
+
 ### Why: PRICE inherits the same flaw as `a` and as rule 6
 
 PRICE is `boundary / compute`, and the cancellation argument was that host, GPU,
@@ -290,7 +322,26 @@ without checking they were the same kind of quantity.
   256 KiB points replicate to 2.2% and 4.9%, so the low-to-mid rise is the part
   that survives. The harness now reports both, labelled.
 
-## The pstate question, resolved on the third attempt
+## The pstate question: BOTH Keplers have DVFS, and both agents over-read a null
+
+mac-248 has withdrawn its own "this card never leaves P0" claim. It found the
+card at P8 at 21:54 and caught a P5 excursion during the Race 2 runs. Its
+20-minute idle protocol was too short — **the same category of error as the
+80-second sample, made with more confidence than the evidence supported**, and
+it says so in those terms.
+
+So both Keplers have DVFS; 248's simply holds P0 longer. It also withdraws the
+DVFS explanation it offered for the 247 `s_flush` gap, which leaves that gap
+without a mechanism.
+
+It makes one further point worth keeping: **reproducibility is not evidence
+against a clock confound**, because a systematic clock difference between the
+two arms would itself reproduce. Its 0.0% growth agreement therefore says
+nothing about whether the arms sat at different clocks. Settling that needs
+pstate sampled *inside* each arm, which means instrumenting the harness rather
+than sampling alongside it.
+
+## The pstate question, resolved on the third attempt (superseded by the above)
 
 This document was wrong about Kepler DVFS twice, in opposite directions. The
 coherent version is that **pstate alone cannot certify anything, but pstate
