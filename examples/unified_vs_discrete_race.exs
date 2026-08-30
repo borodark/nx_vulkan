@@ -826,6 +826,32 @@ IO.puts(
     Enum.map_join(marginals, ", ", &:erlang.float_to_binary(&1 * 1000, decimals: 0))
 )
 
+# A NEGATIVE MARGINAL IS PHYSICALLY IMPOSSIBLE. Only the submission count varies
+# between adjacent points, so more submissions cannot take less total time. If
+# one appears, something else moved during Race 1c and the run cannot be used.
+#
+# The Jetson hit this: marginals 3.779, 2.155, 2.709, -0.572, 0.924 ms with the
+# table non-monotonic (F=16 at 95.9 ms BELOW F=8 at 100.5). Its hypothesis fits:
+# 32 dispatches at n=256 is a low-duty workload, low duty is what makes podgov
+# drop the clock, and MORE flushes means more sustained activity means a HIGHER
+# clock — which pushes totals down as F rises and bends the marginals this way.
+#
+# That makes Race 1c itself DVFS-confounded on an integrated part — the same
+# coupling that defeated `a` there, where the quantity measured and the clock
+# governor are not independent. On that box the two estimators disagree by 164%
+# (2155 vs 815 us) against mac-247's 2.0%, because a median of marginals is well
+# conditioned only when the marginals cluster, and these span -0.572 to +3.779.
+marginal_anomaly = Enum.filter(marginals, &(&1 < 0.0))
+
+if marginal_anomaly != [] do
+  IO.puts("\n  !! NEGATIVE MARGINAL — physically impossible for a submission cost.")
+  IO.puts("     More flushes cannot take less total time when only the flush count")
+  IO.puts("     varies, so something else moved during Race 1c. On an integrated")
+  IO.puts("     DVFS part the likely cause is the clock rising with flush count,")
+  IO.puts("     since more flushes means more sustained activity. s_flush from")
+  IO.puts("     this run is not usable.")
+end
+
 # `base` is a FREE contamination detector, also 247's: the dispatch count is
 # fixed, so base must be identical across replicates of the same box. Its runs
 # read 18.677 vs 21.340 (14% apart) with the bad point and 18.640 vs 18.838
@@ -1059,7 +1085,7 @@ IO.puts(
     "   (24 MiB zeroed: #{:erlang.float_to_binary(alloc_first, decimals: 3)} -> #{:erlang.float_to_binary(alloc_control.median, decimals: 3)} ms)"
 )
 
-void? = drift > 0.10 or slope_anomaly != []
+void? = drift > 0.10 or slope_anomaly != [] or marginal_anomaly != []
 
 cond do
   drift > 0.10 ->
@@ -1067,6 +1093,9 @@ cond do
 
   slope_anomaly != [] ->
     IO.puts("  *** VOID — Race 4 produced a negative slope (see above) ***")
+
+  marginal_anomaly != [] ->
+    IO.puts("  *** VOID — Race 1c produced a negative marginal (see above) ***")
 
   true ->
     :ok
@@ -1100,8 +1129,7 @@ File.write!(
       s_flush_us: s_flush * 1000,
       s_flush_ols_us: s_flush_ols * 1000,
       race1c_marginals_us: Enum.map(marginals, &(&1 * 1000)),
-      s_flush_ols_us: s_flush_ols * 1000,
-      race1c_marginals_us: Enum.map(marginals, &(&1 * 1000)),
+      race1c_negative_marginals: length(marginal_anomaly),
       race1c_base_ms: base_ms,
       min_dispatch_ms: min_dispatch,
       s_exceeds_min_dispatch: submission_ms > min_dispatch,
@@ -1144,6 +1172,7 @@ IO.puts(
   cond do
     drift > 0.10 -> "\nRACE: VOID (thermal drift)"
     slope_anomaly != [] -> "\nRACE: VOID (negative Race 4 slope)"
+    marginal_anomaly != [] -> "\nRACE: VOID (negative Race 1c marginal)"
     true -> "\nRACE: OK"
   end
 )
