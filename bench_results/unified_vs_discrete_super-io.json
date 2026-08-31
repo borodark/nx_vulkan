@@ -1,294 +1,43 @@
 {
-  "floored_in_fixed_window": [
-    256,
-    512,
-    1024
-  ],
-  "load_after": "4.79, 4.70, 4.08",
-  "race1c_negative_marginals": 0,
+  "slope_anomaly": [],
+  "min_dispatch_ms": 0.573,
+  "s_flush_ols_us": 1118.397137363811,
   "thermal_control": {
     "void": false,
-    "drift_compute": 0.07586281745170391,
-    "drift_alloc": 0.004665629860031108,
-    "drift": 0.07586281745170391,
-    "first_ms": 18.428,
-    "last_ms": 17.03,
-    "alloc_first_ms": 0.643,
-    "alloc_last_ms": 0.64
+    "drift_compute": 0.04971688993232984,
+    "drift_alloc": 0.0017006802721088452,
+    "drift": 0.04971688993232984,
+    "first_ms": 14.482,
+    "last_ms": 15.202,
+    "alloc_first_ms": 0.588,
+    "alloc_last_ms": 0.589
   },
-  "submission_adaptive_ms": 1.1378333333333335,
-  "s_exceeds_min_dispatch": true,
-  "min_dispatch_ms": 0.885,
-  "n2_scaling_ratios": [
-    {
-      "to": 128,
-      "from": 64,
-      "ratio": 0.7344398340248962
-    },
-    {
-      "to": 256,
-      "from": 128,
-      "ratio": 1.35819209039548
-    },
-    {
-      "to": 512,
-      "from": 256,
-      "ratio": 1.2803660565723793
-    },
-    {
-      "to": 1024,
-      "from": 512,
-      "ratio": 0.8414554905782976
-    },
-    {
-      "to": 2048,
-      "from": 1024,
-      "ratio": 2.481853281853282
-    }
-  ],
-  "submission_ms": 1.151542288557214,
-  "per_output_elem_ns": 0.47460773167709247,
-  "race2_low_to_mid_rise": 0.5215632112924694,
-  "race2": [
-    {
-      "kib": 64,
-      "price": 27.122337599613623,
-      "crossing_gbs": 0.05390876527864835,
-      "device_gbs": 1.4621317314658298,
-      "resident_ms": 4.936,
-      "roundtrip_ms": 75.132,
-      "boundary_ms": 2.2643870967741937,
-      "compute_ms": 0.08348790322580645
-    },
-    {
-      "kib": 256,
-      "price": 10.568094734469543,
-      "crossing_gbs": 0.3973309205690887,
-      "device_gbs": 4.199030809508123,
-      "resident_ms": 4.95,
-      "roundtrip_ms": 43.046,
-      "boundary_ms": 1.2289032258064514,
-      "compute_ms": 0.11628427419354839
-    },
-    {
-      "kib": 1024,
-      "price": 14.146013496212968,
-      "crossing_gbs": 1.1312732385418807,
-      "device_gbs": 16.003006500317994,
-      "resident_ms": 5.632,
-      "roundtrip_ms": 59.153,
-      "boundary_ms": 1.726483870967742,
-      "compute_ms": 0.12204737903225805
-    },
-    {
-      "kib": 4096,
-      "price": 20.786369124815526,
-      "crossing_gbs": 2.0842118398292615,
-      "device_gbs": 43.32319663700192,
-      "resident_ms": 9.519,
-      "roundtrip_ms": 125.72,
-      "boundary_ms": 3.7484193548387092,
-      "compute_ms": 0.18033064516129033
-    },
-    {
-      "kib": 16384,
-      "price": 33.62942496978071,
-      "crossing_gbs": 2.842501225026334,
-      "device_gbs": 95.59168167353286,
-      "resident_ms": 21.455,
-      "roundtrip_ms": 362.264,
-      "boundary_ms": 10.993838709677421,
-      "compute_ms": 0.32691129032258054
-    }
-  ],
-  "device": "NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)",
-  "race4_slopes_ms_per_mib": {
-    "alloc_below": 5.000000000000004e-5,
-    "alloc_above": 0.004400000000000004,
-    "zeroed_below": 0.11355000000000001,
-    "zeroed_above": 0.025900000000000013
-  },
-  "race1c_base_ms": 38.86999006622516,
-  "race1c_marginals_us": [
-    373.49999999999994,
-    472.0000000000013,
-    1416.2499999999998,
-    2260.5000000000005,
-    849.1249999999999,
-    1214.3749999999998
-  ],
-  "race2_alloc_got_faster": true,
-  "per_k_ms": 0.01533251594391063,
-  "race1b_fit_note": "only 1 point(s) cleared the floor test — falling back to the largest 3, so s is contaminated",
-  "reps": 9,
-  "race4": [
-    {
-      "mib": 24,
-      "alloc_ms": 0.019,
-      "zeroed_ms": 0.605
-    },
-    {
-      "mib": 26,
-      "alloc_ms": 0.019,
-      "zeroed_ms": 1.331
-    },
-    {
-      "mib": 28,
-      "alloc_ms": 0.02,
-      "zeroed_ms": 1.349
-    },
-    {
-      "mib": 30,
-      "alloc_ms": 0.019,
-      "zeroed_ms": 1.356
-    },
-    {
-      "mib": 32,
-      "alloc_ms": 0.642,
-      "zeroed_ms": 1.454
-    },
-    {
-      "mib": 34,
-      "alloc_ms": 0.623,
-      "zeroed_ms": 1.632
-    },
-    {
-      "mib": 36,
-      "alloc_ms": 0.643,
-      "zeroed_ms": 1.457
-    },
-    {
-      "mib": 38,
-      "alloc_ms": 0.631,
-      "zeroed_ms": 1.648
-    },
-    {
-      "mib": 40,
-      "alloc_ms": 0.682,
-      "zeroed_ms": 1.705
-    }
-  ],
   "race1_normalised_to": "own k=1024 gflops",
-  "dispatch_floor_ms": 1.3519055629908596,
-  "race1": [
-    {
-      "k": 1,
-      "gpu_ms": 1.6,
-      "gflops": 0.32768,
-      "gbs": 0.65792,
-      "host_pct": 38.87799136916438,
-      "ms": 2.549,
-      "ms_min": 1.927,
-      "ms_max": 6.966,
-      "host_ms": 0.991,
-      "host_ms_min": 0.935,
-      "rel_to_k1024": 0.01023681640625
-    },
-    {
-      "k": 2,
-      "gpu_ms": 1.215,
-      "gflops": 0.863025514403292,
-      "gbs": 0.8697679012345677,
-      "host_pct": 42.870677404073895,
-      "ms": 2.111,
-      "ms_min": 1.634,
-      "ms_max": 2.513,
-      "host_ms": 0.905,
-      "host_ms_min": 0.896,
-      "rel_to_k1024": 0.026961162551440324
-    },
-    {
-      "k": 4,
-      "gpu_ms": 1.503,
-      "gflops": 1.3953107119095145,
-      "gbs": 0.7085562208915502,
-      "host_pct": 38.230584467574054,
-      "ms": 2.498,
-      "ms_min": 1.992,
-      "ms_max": 7.353,
-      "host_ms": 0.955,
-      "host_ms_min": 0.921,
-      "rel_to_k1024": 0.043589903526280775
-    },
-    {
-      "k": 8,
-      "gpu_ms": 1.527,
-      "gflops": 2.746760969220694,
-      "gbs": 0.7081493123772102,
-      "host_pct": 39.532117367168915,
-      "ms": 2.522,
-      "ms_min": 1.798,
-      "ms_max": 2.543,
-      "host_ms": 0.997,
-      "host_ms_min": 0.955,
-      "rel_to_k1024": 0.0858095939751146
-    },
-    {
-      "k": 16,
-      "gpu_ms": 1.487,
-      "gflops": 5.641296570275722,
-      "gbs": 0.7492347007397444,
-      "host_pct": 39.142628205128204,
-      "ms": 2.496,
-      "ms_min": 2.096,
-      "ms_max": 2.557,
-      "host_ms": 0.977,
-      "host_ms_min": 0.888,
-      "rel_to_k1024": 0.17623570948217887
-    },
-    {
-      "k": 32,
-      "gpu_ms": 1.644,
-      "gflops": 10.205119221411193,
-      "gbs": 0.7175474452554745,
-      "host_pct": 36.7680608365019,
-      "ms": 2.63,
-      "ms_min": 1.939,
-      "ms_max": 2.669,
-      "host_ms": 0.967,
-      "host_ms_min": 0.937,
-      "rel_to_k1024": 0.3188108272506083
-    },
-    {
-      "k": 64,
-      "gpu_ms": 1.308,
-      "gflops": 25.653235474006117,
-      "gbs": 1.0020795107033638,
-      "host_pct": 41.04765993988836,
-      "ms": 2.329,
-      "ms_min": 2.053,
-      "ms_max": 5.906,
-      "host_ms": 0.956,
-      "host_ms_min": 0.888,
-      "rel_to_k1024": 0.801414373088685
-    },
-    {
-      "k": 256,
-      "gpu_ms": 6.684,
-      "gflops": 20.080450029922204,
-      "gbs": 0.31375703171753444,
-      "host_pct": 13.883116883116884,
-      "ms": 7.7,
-      "ms_min": 6.003,
-      "ms_max": 12.431,
-      "host_ms": 1.069,
-      "host_ms_min": 0.938,
-      "rel_to_k1024": 0.6273189706762419
-    },
-    {
-      "k": 1024,
-      "gpu_ms": 16.772,
-      "gflops": 32.009951824469354,
-      "gbs": 0.31259718578583356,
-      "host_pct": 5.307141306707185,
-      "ms": 18.428,
-      "ms_min": 14.543,
-      "ms_max": 19.68,
-      "host_ms": 0.978,
-      "host_ms_min": 0.932,
-      "rel_to_k1024": 1.0
-    }
+  "dispatch_floor_ms": 1.3167851707180431,
+  "race1c_base_ms": 37.395675496688746,
+  "race1c_negative_marginals": 0,
+  "s_exceeds_min_dispatch": true,
+  "submission_ms": 0.7642189054726367,
+  "race1b_fit_note": "only 1 point(s) cleared the floor test — falling back to the largest 3, so s is contaminated",
+  "race2_price_high_kib": 48.14013972755189,
+  "device": "NVIDIA GeForce RTX 3060 Ti (DiscreteGpu)",
+  "per_k_ms": 0.012402937785030285,
+  "race1c_marginals_us": [
+    940.999999999999,
+    1736.4999999999995,
+    1455.2499999999995,
+    1413.500000000001,
+    675.8749999999995,
+    1129.2083333333333
   ],
+  "s_flush_us": 1129.9047619047617,
+  "race2_price_growth": 4.210182401578943,
+  "race4_slopes_ms_per_mib": {
+    "alloc_below": 0.0,
+    "alloc_above": 0.0029500000000000025,
+    "zeroed_below": 0.018049999999999993,
+    "zeroed_above": 0.010650000000000003
+  },
   "race1b_floored_ns": [
     64,
     128,
@@ -296,108 +45,359 @@
     512,
     1024
   ],
-  "gpu_clock_after": "1065 MHz, 2100 MHz, 98 %, 63, P0",
-  "submission_over_host": 1.285203447050462,
-  "h0_host_floor_ms": 0.896,
-  "race2_price_growth": 1.2399161704358324,
-  "race1b": [
+  "gpu_clock_after": "1050 MHz, 2100 MHz, 99 %, 63, P0",
+  "floored_in_fixed_window": [
+    256,
+    512,
+    1024
+  ],
+  "n2_scaling_ratios": [
     {
-      "n": 64,
-      "gpu_ms": 1.205,
-      "host_ms": 0.907
+      "to": 128,
+      "from": 64,
+      "ratio": 1.1024096385542168
     },
     {
-      "n": 128,
-      "gpu_ms": 0.885,
-      "host_ms": 0.896
+      "to": 256,
+      "from": 128,
+      "ratio": 0.3913934426229508
     },
     {
-      "n": 256,
-      "gpu_ms": 1.202,
-      "host_ms": 0.916
+      "to": 512,
+      "from": 256,
+      "ratio": 1.8464223385689356
     },
     {
-      "n": 512,
-      "gpu_ms": 1.539,
-      "host_ms": 0.922
+      "to": 1024,
+      "from": 512,
+      "ratio": 1.4858223062381852
     },
     {
-      "n": 1024,
-      "gpu_ms": 1.295,
-      "host_ms": 0.945
-    },
-    {
-      "n": 2048,
-      "gpu_ms": 3.214,
-      "host_ms": 0.893
+      "to": 2048,
+      "from": 1024,
+      "ratio": 2.1463104325699747
     }
   ],
-  "race1c": [
+  "race2": [
     {
-      "flushes": 1,
-      "total_ms": 36.833
+      "kib": 64,
+      "price": 11.434217127860757,
+      "crossing_gbs": 0.10218123042339469,
+      "device_gbs": 1.1683623750530663,
+      "resident_ms": 4.538,
+      "roundtrip_ms": 41.572,
+      "boundary_ms": 1.1946451612903228,
+      "compute_ms": 0.10447983870967742
     },
     {
-      "flushes": 2,
-      "total_ms": 43.934
+      "kib": 256,
+      "price": 19.388394366197186,
+      "crossing_gbs": 0.35186942094007156,
+      "device_gbs": 6.822183098591551,
+      "resident_ms": 3.678,
+      "roundtrip_ms": 46.696,
+      "boundary_ms": 1.3876774193548387,
+      "compute_ms": 0.07157258064516128
     },
     {
-      "flushes": 3,
-      "total_ms": 39.904
+      "kib": 1024,
+      "price": 20.872361809045223,
+      "crossing_gbs": 1.0031458654340009,
+      "device_gbs": 20.938023450586265,
+      "resident_ms": 4.932,
+      "roundtrip_ms": 65.289,
+      "boundary_ms": 1.947,
+      "compute_ms": 0.09328125000000001
     },
     {
-      "flushes": 4,
-      "total_ms": 46.113
+      "kib": 4096,
+      "price": 25.31643621782779,
+      "crossing_gbs": 2.2647256847361583,
+      "device_gbs": 57.334783348499315,
+      "resident_ms": 7.81,
+      "roundtrip_ms": 114.749,
+      "boundary_ms": 3.4496451612903223,
+      "compute_ms": 0.1362610887096774
     },
     {
-      "flushes": 6,
-      "total_ms": 46.86
-    },
-    {
-      "flushes": 8,
-      "total_ms": 47.804
-    },
-    {
-      "flushes": 12,
-      "total_ms": 53.469
-    },
-    {
-      "flushes": 16,
-      "total_ms": 62.511
-    },
-    {
-      "flushes": 24,
-      "total_ms": 69.304
-    },
-    {
-      "flushes": 48,
-      "total_ms": 98.449
+      "kib": 16384,
+      "price": 48.14013972755189,
+      "crossing_gbs": 3.3177733331506776,
+      "device_gbs": 159.71807184221916,
+      "resident_ms": 15.68,
+      "roundtrip_ms": 307.668,
+      "boundary_ms": 9.418967741935484,
+      "compute_ms": 0.19565725806451612
     }
   ],
-  "leverage_share": 0.7131255487269534,
-  "slope_anomaly": [],
-  "box": "super-io",
+  "reps": 9,
+  "per_output_elem_ns": 0.6319157101098369,
   "quantised_k_pairs": [
     [
-      1,
-      2
-    ],
-    [
-      4,
-      8
+      2,
+      4
     ],
     [
       8,
       16
     ],
     [
+      16,
+      32
+    ],
+    [
       32,
       64
     ]
   ],
-  "race2_price_high_kib": 33.62942496978071,
+  "race1": [
+    {
+      "k": 1,
+      "gpu_ms": 0.685,
+      "gflops": 0.7653839416058393,
+      "gbs": 1.5367474452554744,
+      "host_pct": 53.50933676754668,
+      "ms": 1.553,
+      "ms_min": 1.447,
+      "ms_max": 1.598,
+      "host_ms": 0.831,
+      "host_ms_min": 0.797,
+      "rel_to_k1024": 0.01930457344890511
+    },
+    {
+      "k": 2,
+      "gpu_ms": 1.187,
+      "gflops": 0.8833833192923335,
+      "gbs": 0.890284751474305,
+      "host_pct": 42.456795889771136,
+      "ms": 2.141,
+      "ms_min": 1.494,
+      "ms_max": 2.575,
+      "host_ms": 0.909,
+      "host_ms_min": 0.851,
+      "rel_to_k1024": 0.02228076295282224
+    },
+    {
+      "k": 4,
+      "gpu_ms": 1.215,
+      "gflops": 1.726051028806584,
+      "gbs": 0.8765102880658434,
+      "host_pct": 37.92134831460674,
+      "ms": 2.492,
+      "ms_min": 1.487,
+      "ms_max": 7.069,
+      "host_ms": 0.945,
+      "host_ms_min": 0.867,
+      "rel_to_k1024": 0.04353459362139917
+    },
+    {
+      "k": 8,
+      "gpu_ms": 1.597,
+      "gflops": 2.6263644333124607,
+      "gbs": 0.6771095804633689,
+      "host_pct": 37.17693836978132,
+      "ms": 2.515,
+      "ms_min": 1.553,
+      "ms_max": 2.644,
+      "host_ms": 0.935,
+      "host_ms_min": 0.908,
+      "rel_to_k1024": 0.06624236850344396
+    },
+    {
+      "k": 16,
+      "gpu_ms": 1.572,
+      "gflops": 5.336264631043257,
+      "gbs": 0.7087226463104326,
+      "host_pct": 37.0414673046252,
+      "ms": 2.508,
+      "ms_min": 1.64,
+      "ms_max": 2.647,
+      "host_ms": 0.929,
+      "host_ms_min": 0.886,
+      "rel_to_k1024": 0.13459168256997456
+    },
+    {
+      "k": 32,
+      "gpu_ms": 1.508,
+      "gflops": 11.125474801061008,
+      "gbs": 0.7822599469496021,
+      "host_pct": 34.95256166982922,
+      "ms": 2.635,
+      "ms_min": 1.62,
+      "ms_max": 4.73,
+      "host_ms": 0.921,
+      "host_ms_min": 0.823,
+      "rel_to_k1024": 0.2806075928381963
+    },
+    {
+      "k": 64,
+      "gpu_ms": 1.399,
+      "gflops": 23.984583273766976,
+      "gbs": 0.9368977841315225,
+      "host_pct": 35.55555555555556,
+      "ms": 2.655,
+      "ms_min": 2.054,
+      "ms_max": 6.996,
+      "host_ms": 0.944,
+      "host_ms_min": 0.874,
+      "rel_to_k1024": 0.6049410293066477
+    },
+    {
+      "k": 256,
+      "gpu_ms": 6.598,
+      "gflops": 20.342183692027888,
+      "gbs": 0.31784662018793575,
+      "host_pct": 12.16483951921807,
+      "ms": 7.571,
+      "ms_min": 6.674,
+      "ms_max": 7.67,
+      "host_ms": 0.921,
+      "host_ms_min": 0.878,
+      "rel_to_k1024": 0.5130721430736588
+    },
+    {
+      "k": 1024,
+      "gpu_ms": 13.541,
+      "gflops": 39.64780385495901,
+      "gbs": 0.3871855845210841,
+      "host_pct": 6.504626432813147,
+      "ms": 14.482,
+      "ms_min": 13.729,
+      "ms_max": 18.306,
+      "host_ms": 0.942,
+      "host_ms_min": 0.897,
+      "rel_to_k1024": 1.0
+    }
+  ],
+  "submission_over_host": 0.8548309904615623,
+  "load_after": "4.39, 5.21, 5.37",
+  "race4": [
+    {
+      "mib": 24,
+      "alloc_ms": 0.017,
+      "zeroed_ms": 0.532
+    },
+    {
+      "mib": 26,
+      "alloc_ms": 0.017,
+      "zeroed_ms": 0.756
+    },
+    {
+      "mib": 28,
+      "alloc_ms": 0.017,
+      "zeroed_ms": 0.511
+    },
+    {
+      "mib": 30,
+      "alloc_ms": 0.017,
+      "zeroed_ms": 0.734
+    },
+    {
+      "mib": 32,
+      "alloc_ms": 0.578,
+      "zeroed_ms": 1.346
+    },
+    {
+      "mib": 34,
+      "alloc_ms": 0.577,
+      "zeroed_ms": 1.335
+    },
+    {
+      "mib": 36,
+      "alloc_ms": 0.588,
+      "zeroed_ms": 1.217
+    },
+    {
+      "mib": 38,
+      "alloc_ms": 0.594,
+      "zeroed_ms": 1.286
+    },
+    {
+      "mib": 40,
+      "alloc_ms": 0.599,
+      "zeroed_ms": 1.477
+    }
+  ],
+  "race2_price_low_kib": 11.434217127860757,
+  "race1b": [
+    {
+      "n": 64,
+      "gpu_ms": 1.328,
+      "host_ms": 0.931
+    },
+    {
+      "n": 128,
+      "gpu_ms": 1.464,
+      "host_ms": 0.896
+    },
+    {
+      "n": 256,
+      "gpu_ms": 0.573,
+      "host_ms": 0.894
+    },
+    {
+      "n": 512,
+      "gpu_ms": 1.058,
+      "host_ms": 0.941
+    },
+    {
+      "n": 1024,
+      "gpu_ms": 1.572,
+      "host_ms": 0.913
+    },
+    {
+      "n": 2048,
+      "gpu_ms": 3.374,
+      "host_ms": 0.934
+    }
+  ],
+  "race1c": [
+    {
+      "flushes": 1,
+      "total_ms": 34.872
+    },
+    {
+      "flushes": 2,
+      "total_ms": 41.211
+    },
+    {
+      "flushes": 3,
+      "total_ms": 42.17
+    },
+    {
+      "flushes": 4,
+      "total_ms": 41.081
+    },
+    {
+      "flushes": 6,
+      "total_ms": 42.963
+    },
+    {
+      "flushes": 8,
+      "total_ms": 46.436
+    },
+    {
+      "flushes": 12,
+      "total_ms": 52.257
+    },
+    {
+      "flushes": 16,
+      "total_ms": 57.911
+    },
+    {
+      "flushes": 24,
+      "total_ms": 63.318
+    },
+    {
+      "flushes": 48,
+      "total_ms": 90.419
+    }
+  ],
+  "leverage_share": 0.7131255487269534,
+  "box": "super-io",
+  "h0_host_floor_ms": 0.894,
+  "race2_low_to_mid_rise": 1.8254298983169879,
+  "submission_adaptive_ms": 0.9289999999999998,
   "race2_negative_boundary": 0,
-  "race2_price_low_kib": 27.122337599613623,
-  "s_flush_ols_us": 1261.9443494979703,
-  "s_flush_us": 1228.3095238095239
+  "race2_alloc_got_faster": false
 }

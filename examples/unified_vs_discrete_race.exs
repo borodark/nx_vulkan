@@ -904,15 +904,47 @@ IO.puts(
 # governor are not independent. On that box the two estimators disagree by 164%
 # (2155 vs 815 us) against mac-247's 2.0%, because a median of marginals is well
 # conditioned only when the marginals cluster, and these span -0.572 to +3.779.
-marginal_anomaly = Enum.filter(marginals, &(&1 < 0.0))
+# GATE ON THE TWO ESTIMATORS DISAGREEING, not on the sign of one marginal.
+#
+# The Jetson has now voided under three different sweep designs, and its probe
+# explains why a sign test cannot work there: the series carries 1-3%
+# non-monotonic noise that intermittently produces a negative wherever it lands.
+# A strict test applied to a noisy quantity fires on the noise. One of its
+# negatives was -1.398 ms on a 274 ms total — 0.5% — and condemned the run.
+#
+# Its proposal, which is better than mine: the real contamination signal is
+# already computed and printed. Theil-Sen absorbs up to ~29% corrupted points
+# and OLS does not, so the two agree on a clean run and diverge on a dirty one.
+# Measured on its box: 6.8% and 18.1% for runs with one bad transition, 43.1%
+# for a run with two — which is 33%, just past Theil-Sen's breakdown point, and
+# is the estimator's limit becoming visible rather than failing.
+#
+# 30% splits those correctly. It keeps the physical argument — a run whose two
+# estimators disagree that badly is not measuring a submission cost — without
+# condemning a run for a rounding error.
+estimator_divergence =
+  abs(s_flush - s_flush_ols) / max(abs(s_flush_ols), 1.0e-9)
+
+marginal_anomaly = if estimator_divergence > 0.30, do: [estimator_divergence], else: []
+
+IO.puts(
+  "    estimator divergence          = #{:erlang.float_to_binary(estimator_divergence * 100, decimals: 1)}%   [Theil-Sen vs OLS; >30% voids]"
+)
 
 if marginal_anomaly != [] do
-  IO.puts("\n  !! NEGATIVE MARGINAL — physically impossible for a submission cost.")
-  IO.puts("     More flushes cannot take less total time when only the flush count")
-  IO.puts("     varies, so something else moved during Race 1c. On an integrated")
-  IO.puts("     DVFS part the likely cause is the clock rising with flush count,")
-  IO.puts("     since more flushes means more sustained activity. s_flush from")
-  IO.puts("     this run is not usable.")
+  IO.puts("\n  !! THEIL-SEN AND OLS DISAGREE BY MORE THAN 30%.")
+  IO.puts("     Theil-Sen tolerates about 29% corrupted points and OLS tolerates")
+  IO.puts("     none, so a divergence this large means more than a quarter of the")
+  IO.puts("     sweep is contaminated and neither estimate is usable.")
+end
+
+neg = Enum.filter(marginals, &(&1 < 0.0))
+
+if neg != [] do
+  IO.puts(
+    "  (note: #{length(neg)} negative adjacent marginal(s) — diagnostic only, not a void. " <>
+      "The series carries 1-3% non-monotonic noise on some boxes.)"
+  )
 end
 
 # `base` is a FREE contamination detector, also 247's: the dispatch count is
@@ -1079,7 +1111,8 @@ price_mid = Enum.find(race2, &(&1.kib == 1024)).price
 lo_mid_rise = price_mid / max(price_lo, 1.0e-9)
 
 IO.puts(
-  "  low-to-mid rise (64->1024)  = #{:erlang.float_to_binary(lo_mid_rise, decimals: 2)}x   [replicates <5%]"
+  "  low-to-mid rise (64->1024)  = #{:erlang.float_to_binary(lo_mid_rise, decimals: 2)}x" <>
+    "   (256->1024: #{:erlang.float_to_binary(price_mid / max(Enum.find(race2, &(&1.kib == 256)).price, 1.0e-9), decimals: 2)}x)"
 )
 
 IO.puts(
@@ -1432,7 +1465,7 @@ cond do
     IO.puts("  *** VOID — Race 4 produced a negative slope (see above) ***")
 
   marginal_anomaly != [] ->
-    IO.puts("  *** VOID — Race 1c produced a negative marginal (see above) ***")
+    IO.puts("  *** VOID — Race 1c's two estimators disagree by more than 30% ***")
 
   true ->
     :ok
@@ -1517,7 +1550,7 @@ IO.puts(
     drift_compute > 0.10 -> "\nRACE: VOID (compute drift)"
     drift_alloc > 0.40 -> "\nRACE: VOID (allocation drift)"
     slope_anomaly != [] -> "\nRACE: VOID (negative Race 4 slope)"
-    marginal_anomaly != [] -> "\nRACE: VOID (negative Race 1c marginal)"
+    marginal_anomaly != [] -> "\nRACE: VOID (Race 1c estimator divergence)"
     true -> "\nRACE: OK"
   end
 )
