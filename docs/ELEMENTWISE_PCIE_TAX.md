@@ -94,6 +94,49 @@ allocation in every dispatch path, so it is an architectural change rather than
 a tweak. It is also independently verifiable: `nvidia-smi dmon -s t` should show
 `txpci` fall to near zero during a compute loop.
 
+## FIXED — measured after the change
+
+`alloc_buffer` now requests `PREFER_DEVICE` alone. Host access goes through
+`staging_read` / `staging_write`: a host-visible staging buffer plus a
+`vkCmdCopyBuffer`. `alloc_buffer_zeroed` allocates device-local and zeroes with
+`fill_buffer` on the device instead of writing n_bytes of zeros from the host.
+
+Clock-pinned, median of 9, on super-io:
+
+    MiB     before        after     speedup
+      4   12.3 GB/s   37.9 GB/s       3.1x
+     16   16.4 GB/s   33.0 GB/s       2.0x
+     64    3.1 GB/s   35.1 GB/s      11.3x
+
+**The PCIe traffic is gone.** `txpci` during the same compute loop falls from a
+sustained 10,800 MB/s to single digits.
+
+**The size-dependent collapse is gone too.** Throughput was 12.3 / 16.4 / 3.1
+across 4 / 16 / 64 MiB — falling off a cliff once the output crossed 32 MiB.
+It is now flat at 33-38 GB/s across the whole range. That collapse was the same
+defect compounded: above the dedicated-allocation threshold the host-visible
+placement got worse still.
+
+Correctness is unchanged: 833 doctests / 871 tests / 0 failures, strict 0
+failures / 163 excluded, residency 755/833 (90.6%) — identical to before.
+
+**It is still 13x off the card's 448 GB/s.** The PCIe tax was the dominant term,
+not the only one. What remains is worth a separate investigation.
+
+### One honest consequence: the poison control now reports UNPROVEN
+
+`poison_control.exs` came back `PASS with the padding leg UNPROVEN` — 0/20 dirty
+at 4 B / 8 B, where before the change it was 20/20 on every box. Small
+device-local allocations are no longer poisonable by the existing scheme, so the
+zero-padding claim can no longer be established this way and the harness says so
+instead of reporting clean.
+
+**This is the first time that branch has fired anywhere.** It was written on the
+argument that a control which cannot detect the defect must not report its
+absence, and no box had ever exercised it. The concat checks are unaffected —
+the 8 MiB scheme still dirties at 19/40 — but the padding leg needs a new
+mechanism.
+
 ## Not yet checked
 
 * Whether the Keplers and the Jetson show the same `txpci` signature. FreeBSD's

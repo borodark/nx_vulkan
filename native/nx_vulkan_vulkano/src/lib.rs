@@ -515,8 +515,24 @@ fn alloc_buffer(
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            // DEVICE_LOCAL only — no host-visibility requirement.
+            //
+            // This used to be PREFER_DEVICE | HOST_RANDOM_ACCESS. PREFER_DEVICE
+            // is a preference; HOST_RANDOM_ACCESS is a REQUIREMENT, and on a
+            // discrete NVIDIA card the host-visible host-cached memory types are
+            // not device-local, so the requirement won and every output buffer
+            // landed in system RAM. `nvidia-smi dmon` during a pure compute loop
+            // that transferred nothing showed a sustained 10.8 GB/s of
+            // GPU-to-host PCIe traffic: every store the shader executed was
+            // crossing the bus. Nx.multiply ran at 16.4 GB/s on a card with
+            // 448 GB/s of VRAM.
+            //
+            // The cost of dropping it is that host access now needs a staging
+            // buffer and a copy — see `staging_read` and `staging_write`. That
+            // is the copy the alloc_buffer audit noted was absent; its absence
+            // was not free, it was being paid on every store instead of once
+            // per transfer.
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
             ..Default::default()
         },
         n_bytes as u64,
@@ -524,29 +540,98 @@ fn alloc_buffer(
     .map_err(|e| format!("alloc buffer: {e}"))
 }
 
+/// Copy a DEVICE_LOCAL buffer into a host-visible staging buffer and hand the
+/// bytes back as a BEAM binary.
+///
+/// Compute buffers are no longer host-readable, so every readback goes through
+/// here. HOST_RANDOM_ACCESS on the staging buffer is deliberate: it asks for
+/// host-CACHED memory, and reading write-combined memory from the host is
+/// pathologically slow.
+fn staging_read<'a>(
+    env: Env<'a>,
+    context: &VkContext,
+    src: Subbuffer<[u8]>,
+) -> Result<Binary<'a>, String> {
+    let n = src.len();
+
+    let staging = Buffer::new_slice::<u8>(
+        context.mem_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        n,
+    )
+    .map_err(|e| format!("staging alloc (read): {e}"))?;
+
+    let mut cmd = new_cmd_builder(context)?;
+    cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
+        src,
+        staging.clone(),
+    ))
+    .map_err(|e| format!("copy device->staging: {e}"))?;
+    submit_and_wait(context, cmd)?;
+
+    let guard = staging.read().map_err(|e| format!("read staging: {e}"))?;
+    let mut bin = NewBinary::new(env, guard.len());
+    bin.as_mut_slice().copy_from_slice(&guard[..]);
+    Ok(bin.into())
+}
+
+/// Write host bytes into a DEVICE_LOCAL buffer via a staging buffer.
+///
+/// HOST_SEQUENTIAL_WRITE here, not RANDOM_ACCESS: this side only ever writes,
+/// and write-combined memory is the right choice for that.
+fn staging_write(context: &VkContext, dst: Subbuffer<[u8]>, bytes: &[u8]) -> Result<(), String> {
+    let staging = Buffer::from_iter(
+        context.mem_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        bytes.iter().copied(),
+    )
+    .map_err(|e| format!("staging alloc (write): {e}"))?;
+
+    let mut cmd = new_cmd_builder(context)?;
+    cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(staging, dst))
+        .map_err(|e| format!("copy staging->device: {e}"))?;
+    submit_and_wait(context, cmd)
+}
+
 /// Allocate an output buffer and zero it — for kernels that ACCUMULATE.
 ///
 /// The four `allany_*` shaders `atomicOr` into a packed u8 mask, one thread per
 /// slot, so every bit not set by a slot must start at 0. See `alloc_buffer`.
 fn alloc_buffer_zeroed(
+    context: &VkContext,
     alloc: Arc<StandardMemoryAllocator>,
     n_bytes: usize,
     usage: BufferUsage,
 ) -> Result<Subbuffer<[u8]>, String> {
-    Buffer::from_iter(
-        alloc,
-        BufferCreateInfo {
-            usage,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
-            ..Default::default()
-        },
-        std::iter::repeat(0u8).take(n_bytes),
-    )
-    .map_err(|e| format!("alloc zeroed buffer: {e}"))
+    // Device-local, zeroed ON THE DEVICE with fill_buffer. The old version
+    // wrote n_bytes of zeros from the host through `from_iter`, which needed
+    // host-visible memory and so pulled the buffer off the device — the same
+    // defect as alloc_buffer, plus a full host-side write. fill_buffer costs one
+    // command and no PCIe traffic.
+    let buf = alloc_buffer(alloc, n_bytes, usage | BufferUsage::TRANSFER_DST)?;
+
+    let mut cmd = new_cmd_builder(context)?;
+    cmd.fill_buffer(buf.clone().reinterpret::<[u32]>(), 0)
+        .map_err(|e| format!("fill_buffer: {e}"))?;
+    submit_and_wait(context, cmd)?;
+
+    Ok(buf)
 }
 
 /// Copy a device buffer straight into a freshly allocated BEAM binary.
@@ -562,11 +647,12 @@ fn alloc_buffer_zeroed(
 ///
 /// One copy is still required: a BEAM binary must own its memory, and the
 /// device buffer can be recycled the moment the guard drops.
-fn download_buffer<'a>(env: Env<'a>, buf: Subbuffer<[u8]>) -> Result<Binary<'a>, String> {
-    let guard = buf.read().map_err(|e| format!("read buffer: {e}"))?;
-    let mut bin = NewBinary::new(env, guard.len());
-    bin.as_mut_slice().copy_from_slice(&guard[..]);
-    Ok(bin.into())
+fn download_buffer<'a>(
+    env: Env<'a>,
+    context: &VkContext,
+    buf: Subbuffer<[u8]>,
+) -> Result<Binary<'a>, String> {
+    staging_read(env, context, buf)
 }
 
 /// Run a K-step leapfrog dispatch against the synthesised SPV.
@@ -694,10 +780,10 @@ fn leapfrog_chain_synth<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(env, q_chain_buf)?,
-            download_buffer(env, p_chain_buf)?,
-            download_buffer(env, grad_chain_buf)?,
-            download_buffer(env, logp_chain_buf)?,
+            download_buffer(env, context, q_chain_buf)?,
+            download_buffer(env, context, p_chain_buf)?,
+            download_buffer(env, context, grad_chain_buf)?,
+            download_buffer(env, context, logp_chain_buf)?,
         ))
     })();
 
@@ -849,10 +935,10 @@ fn leapfrog_chain_synth_f64<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(env, q_chain_buf)?,
-            download_buffer(env, p_chain_buf)?,
-            download_buffer(env, grad_chain_buf)?,
-            download_buffer(env, logp_chain_buf)?,
+            download_buffer(env, context, q_chain_buf)?,
+            download_buffer(env, context, p_chain_buf)?,
+            download_buffer(env, context, grad_chain_buf)?,
+            download_buffer(env, context, logp_chain_buf)?,
         ))
     })();
 
@@ -1004,10 +1090,10 @@ fn leapfrog_chain_synth_batch<'a>(
         finish_and_disarm(context, future)?;
 
         Ok((
-            download_buffer(env, q_chain_buf)?,
-            download_buffer(env, p_chain_buf)?,
-            download_buffer(env, grad_chain_buf)?,
-            download_buffer(env, logp_chain_buf)?,
+            download_buffer(env, context, q_chain_buf)?,
+            download_buffer(env, context, p_chain_buf)?,
+            download_buffer(env, context, grad_chain_buf)?,
+            download_buffer(env, context, logp_chain_buf)?,
         ))
     })();
 
@@ -1091,6 +1177,7 @@ fn buf_alloc_zeroed<'a>(env: Env<'a>, n_bytes: u64) -> NifResult<Term<'a>> {
     };
 
     let buf = match alloc_buffer_zeroed(
+        &context,
         context.mem_allocator.clone(),
         n_bytes as usize,
         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
@@ -1219,14 +1306,17 @@ fn buf_download<'a>(env: Env<'a>, tensor: ResourceArc<VulkanoTensor>) -> NifResu
     if let Err(e) = flush_pending() {
         return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
     }
-    // One copy, not two — see `download_buffer` for what the Vec was costing.
-    let guard = match tensor.buf.read() {
-        Ok(guard) => guard,
-        Err(_) => return Ok((atoms::error(), atoms::download_failed()).encode(env)),
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
     };
-    let mut bin = NewBinary::new(env, guard.len());
-    bin.as_mut_slice().copy_from_slice(&guard[..]);
-    Ok((atoms::ok(), Binary::from(bin)).encode(env))
+
+    // The buffer is DEVICE_LOCAL now, so it cannot be read from the host at
+    // all — this goes through a staging buffer and a device-side copy.
+    match staging_read(env, &context, tensor.buf.clone()) {
+        Ok(bin) => Ok((atoms::ok(), bin).encode(env)),
+        Err(_) => Ok((atoms::error(), atoms::download_failed()).encode(env)),
+    }
 }
 
 /// Tensor's buffer size in bytes.
@@ -1251,12 +1341,17 @@ fn buf_upload_into<'a>(
     if let Err(e) = flush_pending() {
         return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
     }
-    let mut guard = match tensor.buf.write() {
-        Ok(g) => g,
-        Err(_) => return Ok((atoms::error(), atoms::upload_failed()).encode(env)),
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
     };
-    guard.copy_from_slice(data.as_slice());
-    Ok(rustler::types::atom::ok().encode(env))
+
+    // DEVICE_LOCAL buffers are not host-writable; go through staging.
+    if let Err(e) = staging_write(&context, tensor.buf.clone(), data.as_slice()) {
+        return Ok((atoms::error(), atoms::upload_failed(), e).encode(env));
+    }
+
+    Ok(atoms::ok().encode(env))
 }
 
 // -- Compute NIFs ---------------------------------------------------------
