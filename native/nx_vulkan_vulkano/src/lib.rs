@@ -704,10 +704,46 @@ fn alloc_buffer_zeroed(
     // command and no PCIe traffic.
     let buf = alloc_buffer(alloc, n_bytes, usage | BufferUsage::TRANSFER_DST)?;
 
-    let mut cmd = new_cmd_builder(context)?;
-    cmd.fill_buffer(buf.clone().reinterpret::<[u32]>(), 0)
-        .map_err(|e| format!("fill_buffer: {e}"))?;
-    submit_and_wait(context, cmd)?;
+    // ENQUEUE the fill, do not submit it. Submitting synchronously meant a full
+    // queue submit and fence wait PER ZEROED ALLOCATION, where the old host-side
+    // memset did no submission at all.
+    //
+    // The Jetson measured the consequence: the device fill is ~23% faster on the
+    // mean (5.24 -> 3.9-4.3 ms) but its within-run drift went from under 1% to
+    // 9-13%, walking UPWARD across a run and tripping the harness's 10% VOID gate
+    // about two runs in three — while compute drift over the same runs stayed at
+    // 0.0-0.2%. A per-allocation submit whose cost grows with accumulated
+    // command-pool state produces exactly that shape.
+    //
+    // Ordering is preserved and this is the whole safety argument: the fill and
+    // any dispatch that reads the buffer are recorded into the SAME command
+    // buffer in the order they were enqueued, and vulkano's
+    // AutoCommandBufferBuilder inserts the compute barriers itself. Anything
+    // that reads the buffer from the host — buf_download, staging_read — calls
+    // flush_pending() first, so the fill has executed by then.
+    //
+    // The four allany_* shaders are the ones that depend on this zeroing being
+    // real, so poison_control is the check that matters here.
+    let buf_for_fill = buf.clone();
+
+    let record: RecordFn = Box::new(move |cmd: &mut CmdBuilder| {
+        cmd.fill_buffer(buf_for_fill.reinterpret::<[u32]>(), 0)
+            .map_err(|e| format!("fill_buffer: {e}"))?;
+        Ok(())
+    });
+
+    if batch_max() == 0 {
+        let mut cmd = new_cmd_builder(context)?;
+        record(&mut cmd)?;
+        submit_and_wait(context, cmd)?;
+    } else {
+        let mut queue = pending().lock().map_err(|_| "pending queue poisoned".to_string())?;
+        queue.push(record);
+
+        if queue.len() >= batch_max() {
+            flush_locked(context, &mut queue)?;
+        }
+    }
 
     Ok(buf)
 }

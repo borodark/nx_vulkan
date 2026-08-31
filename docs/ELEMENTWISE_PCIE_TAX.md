@@ -222,7 +222,31 @@ rather than a finding, on the grounds that the same tool reports `[N/A]` for
 clocks on that build and it does not trust the memory accounting. That is the
 right call and the lead is worth chasing.
 
-### The poison control diverges across boxes
+### RETRACTED: the poison-control "divergence" was sampling
+
+I reported that small device-local allocations had stopped being poisonable on
+super-io and not on the Keplers, and treated the difference as a property of the
+boxes. Three consecutive runs on super-io, same commit, same box:
+
+    padding-size probes:   20/20      POISON CONTROL: PASS
+    padding-size probes:    0/20      PASS with the padding leg UNPROVEN
+    padding-size probes:   20/20      PASS
+
+**It is bimodal run to run, and the whole poisoning behaviour flips together** —
+the large-scheme effectiveness reads 40/40 alongside 20/20, and 19/40 alongside
+0/20. That is per-process allocator state, not hardware.
+
+So the earlier claim rested on two runs that both happened to land on the same
+mode, and the cross-box table (super-io 0/20, mac-247 2/20, mac-248 7/20,
+jetson 20/20) is not evidence of anything architectural. It may still be real —
+the Keplers and the Jetson have not been sampled enough times to say — but it is
+not established, and I asserted it as though it were.
+
+Same error as everything else in this sequence: a two-sample result read as a
+property. The UNPROVEN branch is working correctly either way; it fires on
+roughly half of super-io's runs and reports honestly when it does.
+
+### The poison control differs across boxes (unconfirmed, see retraction above)
 
 super-io reports `PASS with the padding leg UNPROVEN` (0/20 dirty at 4 B / 8 B).
 **mac-247 reports a plain PASS with 2/20 and mac-248 with 7/20** — the padding
