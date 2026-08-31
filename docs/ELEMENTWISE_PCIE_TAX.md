@@ -244,6 +244,67 @@ absence, and no box had ever exercised it. The concat checks are unaffected —
 the 8 MiB scheme still dirties at 19/40 — but the padding leg needs a new
 mechanism.
 
+## VERIFIED: the branch restores the unified box exactly
+
+The Jetson at `fad28e9` logs `unified memory: true (staging path: OFF)` and:
+
+    KiB   PRICE base  regressed   fixed     fixed/base
+     64        1.18       2.32     1.34        1.14x
+    256        1.83       2.49     1.74        0.95x
+   1024        1.01       2.77     1.04        1.03x
+   4096        0.96       2.14     0.95        0.98x
+  16384        0.94       1.45     0.94        1.00x
+
+Everything at >=1 MiB is back within 5%, and 16 MiB is exact to two decimals.
+
+**The acceptance test was the shape, not the timing**, and the shape returned:
+
+    baseline   0.87x, 0.84x        (falling — the unified signature)
+    regressed  1.22x, 1.15x, 1.21x (rising, toward the discrete shape)
+    fixed      0.78x, 0.78x, 0.78x (falling, replicating to under 2%)
+
+The allocator is no longer manufacturing the discrete signature on that box.
+Variance recovered too, and beat baseline: PRICE spread at 16 MiB went
+6.6% -> 38.8% -> **2.2%**.
+
+Correctness exact on all three suites. `poison_control` unchanged at 20/20 —
+still the opposite of super-io's 0/20, so that divergence is unrelated to the
+branch and remains unexplained.
+
+## OPEN: the device-side zero fill drifts upward and trips the VOID gate
+
+The half of the change that stayed unconditional has a cost of its own, and the
+Jetson found it while verifying the half that did not.
+
+    commit     zero-fill method      24 MiB zeroed   allocation drift
+    4e271e0    host-side write            5.24 ms    0.8%, 0.5%
+    1c575cc    device fill_buffer      3.87 ms       14.0, 1.7, 5.8, 9.8%
+    fad28e9    device fill_buffer      3.9-4.3 ms    12.1, 13.3, 9.3%
+
+The device-side fill is genuinely ~23% faster on the mean, which is why it was
+kept unconditional. But its **within-run drift went from under 1% to 9-13%**,
+which sits on the harness's 10% VOID threshold and trips it about two runs in
+three. Compute drift over the same runs is 0.0-0.2%, so the GPU is steady and
+Race 2 is unaffected — the instability is confined to `alloc_buffer_zeroed`.
+
+It drifts *upward* over a run, which is the opposite of the cold-start effect
+mac-247 found in the first size measured, so it is not the same phenomenon.
+
+A plausible mechanism, not yet tested: `alloc_buffer_zeroed` now builds a
+command buffer and does a full `submit_and_wait` **per allocation**, where it
+previously did a host-side memset and no submission at all. That is a queue
+submit and a fence wait added to every zeroed allocation, and command-pool state
+accumulating across a run would produce exactly an upward walk.
+
+If that is the cause, the fix is to record the fill into the pending batch
+rather than submitting synchronously — ordering is preserved because the fill
+and the dispatch land in the same command buffer in order. `poison_control` is
+the right check, since the four `allany_*` shaders are precisely the ones that
+depend on the zeroing being real.
+
+**Until this is understood, that box will VOID most runs for a reason unrelated
+to whatever is being tested**, which makes future work there harder to read.
+
 ## Not yet checked
 
 * Whether the Keplers and the Jetson show the same `txpci` signature. FreeBSD's
