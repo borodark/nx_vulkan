@@ -162,11 +162,71 @@ is the only evidence. And `s_flush` reads 538.0 us against its established
 522-550 band, so submission cost did not move, which is the expected result and
 worth having.
 
+### mac-248 confirms the pattern — and measures a cost I had not
+
+It built the pre-fix commit too rather than trusting a remembered number, and
+used a marginal method (1 op against 9, difference over 8) so dispatch cost is
+removed:
+
+    MiB    pre-fix   post A   post B    change
+      4      6.26     6.23     6.27      none
+     16      6.45     6.17     6.53      none
+     64      2.05     4.86     4.85      2.37x
+
+Same shape as mac-247: **nothing below the cliff, a real win above it**,
+reproducible to 0.2% and about 40x outside its noise. Two independent Keplers
+now agree that the defect was confined to above-cliff allocations on the 470
+stack while it displaced everything on super-io's.
+
+It also corrects something I told it. I had explained its Race 2 `~1.0`
+coincidence by saying its compute was running over PCIe like everything else.
+**It was not** — making its 16 MiB buffers device-local changed nothing there,
+so that explanation was wrong for its box.
+
+### THE STAGING COPY COSTS 40% OF CROSSING BANDWIDTH
+
+This is the part I did not measure before claiming the change was good.
+
+    at 16 MiB      pre-fix   post A   post B
+    dev_GB/s          6.47     6.05     5.87
+    cross_GB/s        7.92     4.77     4.86
+    boundary_ms      3.948    6.557    6.436
+    PRICE             0.80     1.27     1.21
+
+My prediction was that `dev_GB/s` would rise while `cross_GB/s` held. Neither
+happened. The `~1.0` coincidence broke because **the crossing got worse**, not
+because the device got better.
+
+So the honest net for that box: a real win on above-cliff compute, nothing below
+it, and a **40% tax on every host-device crossing**. Whether that is positive
+depends entirely on the workload — compute-heavy above the cliff wins,
+transfer-heavy loses. Race 2's sweep stops at 16 MiB and so never reaches the
+cliff where the win lives, which is why Race 2 read as a pure regression while
+the elementwise probe showed a 2.37x gain. Both are true.
+
+**This strengthens the case for making the staging path conditional** rather than
+unconditional, which was already flagged for the Jetson and now has a second
+motivation on discrete hardware.
+
+### Two things 248's control stopped it reporting wrongly
+
+It found uploads failing at 256 MiB (`upload buffer: a non-validation error
+occurred`) and was ready to file it as a regression. Pre-fix behaviour is
+**byte-identical** — same ceiling, same error. Pre-existing and unrelated.
+
+It also found odd VRAM accounting — ~192 MiB of live device tensors while
+`nvidia-smi` reports 70 MiB used — which would be suggestive that not all
+compute buffers are device-local there, consistent with both the below-cliff
+non-improvement and the still-poisonable padding leg. It offered it as a lead
+rather than a finding, on the grounds that the same tool reports `[N/A]` for
+clocks on that build and it does not trust the memory accounting. That is the
+right call and the lead is worth chasing.
+
 ### The poison control diverges across boxes
 
 super-io reports `PASS with the padding leg UNPROVEN` (0/20 dirty at 4 B / 8 B).
-**mac-247 reports a plain PASS with 2/20** — the padding leg is still proven
-there. Small device-local allocations stopped being poisonable on one card and
+**mac-247 reports a plain PASS with 2/20 and mac-248 with 7/20** — the padding
+leg is still proven on both Keplers. Three boxes, three different answers. Small device-local allocations stopped being poisonable on one card and
 did not on the other, which is a real divergence in the new allocator's
 behaviour and should be understood before that branch is relied upon.
 
