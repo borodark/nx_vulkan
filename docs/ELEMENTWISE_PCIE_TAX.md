@@ -123,6 +123,53 @@ failures / 163 excluded, residency 755/833 (90.6%) — identical to before.
 **It is still 13x off the card's 448 GB/s.** The PCIe tax was the dominant term,
 not the only one. What remains is worth a separate investigation.
 
+### The speedup is NOT general — mac-247 A/B'd it
+
+mac-247 built `4e271e0` and `1c575cc` in turn in one session on a verified-free
+card, two replicates each, identical probe. Its GT 650M on the 470/FreeBSD
+stack:
+
+    MiB    before      after    speedup
+      4   5.94 GB/s  5.99 GB/s    1.01x
+     16   5.80 GB/s  5.63 GB/s    0.97x
+     64   1.61 GB/s  4.61 GB/s    2.85x
+
+**Below the cliff it gained nothing.** The whole win on that card is the
+above-cliff path: 64 MiB ran at 0.28x the 16 MiB rate before and 0.82x after,
+75-93 ms down to 28-30 ms.
+
+So on the 470 driver the `HOST_RANDOM_ACCESS` requirement was evidently
+satisfiable from device-local memory for small allocations and not for large
+ones, while on super-io's current driver it displaced everything. **The defect
+and the fix are both real; the magnitude is driver- and size-dependent, and
+"2.0-11.3x" describes super-io, not the fleet.**
+
+Its larger gain was somewhere I did not predict — **allocation**:
+
+    buf_alloc above cliff     23-30 ms  ->  5.6-6.7 ms
+    zeroed    above cliff     39-53 ms  ->  6.4-7.4 ms   (~7x)
+    zeroed    below cliff      1.21 ms  ->  0.57-0.70 ms (~2x)
+    fitted alloc_above slope   0.75-1.91 ->  0.1241
+    fitted zeroed_above slope  1.39-1.79 ->  0.0591
+
+The 32 MiB cliff still exists and is now about an order of magnitude cheaper to
+cross. Device-local allocation is simply cheaper than host-visible allocation,
+and `alloc_buffer_zeroed` no longer writes n_bytes of zeros from the host.
+
+Two more from that box. `nvidia-smi dmon` is **not supported** on a GT 650M under
+the 470 driver, so no direct `txpci` confirmation is available there — the timing
+is the only evidence. And `s_flush` reads 538.0 us against its established
+522-550 band, so submission cost did not move, which is the expected result and
+worth having.
+
+### The poison control diverges across boxes
+
+super-io reports `PASS with the padding leg UNPROVEN` (0/20 dirty at 4 B / 8 B).
+**mac-247 reports a plain PASS with 2/20** — the padding leg is still proven
+there. Small device-local allocations stopped being poisonable on one card and
+did not on the other, which is a real divergence in the new allocator's
+behaviour and should be understood before that branch is relied upon.
+
 ### One honest consequence: the poison control now reports UNPROVEN
 
 `poison_control.exs` came back `PASS with the padding leg UNPROVEN` — 0/20 dirty
