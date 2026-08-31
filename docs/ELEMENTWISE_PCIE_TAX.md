@@ -222,7 +222,48 @@ rather than a finding, on the grounds that the same tool reports `[N/A]` for
 clocks on that build and it does not trust the memory accounting. That is the
 right call and the lead is worth chasing.
 
-### RETRACTED: the poison-control "divergence" was sampling
+### The batched fill's real payoff was Race 4, not the drift
+
+I batched the fill to fix an allocation drift, and the Jetson showed that
+mechanism was wrong — it was DVFS. The change was still correct, for a reason
+neither of us gave at the time. mac-248 at `a6dcfa7`, three runs:
+
+    quantity                  before        after        factor
+    buf_alloc @32 MiB      ~19.8-20.2 ms   3.97-4.12      ~5x
+    buf_alloc_zeroed @32   ~33.2-48.2 ms   4.68-4.82    ~7-10x
+    alloc_above slope        0.69-1.10     0.059-0.087   ~10x
+    zeroed_above slope       0.80-2.46     0.095         ~10-20x
+    zeroed_below @24 MiB   ~1.09-1.11 ms   0.513-0.527    ~2x
+
+**And it repaired a measurement, not just a cost.** That box had flagged
+`zeroed_above` repeatedly as unusable — 1.88x to 2.24x spread across quiet
+consecutive runs even at 25 reps — and recommended dropping it from any
+conclusion. It now reproduces to **1.4%** (0.0952 / 0.0943 / 0.0956).
+
+So the variance was never sampling noise. It was per-allocation submission
+overhead, which is exactly what the batching removed. **The recommendation to
+drop `zeroed_above` is withdrawn; the quantity is reportable now.**
+
+### RETIRED: the poison-control rate is not a property of the card
+
+mac-248 settles this, and not in the direction the cross-box table suggested.
+Four fresh processes gave 3/20, 2/20, 3/20, 3/20 — a narrow low band with no
+flipping, where super-io alternates between the extremes 20/20 and 0/20 and the
+Jetson pins at 20/20. Three boxes, three distinct behaviours, which looks like a
+finding.
+
+It is not, and 248 supplied the disqualifying evidence itself: **its own rate
+moved with the commit.** It read 7/20 at `1c575cc` and 2-3/20 at `a6dcfa7`. The
+number tracks allocator and submission behaviour, changing when the code
+changes, rather than sitting where the hardware puts it.
+
+A quantity that is stable within a build and moves between builds is not
+describing the card. The cross-box comparison is withdrawn entirely — not
+merely unproven, as I had it after the super-io flip, but measuring the wrong
+thing. The UNPROVEN branch remains valuable as an honest self-report; its
+numeric rate is not a cross-box observable.
+
+### Earlier retraction, superseded by the above
 
 I reported that small device-local allocations had stopped being poisonable on
 super-io and not on the Keplers, and treated the difference as a property of the
