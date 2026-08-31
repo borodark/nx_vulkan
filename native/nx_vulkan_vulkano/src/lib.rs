@@ -174,6 +174,9 @@ struct VkContext {
     device_name: String,
     device_type: String,
     supports_f64: bool,
+    /// True when this device has NO host-visible-but-not-device-local memory
+    /// type — i.e. unified memory. See `probe_unified_memory`.
+    unified_memory: bool,
 }
 
 static CTX: OnceLock<VkContext> = OnceLock::new();
@@ -215,6 +218,35 @@ fn ctx() -> Result<&'static VkContext, String> {
     // _f64.spv shaders. Falls back gracefully on devices without it
     // (those will keep using the f32 paths + host fallback for f64).
     let supports_f64 = physical.supported_features().shader_float64;
+
+    // UNIFIED-MEMORY PROBE, and the test is narrower than it first appears.
+    //
+    // The tempting test is "does a DEVICE_LOCAL | HOST_VISIBLE type exist?" —
+    // but that is TRUE on discrete cards too, because of the PCI Base Address
+    // Register aperture, historically a 256 MB window that is both. It would
+    // send every discrete card down the unified path.
+    //
+    // The discriminating question is the other way round: does a type exist
+    // that is HOST_VISIBLE and NOT DEVICE_LOCAL? That is ordinary system RAM
+    // reachable across a bus, and it is exactly what a unified device does not
+    // have. On Tegra every memory type is DEVICE_LOCAL, so the answer is no.
+    let unified_memory = !physical
+        .memory_properties()
+        .memory_types
+        .iter()
+        .any(|t| {
+            t.property_flags
+                .contains(vulkano::memory::MemoryPropertyFlags::HOST_VISIBLE)
+                && !t
+                    .property_flags
+                    .contains(vulkano::memory::MemoryPropertyFlags::DEVICE_LOCAL)
+        });
+
+    eprintln!(
+        "[nx_vulkan_vulkano] unified memory: {} (staging path: {})",
+        unified_memory,
+        if unified_memory { "OFF" } else { "ON" }
+    );
     // robust_buffer_access makes out-of-bounds reads return 0 instead of
     // faulting — needed by the select shader, which reads a u8 `pred` buffer as
     // u32 words and may touch up to 3 bytes past the end on the tail word.
@@ -274,6 +306,7 @@ fn ctx() -> Result<&'static VkContext, String> {
         device_name,
         device_type,
         supports_f64,
+        unified_memory,
     };
 
     let _ = CTX.set(ctx);
@@ -508,6 +541,36 @@ fn alloc_buffer(
     n_bytes: usize,
     usage: BufferUsage,
 ) -> Result<Subbuffer<[u8]>, String> {
+    // On unified memory, ask for host access directly and skip staging
+    // entirely. The Jetson measured the unconditional staging path costing it
+    // 47-152% on every boundary crossing for ZERO compute gain — its
+    // elementwise throughput moved 0 to -3%, because with every memory type
+    // already DEVICE_LOCAL there was never a PCIe write to eliminate.
+    //
+    // Worse than the cost: the staging path INVERTED that box's Race 2 curve.
+    // Its low-to-mid PRICE rise went from 0.87x/0.84x (falling — the unified
+    // signature) to 1.22x/1.15x/1.21x (rising, toward the discrete shape). An
+    // unconditional staging path was partially manufacturing the very effect
+    // the experiment exists to measure, using our own allocator.
+    let unified = ctx().map(|c| c.unified_memory).unwrap_or(false);
+
+    if unified {
+        return Buffer::new_slice::<u8>(
+            alloc,
+            BufferCreateInfo {
+                usage,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            n_bytes as u64,
+        )
+        .map_err(|e| format!("alloc buffer (unified): {e}"));
+    }
+
     Buffer::new_slice::<u8>(
         alloc,
         BufferCreateInfo {
@@ -552,6 +615,14 @@ fn staging_read<'a>(
     context: &VkContext,
     src: Subbuffer<[u8]>,
 ) -> Result<Binary<'a>, String> {
+    // Unified: the buffer is already host-readable, so read it in place.
+    if context.unified_memory {
+        let guard = src.read().map_err(|e| format!("read buffer: {e}"))?;
+        let mut bin = NewBinary::new(env, guard.len());
+        bin.as_mut_slice().copy_from_slice(&guard[..]);
+        return Ok(bin.into());
+    }
+
     let n = src.len();
 
     let staging = Buffer::new_slice::<u8>(
@@ -588,6 +659,13 @@ fn staging_read<'a>(
 /// HOST_SEQUENTIAL_WRITE here, not RANDOM_ACCESS: this side only ever writes,
 /// and write-combined memory is the right choice for that.
 fn staging_write(context: &VkContext, dst: Subbuffer<[u8]>, bytes: &[u8]) -> Result<(), String> {
+    // Unified: the buffer is already host-writable, so write it in place.
+    if context.unified_memory {
+        let mut guard = dst.write().map_err(|e| format!("write buffer: {e}"))?;
+        guard.copy_from_slice(bytes);
+        return Ok(());
+    }
+
     let staging = Buffer::from_iter(
         context.mem_allocator.clone(),
         BufferCreateInfo {
