@@ -1,0 +1,61 @@
+run_trace.sh — Race 1c devfreq trace, staged 2026-08-30, jake-desktop (Jetson Nano, Tegra X1)
+Repo: ~/nx_vulkan at dd9344f. Staged but NEVER RUN: the box was contended for ~95 min by
+another user's `mix test --seed 0` in ~/exmc_oss, which exercises nx_vulkan and therefore
+contends for the GPU -- the exact resource this script measures. Fire it in a quiet window.
+
+WHAT IT MEASURES
+  Runs examples/unified_vs_discrete_race.exs once, while sampling the Tegra GPU clock at
+  250 ms from /sys/class/devfreq/57000000.gpu/cur_freq (plus /sys/devices/gpu.0/load), and
+  wall-clock-stamps every harness output line. The stamps let you slice the clock trace into
+  Race 1c's per-F windows: each "F  total_ms" row is printed AFTER that F is measured, so the
+  window for F[i] runs from the F[i-1] line's timestamp to the F[i] line's timestamp.
+  Outputs: /tmp/traceT.txt (stamped harness output), /tmp/clkT.log (stamped clock samples).
+
+THE QUESTION IT ANSWERS
+  Race 1c fixes the dispatch count at 32 and varies the flush count F, fitting
+  total(F) = base + F*s_flush, so the slope is per-submission cost. On this box the clean
+  4f23e59 run produced marginals of +3.779, +2.155, +2.709, -0.572, +0.924 ms/flush.
+  A NEGATIVE marginal is physically impossible for a submission cost: only the submission
+  count varies between adjacent points, so more submissions cannot take less total time.
+  (The harness now voids a run on this, dd9344f lines ~844-862 and ~1113.)
+
+  Suspected mechanism -- what to look for:
+  32 dispatches at n=256 is a LOW-DUTY workload. Low duty is what makes nvhost_podgov drop
+  the GPU clock. More flushes means more sustained submission activity, which can mean a
+  HIGHER clock. That would push totals DOWN as F rises and bend the marginals exactly the way
+  observed, including negative.
+
+    * If cur_freq RISES with F  -> Race 1c is DVFS-confounded on this integrated part and
+      cannot measure submission at these sizes. It needs redesign: larger n to raise duty, or
+      interleaved saturating work to hold the clock pinned across all F.
+    * If cur_freq is FLAT across all F and the marginals still bend -> the cause is something
+      else, and that is the more interesting answer.
+
+  Reference points measured on this box:
+    idle 76.8 MHz; nvpmodel-5W cap 614.4 MHz (hardware list goes to 921.6); ratio 12.5%,
+    about the same as super-io's RTX 3060 Ti at 210/2100. Ramp to full clock took 2.25 s at
+    the ~50-65% duty of a low-k sweep, but only ~500 ms at the 99.7% duty of a k=1024 matmul.
+    Race 1b held 614.4 MHz on every sample at 70-80% duty, so pinning works THERE; the open
+    question is whether it holds through Race 1c's lower duty.
+
+SAFETY / GOTCHAS
+  * Self-abort guard: the script re-checks for `mix test` and `rustc --crate-name` immediately
+    before measuring and exits 9 rather than emit a contended table. It also reports whether
+    exmc's test suite was running at the end. Trust that over a pre-flight check alone.
+  * pgrep -f SELF-MATCHING HAZARD. A watcher loop like
+        while pgrep -f "rustc --crate-name" ...
+    has that very string in its OWN command line, so pgrep matches the watcher itself. Two
+    orphaned watchers of mine (one alive 5 h) caused repeated false "box is free" readings
+    while rustc was plainly running. Kill leftovers by exact PID, never with a broad
+    `pkill -f` -- a broad pattern has previously matched the operator's own ssh command line.
+    Check for strays with:  ps -eo pid,etime,args | grep '[p]grep -f'
+  * Box setup: no sudo available. mix/cargo are not on PATH in a non-login shell -- source
+    ~/.asdf/asdf.sh and ~/.cargo/env, and add ~/.local/bin (glslangValidator lives there).
+    ~/.asdf/asdf.sh cannot be sourced from dash; use bash. Export ERL_CRASH_DUMP_SECONDS=0
+    (a crash writes 2.8 GB dumps). Do NOT rm -rf _build unless the build actually fails:
+    dev and test do not share a cargo target dir and a full rebuild costs ~47 min.
+  * No nvidia-smi on this box; Tegra clock comes from devfreq. The harness guards this with
+    find_executable now -- before that fix System.cmd RAISED :enoent and the harness could
+    not run here at all.
+  * Never compare this box's absolute milliseconds to another box. OTP here is built
+    --disable-jit and runs 2 of 4 cores at 5W. Only within-box ratios are meaningful.
