@@ -1,0 +1,41 @@
+Clock-dimensioned elementwise harness (super-io, 2026-08-31)
+
+Run them like this — the external logger is not optional, it is the instrument:
+
+    nvidia-smi --query-gpu=clocks.sm --format=csv,noheader,nounits -lms 50 \
+      | while read c; do echo "$(date +%s%3N) $c"; done > /tmp/clock.log &
+    LOGGER=$!
+    CLOCK_LOG=/tmp/clock.log mix run scripts/staged/clock_dimension.exs
+    kill $LOGGER
+
+clock_dimension.exs
+    Grid of {48,64,128 MiB} x {idle,partial,boost} x {flat_re,bcast_re,alloc,
+    nx_mul}, 9 samples, 2 replicates. Emits per-window epoch-ms marks and joins
+    them against the logger to report the clock that actually held. Also prints
+    idle/boost sensitivity per quantity and a least-squares slope per state.
+
+bar1_cliff.exs
+    Ten 32 MiB uploads held live, each read by the flat shader, with BAR1 usage
+    sampled per row. Demonstrates the cumulative host-visible-heap cliff. This
+    one DOES shell out to nvidia-smi between rows — acceptable only because
+    each row re-bursts for 500 ms afterwards.
+
+upload_vs_alloc_control.exs
+    buf_alloc'd operands vs buf_upload'd operands at 48/64/128 MiB. The control
+    that found the bug. Note it allocates TWO uploaded buffers per size, which
+    is why 128 MiB (256 MiB total) crosses the window and 64 does not.
+
+TRAPS, all paid for:
+
+* Never call nvidia-smi from inside the measuring process. 50-100 ms of GPU
+  idle per call is enough to drop boost, and the guard then rejects good data.
+* Sanity-check derived bandwidth against the card's physical peak (448 GB/s
+  here). A corrupted run reported 804.
+* Do not build large test tensors with Nx.iota — at 33M elements it is minutes
+  of host work with the GPU idle. Use Nx.from_binary(:binary.copy(...)).
+* buf_alloc does not initialise, so operands read from it may not be backed by
+  committed pages. Controlled for at 48 and 64 MiB (uploaded and allocated
+  agree); the 128 MiB divergence is the BAR1 cliff, not lazy backing.
+* super-io runs a desktop on this card. 2.1-2.6 GiB resident, P0 throughout.
+  Not a clean box. Check for the foreign-compute signature (6 MiB + P8) rather
+  than expecting an idle one.

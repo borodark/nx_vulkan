@@ -420,25 +420,86 @@ fn bytes_to_u32_words(bytes: &[u8]) -> Result<Vec<u32>, &'static str> {
         .collect())
 }
 
+/// Upload host bytes into a fresh DEVICE_LOCAL buffer.
+///
+/// This asked for `PREFER_DEVICE | HOST_SEQUENTIAL_WRITE` until 2026-08-31 —
+/// the same preference-plus-requirement defect `alloc_buffer` carried, and the
+/// requirement wins the same way. `alloc_buffer` was migrated to DEVICE_LOCAL +
+/// staging last session; this function was missed, so every tensor entering the
+/// GPU from the host still landed in host-visible memory.
+///
+/// It does not present as a constant tax. Host-visible allocations go to the
+/// device's BAR window first, which IS device-local, so small workloads look
+/// correct. The cost appears when that window fills — it is a whole-process
+/// budget, not a per-allocation limit, and nothing reports crossing it.
+/// Measured on super-io (BAR1 = 256 MiB, resizable BAR off) with ten 32 MiB
+/// uploads held live, each read by the flat elementwise shader at boost clock:
+///
+///     N   cumulative   ms      3n GB/s   BAR1 used
+///     1       32 MiB   0.554   181.7        69 MiB
+///     6      192 MiB   0.606   166.1       229 MiB
+///     7      224 MiB   3.063    32.9       229 MiB   <- window full
+///    10      320 MiB   3.077    32.7       229 MiB
+///
+/// BAR1 stops climbing and throughput falls 5.5x at CONSTANT buffer size.
+/// Backing the device-resident operands out of the 3n figure puts the PCIe leg
+/// at ~10.9 GB/s, matching the 10.8 GB/s measured directly for the
+/// `alloc_buffer` version of this bug. Do not confuse this cliff with the
+/// 32 MiB one: that is vulkano's and per-allocation, this is the driver's and
+/// cumulative.
+///
+/// No test could see it. The values are bit-identical, the tensor is genuinely
+/// resident on the backend, and the fallback census counts nothing — only the
+/// heap is wrong.
+///
+/// This variant BLOCKS until the copy has executed. Use it for callers that go
+/// on to build and submit their own command buffer without draining the pending
+/// batch — the three leapfrog synth NIFs and `fft` all do exactly that, and a
+/// deferred copy would leave them reading an uninitialised buffer. Callers
+/// whose result is only ever consumed through `enqueue_dispatch` should prefer
+/// `upload_buffer_deferred`.
 fn upload_buffer(
-    alloc: Arc<StandardMemoryAllocator>,
+    context: &VkContext,
     bytes: &[u8],
     usage: BufferUsage,
 ) -> Result<Subbuffer<[u8]>, String> {
-    Buffer::from_iter(
-        alloc,
-        BufferCreateInfo {
-            usage,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        bytes.iter().copied(),
-    )
-    .map_err(|e| format!("upload buffer: {e}"))
+    let buf = alloc_buffer(
+        context.mem_allocator.clone(),
+        bytes.len(),
+        usage | BufferUsage::TRANSFER_DST,
+    )?;
+    staging_write(context, buf.clone(), bytes)?;
+    Ok(buf)
+}
+
+/// `upload_buffer`, but the staging copy is ENQUEUED rather than submitted.
+///
+/// The blocking variant would put a full submit and fence wait on a path that
+/// previously did neither — `buf_upload` was a plain host write. That path is
+/// not only used for big tensors: `gpu_bcast_binary` uploads a 52-byte params
+/// buffer through it on every broadcast op, and `buf_upload(52 B)` measures
+/// 0.024 ms today. Charging a submit to that would trade one regression for
+/// another, which is the mistake `alloc_buffer_zeroed` already made once and
+/// had to undo ("ENQUEUE the fill, do not submit it").
+///
+/// Safe only because every consumer of a `buf_upload` result either goes
+/// through `enqueue_dispatch` — same queue, replayed in order — or flushes
+/// first: `concat_buffers`, `buf_download`, `buf_upload_into` and `fft` all
+/// call `flush_pending()` before touching device memory outside the batch.
+/// The leapfrog synth NIFs take host binaries rather than refs, so they never
+/// see one of these buffers.
+fn upload_buffer_deferred(
+    context: &VkContext,
+    bytes: &[u8],
+    usage: BufferUsage,
+) -> Result<Subbuffer<[u8]>, String> {
+    let buf = alloc_buffer(
+        context.mem_allocator.clone(),
+        bytes.len(),
+        usage | BufferUsage::TRANSFER_DST,
+    )?;
+    enqueue_staging_write(context, buf.clone(), bytes)?;
+    Ok(buf)
 }
 
 /// Allocate an output buffer WITHOUT initialising it.
@@ -687,6 +748,71 @@ fn staging_write(context: &VkContext, dst: Subbuffer<[u8]>, bytes: &[u8]) -> Res
     submit_and_wait(context, cmd)
 }
 
+/// `staging_write`, but the device-side copy is queued into the pending batch
+/// instead of submitted on its own.
+///
+/// The staging buffer is moved into the closure, which is what keeps it alive
+/// until the batch is replayed — dropping it early would free the copy's source
+/// out from under the GPU. `RecordFn` is `Send`, and `Subbuffer<[u8]>` is
+/// `Send + Sync + 'static`, so parking it in the static queue is sound.
+///
+/// Ordering is preserved for free: dispatches and copies share one queue and
+/// are replayed in push order, so a dispatch enqueued after this copy reads the
+/// written bytes. Callers that bypass the batch must `flush_pending()` first —
+/// see `upload_buffer_deferred` for who is allowed to use this.
+fn enqueue_staging_write(
+    context: &VkContext,
+    dst: Subbuffer<[u8]>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    // Unified: the buffer is already host-writable, so write it in place and
+    // queue nothing.
+    if context.unified_memory {
+        let mut guard = dst.write().map_err(|e| format!("write buffer: {e}"))?;
+        guard.copy_from_slice(bytes);
+        return Ok(());
+    }
+
+    let staging = Buffer::from_iter(
+        context.mem_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        bytes.iter().copied(),
+    )
+    .map_err(|e| format!("staging alloc (write): {e}"))?;
+
+    let record: RecordFn = Box::new(move |cmd: &mut CmdBuilder| {
+        cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(staging, dst))
+            .map_err(|e| format!("copy staging->device: {e}"))?;
+        Ok(())
+    });
+
+    // NXV_BATCH_MAX=0 disables batching everywhere; honour it here too, so the
+    // A/B control still restores submit-per-operation.
+    if batch_max() == 0 {
+        let mut cmd = new_cmd_builder(context)?;
+        record(&mut cmd)?;
+        return submit_and_wait(context, cmd);
+    }
+
+    let mut queue = pending()
+        .lock()
+        .map_err(|_| "pending queue poisoned".to_string())?;
+    queue.push(record);
+    if queue.len() >= batch_max() {
+        flush_locked(context, &mut queue)
+    } else {
+        Ok(())
+    }
+}
+
 /// Allocate an output buffer and zero it — for kernels that ACCUMULATE.
 ///
 /// The four `allany_*` shaders `atomicOr` into a packed u8 mask, one thread per
@@ -817,17 +943,17 @@ fn leapfrog_chain_synth<'a>(
         let pipeline = cached.pipeline.clone();
 
         let q_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             q_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let p_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             p_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let extras_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             extras.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
@@ -972,17 +1098,17 @@ fn leapfrog_chain_synth_f64<'a>(
         let pipeline = cached.pipeline.clone();
 
         let q_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             q_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let p_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             p_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let extras_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             extras.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
@@ -1124,17 +1250,17 @@ fn leapfrog_chain_synth_batch<'a>(
         let pipeline = cached.pipeline.clone();
 
         let q_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             q_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let p_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             p_init.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
         let extras_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             extras.as_slice(),
             BufferUsage::STORAGE_BUFFER,
         )?;
@@ -1237,8 +1363,8 @@ fn buf_upload<'a>(env: Env<'a>, data: Binary<'a>) -> NifResult<Term<'a>> {
         Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
     };
 
-    let buf = match upload_buffer(
-        context.mem_allocator.clone(),
+    let buf = match upload_buffer_deferred(
+        context,
         data.as_slice(),
         BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
     ) {
@@ -2988,7 +3114,7 @@ fn fft<'a>(
             tw_bytes.extend_from_slice(&ang.sin().to_le_bytes());
         }
         let tw_buf = upload_buffer(
-            context.mem_allocator.clone(),
+            context,
             &tw_bytes,
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
         )?;
