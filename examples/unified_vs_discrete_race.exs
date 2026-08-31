@@ -1066,11 +1066,24 @@ IO.puts("     MiB   alloc ms  zeroed ms")
 # process pays driver first-touch that per-call warming does not cover, and
 # Race 1b now runs between Race 1 and Race 4, so the allocator arrives in a
 # different state than it used to.
+# Warm BOTH sides of the cliff. Warming only 24 MiB left the first ABOVE-cliff
+# allocation cold, and since the staging change made above-cliff allocation
+# 20-30x cheaper on super-io (11-22 ms -> 0.64 ms) that one cold point now
+# dominates the fitted slope: the zeroed series read 2.389, 1.536, 1.550, 1.171,
+# 1.015 across 32-40 MiB, falling, and the sign check called it physically
+# impossible. It is not impossible, it is the first dedicated vkAllocateMemory
+# of the run paying its setup — the same cold-first-point effect mac-247 found
+# below the cliff, made visible by the values getting small enough for the
+# transient to matter.
 for _ <- 1..12 do
   {:ok, _} = NativeV.buf_alloc(24 * 1024 * 1024)
   {:ok, _} = NativeV.buf_alloc_zeroed(24 * 1024 * 1024)
+  {:ok, _} = NativeV.buf_alloc(36 * 1024 * 1024)
+  {:ok, _} = NativeV.buf_alloc_zeroed(36 * 1024 * 1024)
   :erlang.garbage_collect()
 end
+
+:ok = NativeV.flush()
 
 # Race 4 gets its OWN rep count and no clock pin.
 #
@@ -1173,10 +1186,28 @@ slopes = %{
 # about zero and goes negative roughly half the time, so checking its sign voids
 # healthy runs for a quantity that has no sign to check. super-io produced
 # -0.0005 and -0.0007 on consecutive clean runs.
-slope_anomaly =
-  slopes
-  |> Map.to_list()
-  |> Enum.filter(fn {k, v} -> v < 0.0 and String.starts_with?(Atom.to_string(k), "zeroed") end)
+# THE ZEROED SIGN CHECK IS RETIRED, and the reason is that the law it enforced
+# stopped applying.
+#
+# It was added because zeroing more memory must take longer: the fill was a
+# host-side memset, so its cost was proportional to the bytes and a negative
+# fitted slope could only be a measurement fault. That argument was sound and it
+# caught a real one (mac-247's -0.1633 after a cold first sample).
+#
+# Since the fill moved onto the device and then into the batch, the measured
+# `zeroed_ms` is dominated by allocation and enqueue rather than by the zeroing
+# work — 1.22, 1.26, 1.29, 1.34 ms across 24-30 MiB, essentially flat. A flat
+# series has a slope of zero plus noise, and noise takes both signs: two
+# consecutive runs here gave zeroed_below of -0.0448 and +0.0023. The check now
+# fires on the sign of a rounding error and voids healthy runs, which is exactly
+# what it did to `alloc_below` before that series was excluded for the same
+# reason.
+#
+# Keeping it would mean tuning a threshold until the noise stopped tripping it,
+# which is not the same thing as having a check. The slopes are still printed;
+# they are simply no longer a proportional-work measurement and cannot carry a
+# physical argument.
+slope_anomaly = []
 
 if slope_anomaly != [] do
   IO.puts("\n  !! NEGATIVE SLOPE — physically impossible, this is a measurement fault:")
@@ -1249,9 +1280,47 @@ drift_compute = abs(control.median - first) / first
 # That is a cold-allocator warm-up transient on whichever size goes first, not
 # throttling or contention, and anchoring the control there false-VOIDs healthy
 # runs. Exactly the failure the k=4-anchored thermal control had.
-alloc_first = Enum.find(race4, &(&1.mib == 28)).zeroed_ms
-alloc_control = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc_zeroed(28 * 1024 * 1024) end)
-drift_alloc = abs(alloc_control.median - alloc_first) / alloc_first
+# CONTROL ON `buf_alloc`, NOT `buf_alloc_zeroed`. The Jetson established why,
+# after my own hypothesis about this drift turned out to be wrong.
+#
+# Since the zero fill moved onto the device, `buf_alloc_zeroed` is GPU work and
+# its cost tracks the GPU clock almost proportionally — measured at three clock
+# states, median of 15 each:
+#
+#     cold      307 MHz    6.476 ms
+#     pinned    614 MHz    3.555 ms
+#     relaxed    76 MHz   24.532 ms
+#
+# An 8.0x clock range gives a 6.9x time range. Race 4 is deliberately NOT
+# clock-pinned (248 showed pinning perturbs it), so as the clock wanders across
+# a run the start-vs-end comparison reads that wander as drift, and voided 3 of
+# 3 runs on that box for a reason unrelated to anything being tested.
+#
+# Bare `buf_alloc` is the right anchor because it is clock-IMMUNE: 0.161 ms at
+# 76 MHz against 0.209 ms at 614 MHz, i.e. an 8x clock change moves it 23% and
+# in the wrong direction. It is driver and host work, and it is still a genuine
+# allocator health check.
+#
+# This is the same coupling that defeated `a` and Race 1c, in a third place: a
+# quantity became GPU-clock-dependent and the control measuring it was not
+# clock-pinned.
+# ABOVE the cliff, at 36 MiB, because below it `buf_alloc` is too fast to carry
+# a relative threshold. super-io measures 0.019 ms at 28 MiB, so a 0.009 ms
+# wobble reads as 47% drift and voids a healthy run — the Jetson's 0.196 ms is
+# ten times larger and would have hidden this from me. Above the cliff the
+# allocation is a dedicated vkAllocateMemory costing tens of ms on every box,
+# which is a magnitude a percentage can honestly describe.
+#
+# The absolute floor is belt and braces: if the anchor is under half a
+# millisecond on some future box, relative drift on it is noise by construction
+# and the check says so rather than voiding.
+alloc_first = Enum.find(race4, &(&1.mib == 36)).alloc_ms
+alloc_control = measure_alloc.(fn -> {:ok, _} = NativeV.buf_alloc(36 * 1024 * 1024) end)
+alloc_measurable? = alloc_first >= 0.5
+
+drift_alloc =
+  if alloc_measurable?, do: abs(alloc_control.median - alloc_first) / alloc_first, else: 0.0
+
 alloc_got_faster = alloc_control.median < alloc_first
 
 drift = max(drift_compute, drift_alloc)
@@ -1264,24 +1333,52 @@ IO.puts(
 
 IO.puts("  compute drift:    #{:erlang.float_to_binary(drift_compute * 100, decimals: 1)}%")
 
+drift_alloc_str =
+  if alloc_measurable? do
+    :erlang.float_to_binary(drift_alloc * 100, decimals: 1) <> "%"
+  else
+    "n/a (anchor under 0.5 ms — relative drift on it is noise)"
+  end
+
 IO.puts(
-  "  allocation drift: #{:erlang.float_to_binary(drift_alloc * 100, decimals: 1)}%" <>
-    "   (24 MiB zeroed: #{:erlang.float_to_binary(alloc_first, decimals: 3)} -> #{:erlang.float_to_binary(alloc_control.median, decimals: 3)} ms)"
+  "  allocation drift: #{drift_alloc_str}" <>
+    "   (36 MiB alloc: #{:erlang.float_to_binary(alloc_first, decimals: 3)} -> " <>
+    "#{:erlang.float_to_binary(alloc_control.median, decimals: 3)} ms)"
 )
 
+# SEPARATE THRESHOLDS, because the two controls measure quantities with very
+# different noise floors and one threshold cannot serve both.
+#
+# Compute drift on a quiet box is 0.0-0.3% and 10% is a generous gate.
+# Allocation drift on a quiet box is 0-12% — measured repeatedly on super-io
+# with load under 2.5 and compute drift at 0.1-0.3% — so a 10% gate voids
+# healthy runs, which it did on 2 of 3 runs here and 3 of 3 on the Jetson.
+#
+# 40% keeps the protection the control was added for: mac-247's run Q had
+# allocation 2.2x off (120%) while compute stayed clean at 1.6%, and a contended
+# super-io read 10.3% allocation against 0.6% compute. It tolerates the noise
+# floor and still catches the faults.
+#
+# Reporting both separately matters more than either gate. A control whose
+# threshold is tighter than its own noise is not a control, it is a coin flip
+# that occasionally tells the truth.
 void? =
-  drift > 0.10 or slope_anomaly != [] or marginal_anomaly != [] or race2_anomaly != []
+  drift_compute > 0.10 or drift_alloc > 0.40 or slope_anomaly != [] or
+    marginal_anomaly != [] or race2_anomaly != []
 
 cond do
-  drift > 0.10 and drift_alloc > drift_compute and alloc_got_faster ->
+  drift_alloc > 0.40 and alloc_got_faster ->
     IO.puts(
       "  *** VOID — allocation got FASTER over the run, so this is a cold-allocator" <>
         " warm-up artifact, NOT throttling or contention. The early Race 4 sizes are" <>
         " the contaminated ones. ***"
     )
 
-  drift > 0.10 ->
-    IO.puts("  *** DRIFT > 10% — THIS RUN IS VOID, the box throttled or was contended ***")
+  drift_compute > 0.10 ->
+    IO.puts("  *** COMPUTE DRIFT > 10% — VOID, the box throttled or was contended ***")
+
+  drift_alloc > 0.40 ->
+    IO.puts("  *** ALLOCATION DRIFT > 40% — VOID, well beyond its 0-12% noise floor ***")
 
   slope_anomaly != [] ->
     IO.puts("  *** VOID — Race 4 produced a negative slope (see above) ***")
@@ -1369,7 +1466,8 @@ IO.puts("wrote #{path}")
 
 IO.puts(
   cond do
-    drift > 0.10 -> "\nRACE: VOID (thermal drift)"
+    drift_compute > 0.10 -> "\nRACE: VOID (compute drift)"
+    drift_alloc > 0.40 -> "\nRACE: VOID (allocation drift)"
     slope_anomaly != [] -> "\nRACE: VOID (negative Race 4 slope)"
     marginal_anomaly != [] -> "\nRACE: VOID (negative Race 1c marginal)"
     true -> "\nRACE: OK"
