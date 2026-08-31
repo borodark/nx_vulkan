@@ -727,8 +727,25 @@ IO.puts("  not raw s.")
 # ---------------------------------------------------------------------------
 
 n_1c = 256
-dispatch_count = 32
-flush_counts = [1, 2, 4, 8, 16, 32]
+# 48 dispatches, not 32, and nine flush counts rather than six. mac-247 found
+# two problems with the old shape, both real:
+#
+# Excluding F=1 moved the structural inflation to F=2 rather than removing it.
+# Its F=2->4 marginal reads 1447 / 1072 / 1059 us across three runs against a
+# settled 520-610 — systematic, present in contaminated and clean runs alike.
+# So the low-F regime is wider than one point and the exclusion has to be too.
+#
+# And four marginals is too few for a median. With F=1 gone the old list left
+# four, so the median is the mean of the middle two and a single bad value
+# shifts it hard: its run A gave 431 with a -1848 in the set, run B gave 798
+# with a +3295. A median needs enough samples to walk past an outlier, which was
+# the entire argument for choosing it over OLS.
+#
+# 48 is the smallest count with enough divisors to give a dense sweep while
+# keeping the dispatch count EXACTLY fixed — the premise the whole measurement
+# rests on. Excluding F<4 leaves six marginals, from 4->6 up to 24->48.
+dispatch_count = 48
+flush_counts = [1, 2, 3, 4, 6, 8, 12, 16, 24, 48]
 
 IO.puts(
   "\n--- Race 1c: submission as a slope (#{dispatch_count} dispatches, varying flushes) ---"
@@ -803,7 +820,7 @@ end
 # The median needs no window choice and no outlier detector: a corrupted point
 # poisons two adjacent pairs and the median walks past both. 247's run B
 # marginals were 9399, -3414, 281, 540, 522 us — the median lands on 522.
-# F=1 IS A SEPARATE REGIME AND IS EXCLUDED. mac-248 measured the F=1->2 marginal
+# THE LOW-F REGIME IS EXCLUDED — F<4, not just F=1. mac-248 measured the F=1->2 marginal
 # at 839 and 933 us against a settled ~350 — reproducible across both runs, so
 # structural rather than a spike. With a single flush the one submit_and_wait
 # overlaps all 32 dispatches; at F=2 a mid-sequence sync is forced that cannot
@@ -816,19 +833,50 @@ end
 # super-io curves the OTHER way (its low-F points sit below its slope), so the
 # exclusion is justified on the control boxes and simply removes a point
 # elsewhere.
+# THEIL-SEN: median slope over ALL PAIRS, not adjacent ones.
+#
+# Widening the sweep to nine flush counts fixed 247's "only four marginals"
+# problem and created a new one: the gaps are now uneven (4->6 is a gap of two,
+# 24->48 a gap of twenty-four), and a marginal computed across a small gap
+# amplifies noise in the numerator far more than one across a large gap. The
+# adjacent marginals came out 470, 1648, 594, 1414, 1777, 857 — scattered, and a
+# median over heteroscedastic samples is not the robust estimator it looks like.
+#
+# Theil-Sen takes the median of the slopes between every pair of points. Wide
+# gaps contribute proportionally more pairs and are individually less noisy, so
+# the estimator weights them naturally rather than by fiat, and it tolerates up
+# to ~29% of the points being corrupted — which is the property 247's run A
+# needed when a single block put a -1848 in the set.
+#
+# It is a standard estimator with a known breakdown point, which is worth more
+# than a hand-rolled rule chosen because it survived the last failure.
+pts =
+  race1c
+  |> Enum.sort_by(& &1.flushes)
+  |> Enum.filter(&(&1.flushes >= 4))
+  |> Enum.map(&{&1.flushes * 1.0, &1.total_ms})
+
+pair_slopes =
+  for {x1, y1} <- pts,
+      {x2, y2} <- pts,
+      x2 > x1,
+      do: (y2 - y1) / (x2 - x1)
+
+s_flush = median.(pair_slopes)
+
+# Adjacent marginals are still printed as a diagnostic — a scattered set is a
+# contamination tell even when the robust estimate absorbs it.
 marginals =
   race1c
   |> Enum.sort_by(& &1.flushes)
-  |> Enum.filter(&(&1.flushes >= 2))
+  |> Enum.filter(&(&1.flushes >= 4))
   |> Enum.chunk_every(2, 1, :discard)
   |> Enum.map(fn [a, b] -> (b.total_ms - a.total_ms) / (b.flushes - a.flushes) end)
-
-s_flush = median.(marginals)
 
 IO.puts("\n  total_ms = base + F * s_flush:")
 
 IO.puts(
-  "    s_flush (PER-SUBMISSION cost) = #{:erlang.float_to_binary(s_flush * 1000, decimals: 1)} us   [median of adjacent marginals]"
+  "    s_flush (PER-SUBMISSION cost) = #{:erlang.float_to_binary(s_flush * 1000, decimals: 1)} us   [Theil-Sen over #{length(pair_slopes)} pairs]"
 )
 
 IO.puts(
