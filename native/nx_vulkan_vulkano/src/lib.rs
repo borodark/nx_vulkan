@@ -1061,16 +1061,77 @@ fn alloc_buffer_zeroed(
 ///
 /// One copy is still required: a BEAM binary must own its memory, and the
 /// device buffer can be recycled the moment the guard drops.
-/// Read several device buffers back in one submission. See
-/// `staging_read_many`. The single-buffer `download_buffer` this replaced had
-/// no callers left once the three chain NIFs were batched; `staging_read`
-/// itself is still live behind the `buf_download` NIF.
-fn download_buffers<'a>(
-    env: Env<'a>,
+/// Record device->staging copies into a command buffer that has NOT been
+/// submitted, so the readback rides the SAME submission as the dispatch that
+/// produced the data.
+///
+/// `staging_read_many` collapsed four fences to one, but that one was still a
+/// SECOND submit-and-fence after the dispatch's own, so a chain NIF paid two
+/// round trips to the queue per call. Measured on super-io by sweeping K and
+/// separating the intercept: 296.8 us fixed against 278.5 us of GPU work at
+/// K=32 — **51.6% of the call was overhead**, and two fence waits are the
+/// largest single item in it.
+///
+/// vulkano's automatic synchronisation inserts the barrier between the
+/// dispatch's writes and these copies, as it already does for the uploads
+/// `record_upload` puts ahead of it.
+///
+/// Empty on unified memory: the device buffers are host-readable there and
+/// nothing needs copying, so the Jetson keeps reading them in place.
+fn record_readback(
     context: &VkContext,
-    bufs: Vec<Subbuffer<[u8]>>,
+    cmd: &mut CmdBuilder,
+    srcs: &[Subbuffer<[u8]>],
+) -> Result<Vec<Subbuffer<[u8]>>, String> {
+    if context.unified_memory {
+        return Ok(Vec::new());
+    }
+
+    let mut stagings = Vec::with_capacity(srcs.len());
+    for src in srcs {
+        let staging = Buffer::new_slice::<u8>(
+            context.mem_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            src.len(),
+        )
+        .map_err(|e| format!("staging alloc (recorded read): {e}"))?;
+
+        cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
+            src.clone(),
+            staging.clone(),
+        ))
+        .map_err(|e| format!("copy device->staging (recorded): {e}"))?;
+
+        stagings.push(staging);
+    }
+    Ok(stagings)
+}
+
+/// Read what `record_readback` staged, once the submission has completed. On
+/// unified memory `stagings` is empty and the device buffers are read directly.
+fn finish_readback<'a>(
+    env: Env<'a>,
+    srcs: &[Subbuffer<[u8]>],
+    stagings: &[Subbuffer<[u8]>],
 ) -> Result<Vec<Binary<'a>>, String> {
-    staging_read_many(env, context, bufs)
+    let from: &[Subbuffer<[u8]>] = if stagings.is_empty() { srcs } else { stagings };
+
+    let mut out = Vec::with_capacity(from.len());
+    for buf in from {
+        let guard = buf.read().map_err(|e| format!("read readback: {e}"))?;
+        let mut bin = NewBinary::new(env, guard.len());
+        bin.as_mut_slice().copy_from_slice(&guard[..]);
+        out.push(bin.into());
+    }
+    Ok(out)
 }
 
 /// Run a K-step leapfrog dispatch against the synthesised SPV.
@@ -1235,6 +1296,11 @@ fn leapfrog_chain_synth<'a>(
             .dispatch([1, 1, 1])
             .map_err(|e| format!("dispatch: {e}"))?;
 
+        // The readback rides THIS command buffer, after the dispatch: one
+        // submit-and-fence for the whole call instead of two.
+        let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
+        let stagings = record_readback(context, &mut cmd, &outs)?;
+
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
         let future = sync::now(context.device.clone())
@@ -1243,12 +1309,7 @@ fn leapfrog_chain_synth<'a>(
 
         finish_and_disarm(context, future)?;
 
-        // One submission for all four, not four. See `staging_read_many`.
-        let mut chains = download_buffers(
-            env,
-            context,
-            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
-        )?;
+        let mut chains = finish_readback(env, &outs, &stagings)?;
         let logp_bin = chains.pop().expect("logp_chain");
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
@@ -1416,6 +1477,11 @@ fn leapfrog_chain_synth_f64<'a>(
             .dispatch([1, 1, 1])
             .map_err(|e| format!("dispatch: {e}"))?;
 
+        // The readback rides THIS command buffer, after the dispatch: one
+        // submit-and-fence for the whole call instead of two.
+        let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
+        let stagings = record_readback(context, &mut cmd, &outs)?;
+
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
         let future = sync::now(context.device.clone())
@@ -1424,12 +1490,7 @@ fn leapfrog_chain_synth_f64<'a>(
 
         finish_and_disarm(context, future)?;
 
-        // One submission for all four, not four. See `staging_read_many`.
-        let mut chains = download_buffers(
-            env,
-            context,
-            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
-        )?;
+        let mut chains = finish_readback(env, &outs, &stagings)?;
         let logp_bin = chains.pop().expect("logp_chain");
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
@@ -1581,6 +1642,11 @@ fn leapfrog_chain_synth_batch<'a>(
             .dispatch([n_instances as u32, 1, 1])
             .map_err(|e| format!("dispatch: {e}"))?;
 
+        // The readback rides THIS command buffer, after the dispatch: one
+        // submit-and-fence for the whole call instead of two.
+        let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
+        let stagings = record_readback(context, &mut cmd, &outs)?;
+
         let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
 
         let future = sync::now(context.device.clone())
@@ -1589,12 +1655,7 @@ fn leapfrog_chain_synth_batch<'a>(
 
         finish_and_disarm(context, future)?;
 
-        // One submission for all four, not four. See `staging_read_many`.
-        let mut chains = download_buffers(
-            env,
-            context,
-            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
-        )?;
+        let mut chains = finish_readback(env, &outs, &stagings)?;
         let logp_bin = chains.pop().expect("logp_chain");
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
