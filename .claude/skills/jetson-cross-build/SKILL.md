@@ -145,8 +145,18 @@ whenever no Elixir source changed since the box's last build — check with:
 
     git diff --name-only <box_HEAD> <target_commit> | grep -E "^(lib|test)/"
 
-If that is empty, `_build` is current and only the NIF differs. This is the
-common case when the commit under test is a Rust-only change.
+**If that is NOT empty, this whole skill buys you nothing for that commit.** The
+box needs a real `mix compile` for the Elixir side, which triggers Rustler,
+which builds the crate natively anyway — so the cross artifact saves no time and
+you should just let the box build. Speed is the only thing this skill offers;
+it applies to **Rust-only commits**, which is the common case for a NIF change
+but not for a mixed one.
+
+Do not be tempted to run `--no-compile` anyway to keep the fast path. Seven
+changed Elixir sources with a stale `_build` will run the OLD tests against the
+OLD lib and report green, which is a worse outcome than a slow build. Verified
+the hard way on 2026-08-31: the guard cost ~25 minutes and prevented exactly
+that.
 
 **Checksum before AND after the run.** That is the only proof the artifact under
 test is the one that executed:
