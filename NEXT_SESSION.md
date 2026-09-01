@@ -366,9 +366,31 @@ forms and `Pow` — so the f32 arms are op-code additions to
 approximation or a documented host path. f64 has no transcendentals at all and
 must boundary-cast, exactly as `pow_f64` does.
 
-**Whichever way each one goes, it should end up either on the GPU or on the
-allowlist with a reason.** Sixteen ops currently sit in neither category, which
-is the state the allowlist exists to prevent.
+**RESOLVED for f32, deliberately NOT for f64.** Twelve arms added to
+`elementwise_unary_f32.comp` at codes 17-28 — sin, cos, tan, asin, acos, atan,
+sinh, cosh, rsqrt, cbrt, expm1, log1p. f32 fallbacks go **17 -> 5**: `erf`,
+`erfc`, `atan2` (both forms), `sort`.
+
+f64 keeps the host path and stays at 17, which is a decision rather than an
+omission. The f64 shader HAS those arms and routing to them works, but:
+
+    Nx.sin(Nx.tensor(1, type: :f64))
+      host  0.8414709848078965      full f64, ~1e-16
+      GPU   0.8414708971977234      f32 boundary cast, ~1e-7
+
+Nx documents the first. Admitting f64 turned **22 of Nx's own doctests red**,
+and excepting them would cost an f64 caller nine digits to save a host round
+trip on ops nothing here calls in a hot loop — while renumbering every later
+doctest and invalidating the 78-entry residency register for ops that never
+moved. `exp/log/sqrt/sigmoid/tanh` keep their f64 boundary cast because that is
+a standing decision with `grad_test` tolerances calibrated around it; new ops do
+not inherit it by default.
+
+Still open, and each needs to reach the GPU or the allowlist: `erf`/`erfc` (not
+in GLSL.std.450 — needs a polynomial that agrees with `:math.erf`, and note the
+f64 shader's old `erf_approx` was deleted as unreachable), `atan2` (GLSL has
+`Atan2`; needs a new binary op code across four shaders), and the twelve f64
+forms above.
 
 ### 2. Pool or free-list the output buffers
 
@@ -617,6 +639,12 @@ Learned expensively, all of them:
 * **A swapped-in `.so` needs `--no-compile` AND a checksum.** Rustler rebuilds
   on the next `mix compile` and would silently replace the artifact under test,
   handing you a green suite that proves nothing about it.
+* **`mix run` and `mix test` use DIFFERENT `_build` trees.** `mix test` compiles
+  into `_build/test`; `mix run` reads `_build/dev`. So `mix run --no-compile`
+  after a green `mix test` runs STALE code, confidently. This produced a census
+  claiming f64 ops were resident when the source said otherwise and the test
+  env agreed with the source — caught only because the two disagreed. Run
+  `mix compile` before any `mix run --no-compile` probe, or drop `--no-compile`.
 
 ### Disclosure for every number in this document
 

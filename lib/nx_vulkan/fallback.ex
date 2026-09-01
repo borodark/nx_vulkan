@@ -247,22 +247,32 @@ defmodule Nx.Vulkan.Fallback do
   # Conditions:
   #   :always              — this callback has no GPU path at all
   #   {:rank_at_least, n}  — permitted only from rank n up; below that it is a bug
+  #   {:dtype, type}       — permitted only at exactly that output dtype. Use
+  #                          this rather than :float_output when a gap is
+  #                          dtype-specific: :float_output would also excuse
+  #                          the dtypes that DO run on the GPU, so a real
+  #                          regression there would pass silently.
   #   :float_output        — permitted only when the OUTPUT is a float type; an
   #                          integer result means the reason does not apply
   @allowlist [
-    # {{:pow, 3}, :float_output, ...} was here until 2026-09-01. FLOAT pow now
-    # runs on the GPU in both forms, so the exemption is deleted rather than
-    # kept — a stale allowlist entry silently permits the regression it was
-    # written to describe.
+    # Was `:float_output` until 2026-09-01, covering f32 and f64 together. f32
+    # broadcasting pow now runs on the GPU — GLSL.std.450 has a native f32
+    # `Pow`, so the old entry excluded it on an f64 limitation and cost
+    # precision nothing — and narrowing to `{:dtype, {:f, 64}}` means an f32
+    # regression here would now RAISE instead of being quietly excused.
     #
-    # Its reason was half right and worth recording: it said the bcast shaders
-    # "omit op code 4 because GLSL.std.450 has no f64 pow". True of f64, which
-    # now boundary-casts through f32 exactly as `pow_f64` already did on the
-    # same-shape path. NOT true of f32, which could have had a native `pow` arm
-    # all along and did not, so f32 callers paid for an f64 limitation.
+    # f64 stays on the host deliberately. MISSION.md §3.2 records the decision:
+    # the only way onto the GPU is boundary-casting through f32, "trading real
+    # precision for a nicer table". `Nx.pow(f64, 0.5)` on 3.0 is
+    # 1.7320508075688772 here and would be 1.7320507764816284 boundary-cast.
     #
     # INTEGER pow remains uncovered and is still admitted by DATA, not type —
     # see `nonneg_exponent?/1` and the note below.
+    {{:pow, 3}, {:dtype, {:f, 64}},
+     "f64 broadcasting/scalar-exponent pow: GLSL.std.450 has no f64 Pow and " <>
+       "boundary-casting through f32 costs ~9 digits. MISSION.md §3.2 declines " <>
+       "that trade. f32 broadcasting pow and equal-shape pow at both dtypes do " <>
+       "run on the GPU."},
     {{:window_scatter_max, 6}, :always,
      "OVERLAPPING pooling backward only. One thread per input element is what " <>
        "avoids float atomics, and that only holds for non-overlapping windows; " <>
@@ -405,6 +415,9 @@ defmodule Nx.Vulkan.Fallback do
   # unimplemented: `enforce/3` short-circuits on an allowlisted op before it
   # logs, so pow reported zero hits under `:raise` AND zero under `:warn`. An
   # op nobody can see is an op nobody will fix.
+  defp condition_met?({:dtype, type}, %Nx.Tensor{type: type}), do: true
+  defp condition_met?({:dtype, _type}, _meta), do: false
+
   defp condition_met?(:float_output, %Nx.Tensor{type: {f, _}}) when f in [:f, :bf], do: true
   defp condition_met?(:float_output, _meta), do: false
 

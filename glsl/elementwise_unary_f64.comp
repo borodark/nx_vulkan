@@ -22,35 +22,7 @@ float64_t tanh_f64(float64_t x) { return float64_t(tanh(float(x))); }
 
 // Abramowitz & Stegun 7.1.26 — max error 1.5e-7
 // (uses f32 transcendentals internally)
-float64_t erf_approx(float64_t x) {
-    float64_t a1 =  0.254829592LF;
-    float64_t a2 = -0.284496736LF;
-    float64_t a3 =  1.421413741LF;
-    float64_t a4 = -1.453152027LF;
-    float64_t a5 =  1.061405429LF;
-    float64_t p  =  0.3275911LF;
-    float64_t s  = sign(x);
-    float64_t ax = abs(x);
-    float64_t t  = 1.0LF / (1.0LF + p * ax);
-    float64_t y  = 1.0LF - (((((a5*t + a4)*t + a3)*t + a2)*t + a1)*t)
-                   * float64_t(exp(float(-ax * ax)));
-    return s * y;
-}
-
 // Taylor series for small |x|, exp(x)-1 otherwise
-float64_t expm1_approx(float64_t x) {
-    if (abs(x) < 0.5LF) {
-        float64_t x2 = x * x;
-        return x
-             + x2 * 0.5LF
-             + x2 * x  * (1.0LF / 6.0LF)
-             + x2 * x2 * (1.0LF / 24.0LF)
-             + x2 * x2 * x * (1.0LF / 120.0LF);
-    } else {
-        return exp_f64(x) - 1.0LF;
-    }
-}
-
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.n) return;
@@ -80,8 +52,33 @@ void main() {
         // from zero: [-2.5, -0.5, 0.5, 2.5] -> [-3, -1, 1, 3]. Spelling it out
         // is the only way to pin it across drivers.
         case 16: y = sign(x) * floor(abs(x) + 0.5); break;   // round
-        case 13: y = erf_approx(x); break;                   // erf
-        case 14: y = expm1_approx(x); break;                 // expm1
+        // 17-28 added 2026-09-01, boundary-cast through f32 exactly as
+        // exp_f64/log_f64/tanh_f64 above — GLSL.std.450 has no f64
+        // transcendentals. Same precision cost as those, deliberately not a
+        // different one.
+        //
+        // Codes 13 and 14 USED TO BE erf and expm1 here, with an erf_approx
+        // polynomial and a Taylor-series expm1. Both were unreachable —
+        // `unary_spv({:f, 64}, code)` admits `code <= 12 or code == 16` — and
+        // both were worse than dead: 13/14/15 mean bitwise_not/
+        // population_count/count_leading_zeros in @unary_ops, so those codes
+        // carried DIFFERENT meanings in this file than in the backend, the
+        // exact trap elementwise_binary_f64.comp documents for its own codes
+        // 7-9. Removed rather than renumbered. expm1 is re-added below at 27
+        // with Nx's formula, because the series was more accurate than
+        // Nx.BinaryBackend and would have disagreed with it near zero.
+        case 17: y = float64_t(sin(float(x))); break;
+        case 18: y = float64_t(cos(float(x))); break;
+        case 19: y = float64_t(tan(float(x))); break;
+        case 20: y = float64_t(asin(float(x))); break;
+        case 21: y = float64_t(acos(float(x))); break;
+        case 22: y = float64_t(atan(float(x))); break;
+        case 23: y = float64_t(sinh(float(x))); break;
+        case 24: y = float64_t(cosh(float(x))); break;
+        case 25: y = float64_t(inversesqrt(float(x))); break;
+        case 26: y = sign(x) * float64_t(pow(float(abs(x)), 1.0 / 3.0)); break;
+        case 27: y = exp_f64(x) - 1.0LF; break;
+        case 28: y = log_f64(x + 1.0LF); break;
         default: y = x; break;
     }
 

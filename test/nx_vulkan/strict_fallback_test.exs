@@ -152,12 +152,16 @@ defmodule Nx.Vulkan.StrictFallbackTest do
                "{:block, arity} exempts every Nx.Block struct at once — the op-family " <>
                  "wildcard this list exists to forbid. Name the struct."
 
-        # Three conditions are legal, and the third exists because a reason has
-        # to apply to the case it excuses. `:float_output` was added when
+        # Four conditions are legal, and the extra ones exist because a reason
+        # has to apply to the case it excuses. `:float_output` was added when
         # `{:pow, 3}` was found excusing INTEGER pow with an argument about
         # GLSL.std.450 lacking an f64 `pow` — true, and irrelevant to s32.
+        # `{:dtype, t}` was added for the same entry a second time: once f32
+        # broadcasting pow moved onto the GPU, `:float_output` would have gone
+        # on excusing an f32 fallback that is now a bug.
         assert condition in [:always, :float_output] or
-                 match?({:rank_at_least, n} when is_integer(n), condition)
+                 match?({:rank_at_least, n} when is_integer(n), condition) or
+                 match?({:dtype, {k, b}} when is_atom(k) and is_integer(b), condition)
 
         assert is_binary(reason) and byte_size(reason) > 40,
                "allowlist entry #{inspect(op)} has no real reason: #{inspect(reason)}"

@@ -510,7 +510,12 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # `ChainShaderSpecsF64` whose per-op form needs it; confirmed independently on
   # Tegra by the exmc session. Integers ride the same data gate as above.
   defp pow_ok_bcast?(_type, code, _b) when code != 4, do: true
-  defp pow_ok_bcast?({:f, _}, 4, _b), do: true
+  # f32 ONLY. GLSL.std.450 has a native f32 `Pow`, so admitting it costs no
+  # precision. f64 would have to boundary-cast through f32, and MISSION.md
+  # §3.2 records declining exactly that — "trading real precision for a nicer
+  # table". That decision stands; only its stated reason was too broad, since
+  # it gave an f64 limitation as the reason f32 was excluded too.
+  defp pow_ok_bcast?({:f, 32}, 4, _b), do: true
   defp pow_ok_bcast?({:s, 32}, 4, b), do: nonneg_exponent?(b)
   defp pow_ok_bcast?({:u, 32}, 4, _b), do: true
   defp pow_ok_bcast?(_type, 4, _b), do: false
@@ -644,10 +649,34 @@ defmodule Nx.Vulkan.VulkanoBackend do
     ceil: 8,
     sign: 10,
     round: 16,
-    # Integer-only, absent from both float shaders. See unary_spv/2.
+    # Integer-only. See unary_spv/2, which admits 13-15 for s32/u32 only.
+    #
+    # These codes were NOT "absent from both float shaders", as this comment
+    # claimed until 2026-09-01: elementwise_unary_f64.comp carried `erf` at 13
+    # and `expm1` at 14. Unreachable, since unary_spv gated floats at
+    # `code <= 12 or code == 16` — but a code meaning two different things in
+    # two files is the trap elementwise_binary_f64.comp documents for its own
+    # 7-9. Those arms are deleted; the float set continues at 17.
     bitwise_not: 13,
     population_count: 14,
-    count_leading_zeros: 15
+    count_leading_zeros: 15,
+
+    # 17-28, added 2026-09-01. Every one of these host-fell-back purely because
+    # no shader arm existed — found by a wide census after `pow` turned out not
+    # to be "the one real gap". GLSL.std.450 has all of them for f32; f64
+    # boundary-casts as exp_f64 does.
+    sin: 17,
+    cos: 18,
+    tan: 19,
+    asin: 20,
+    acos: 21,
+    atan: 22,
+    sinh: 23,
+    cosh: 24,
+    rsqrt: 25,
+    cbrt: 26,
+    expm1: 27,
+    log1p: 28
   ]
 
   @elementwise_unary_f64_spv Path.expand(
@@ -678,10 +707,29 @@ defmodule Nx.Vulkan.VulkanoBackend do
   # gate honest rather than relying on that argument holding forever.
   @s32_unary_codes [3, 4, 7, 8, 9, 10, 12, 13, 14, 15]
 
+  # 17-28 are f32 ONLY, deliberately. The f64 shader HAS those arms — they
+  # boundary-cast through f32 exactly as exp_f64 does — and routing f64 to them
+  # measurably works. It is still the wrong trade:
+  #
+  #   Nx.sin(Nx.tensor(1, type: :f64))
+  #     host  0.8414709848078965      (full f64, ~1e-16)
+  #     GPU   0.8414708971977234      (f32 boundary cast, ~1e-7)
+  #
+  # Nx documents the first, and admitting f64 here turned 22 of Nx's own
+  # doctests red. Excepting them was possible — @rounding already excepts
+  # exp/log/sqrt/tanh for this exact reason — but it costs an f64 caller nine
+  # digits to save a host round trip on ops nothing in this project calls in a
+  # hot loop, and it renumbers every later doctest, invalidating the 78-entry
+  # residency register for ops that never moved.
+  #
+  # exp/log/sqrt/sigmoid/tanh (<= 12) keep their f64 boundary cast: that is a
+  # standing decision with tests calibrated around it (grad_test tolerances sit
+  # at ~1e-6 because of it), not one to re-open here. New ops do not inherit it
+  # by default.
   defp unary_spv({:f, 64}, code) when code <= 12 or code == 16,
     do: @elementwise_unary_f64_spv
 
-  defp unary_spv({:f, 32}, code) when code <= 12 or code == 16,
+  defp unary_spv({:f, 32}, code) when code <= 12 or code == 16 or code in 17..28,
     do: @elementwise_unary_f32_spv
 
   defp unary_spv({:s, 32}, code) when code in @s32_unary_codes,

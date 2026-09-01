@@ -882,24 +882,29 @@ defmodule Nx.Vulkan.FallbackTest do
     test "a scalar exponent stays on the GPU and matches the same-shape path" do
       vals = [3.0, 1.5, 7.0]
 
-      for ty <- [{:f, 32}, {:f, 64}] do
-        t = Nx.tensor(vals, type: ty, backend: Nx.Vulkan.VulkanoBackend)
-        scalar = Nx.tensor(0.5, type: ty, backend: Nx.Vulkan.VulkanoBackend)
-        same = Nx.tensor([0.5, 0.5, 0.5], type: ty, backend: Nx.Vulkan.VulkanoBackend)
+      # f32: both forms resident, and they must agree exactly.
+      t32 = Nx.tensor(vals, type: {:f, 32}, backend: Nx.Vulkan.VulkanoBackend)
+      s32 = Nx.tensor(0.5, type: {:f, 32}, backend: Nx.Vulkan.VulkanoBackend)
+      m32 = Nx.tensor([0.5, 0.5, 0.5], type: {:f, 32}, backend: Nx.Vulkan.VulkanoBackend)
 
-        {bcast, c1} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t, scalar) end)
-        {direct, c2} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t, same) end)
+      {bcast32, c1} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t32, s32) end)
+      {direct32, c2} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t32, m32) end)
 
-        assert Map.values(c1) |> Enum.sum() == 0, "#{inspect(ty)} bcast pow fell back"
-        assert Map.values(c2) |> Enum.sum() == 0, "#{inspect(ty)} same-shape pow fell back"
+      assert Map.values(c1) |> Enum.sum() == 0, "f32 bcast pow fell back"
+      assert Map.values(c2) |> Enum.sum() == 0, "f32 same-shape pow fell back"
+      assert Nx.to_flat_list(bcast32) == Nx.to_flat_list(direct32)
 
-        # The two paths must agree exactly. f64 goes through the same f32
-        # boundary cast on both — GLSL.std.450 has no f64 Pow — so this pins
-        # them together rather than to BinaryBackend, which computes in full
-        # f64 and legitimately differs by ~1.6e-7.
-        assert Nx.to_flat_list(bcast) == Nx.to_flat_list(direct),
-               "#{inspect(ty)} broadcast and same-shape pow disagree"
-      end
+      # f64 broadcasting pow stays on the HOST on purpose — MISSION.md §3.2
+      # declines the f32 boundary cast. Pinned so that "optimising" it onto the
+      # GPU has to come here and change a decision, not just widen a gate.
+      t64 = Nx.tensor(vals, type: {:f, 64}, backend: Nx.Vulkan.VulkanoBackend)
+      s64 = Nx.tensor(0.5, type: {:f, 64}, backend: Nx.Vulkan.VulkanoBackend)
+
+      {bcast64, c3} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t64, s64) end)
+
+      assert Map.values(c3) |> Enum.sum() == 1, "f64 bcast pow should still fall back"
+      assert hd(Nx.to_flat_list(bcast64)) == :math.pow(3.0, 0.5),
+             "f64 pow must keep full precision on the host path"
     end
   end
 
