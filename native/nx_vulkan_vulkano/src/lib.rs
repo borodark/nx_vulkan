@@ -1095,6 +1095,28 @@ fn leapfrog_chain_synth<'a>(
     };
 
     let d = push_block.d as usize;
+
+    // GUARD: `d` is read out of the push block, whose layout is a contract
+    // between the caller and the SHADER — this NIF only borrows a field from it.
+    // The two layouts in this tree disagree, and nothing here exercises the
+    // path, so the disagreement has never surfaced:
+    //
+    //   offset   shipped glsl/leapfrog_chain_*_f64   parse_push_block_f64
+    //        0   n  (the DIMENSION; q_chain[k*pc.n+i])   k_steps
+    //        4   K  (steps)                              n_obs
+    //        8   eps (f64)                               d
+    //       16   family field                            eps (f64)
+    //
+    // Feed the shader's layout and `d` is read from the low word of an f64
+    // `eps` — 1_202_590_843 for eps = 0.01 — which then asks for a multi-
+    // gigabyte allocation and fails with nothing pointing at the real cause.
+    // Bounding `d` by the buffer the caller actually supplied turns that into a
+    // diagnosable error. `<=` rather than `==`: these shaders are single-
+    // workgroup with local_size 256, so padding q_init is legitimate.
+    if d == 0 || d.saturating_mul(4) > q_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
     let chain_bytes = (k as usize) * d * 4;
     let logp_bytes = (k as usize) * 4;
 
@@ -1252,6 +1274,27 @@ fn leapfrog_chain_synth_f64<'a>(
     };
 
     let d = push_block.d as usize;
+
+    // GUARD: `d` is read out of the push block, whose layout is a contract
+    // between the caller and the SHADER — this NIF only borrows a field from it.
+    // The two layouts in this tree disagree, and nothing here exercises the
+    // path, so the disagreement has never surfaced:
+    //
+    //   offset   shipped glsl/leapfrog_chain_*_f64   parse_push_block_f64
+    //        0   n  (the DIMENSION; q_chain[k*pc.n+i])   k_steps
+    //        4   K  (steps)                              n_obs
+    //        8   eps (f64)                               d
+    //       16   family field                            eps (f64)
+    //
+    // Feed the shader's layout and `d` is read from the low word of an f64
+    // `eps` — 1_202_590_843 for eps = 0.01 — which then asks for a multi-
+    // gigabyte allocation and fails with nothing pointing at the real cause.
+    // Bounding `d` by the buffer the caller actually supplied turns that into a
+    // diagnosable error. `<=` rather than `==`: these shaders are single-
+    // workgroup with local_size 256, so padding q_init is legitimate.
+    if d == 0 || d.saturating_mul(8) > q_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
     // f64 = 8 bytes per element (vs 4 for f32)
     let chain_bytes = (k as usize) * d * 8;
     let logp_bytes = (k as usize) * 8;
@@ -1406,6 +1449,11 @@ fn leapfrog_chain_synth_batch<'a>(
     let n_instances = push_block.n_instances as usize;
     if n_instances == 0 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    // Same guard as the single-instance NIFs; see the layout table there.
+    if d == 0 || n_instances.saturating_mul(d).saturating_mul(4) > q_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
     }
     // f32 = 4 bytes; per-instance chain: K * d * 4; total: n_instances * K * d * 4
     let chain_bytes = n_instances * (k as usize) * d * 4;
