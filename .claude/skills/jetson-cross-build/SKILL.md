@@ -79,12 +79,20 @@ Two gotchas that cost a build each:
 
     nerdctl run --rm -v /some/scratch/target-aarch64:/target nxv-jetson-cross:1.85.0 bash -c '
       SO=/target/aarch64-unknown-linux-gnu/release/libnx_vulkan_vulkano.so
-      file "$SO"
+      aarch64-linux-gnu-readelf -h "$SO" | grep -E "Class|Machine|Type"
       aarch64-linux-gnu-readelf -d "$SO" | grep NEEDED
       aarch64-linux-gnu-readelf -V "$SO" | grep -o "GLIBC_[0-9.]*" | sort -uV | tail -3'
 
-Bars: ELF aarch64; max `GLIBC_2.27`; `NEEDED` confined to the five libraries
-above.
+Bars: `ELF64` / `AArch64` / `DYN`; max `GLIBC_2.27`; `NEEDED` confined to the
+five libraries above.
+
+`file` is NOT installed in the image — an earlier version of this snippet used
+it and returned `file: command not found`, which is easy to skim past as noise
+when the lines below it succeed. `readelf -h` is the check that actually runs.
+
+Counting the outline-atomics helpers needs plain `nm`, not `nm -D`: they are
+local symbols, so the dynamic table shows zero and a `-D` count will tell you
+they are absent when there are 22 of them.
 
 ### The LSE atomics question, settled
 
