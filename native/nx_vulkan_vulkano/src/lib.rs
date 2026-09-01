@@ -18,6 +18,7 @@
 //! Vulkan buffers per call (no persistent pool — that comes later
 //! once the calling pattern is established).
 
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1061,6 +1062,100 @@ fn alloc_buffer_zeroed(
 ///
 /// One copy is still required: a BEAM binary must own its memory, and the
 /// device buffer can be recycled the moment the guard drops.
+/// Buffer pool for the chain NIFs' short-lived internal allocations.
+///
+/// A chain dispatch allocates ~11 buffers and drops all of them before it
+/// returns: four outputs, four readback staging buffers, three uploads. Every
+/// one is the same size on every call of a given workload — exmc runs thousands
+/// of dispatches at fixed `d` and `K` — so they are allocated and freed over
+/// and over at identical sizes.
+///
+/// Measured through the NIF boundary at chain sizes (d=13, K=32): seven
+/// `buf_alloc` calls cost 60.3 us, ~8.6 us each. Against a fixed per-dispatch
+/// cost of 225 us after `8cd19ee`, the allocations are a large minority of what
+/// is left. Allocation is also clock-invariant (1.08-1.38x idle-to-boost against
+/// 3.5-4.7x for shader work), so unlike GPU work it does not shrink when the
+/// card boosts.
+///
+/// SAFETY, and it is the whole design. A buffer goes back in the pool only
+/// after `finish_and_disarm` has waited on the fence and `finish_readback` has
+/// copied the bytes into BEAM binaries, so nothing on the GPU or the host still
+/// refers to it. These buffers are function-local and never escape to Elixir —
+/// `buf_alloc`'s ResourceArc-backed buffers are deliberately NOT pooled, because
+/// their lifetime belongs to the BEAM's GC and this pool cannot see it.
+///
+/// Keyed by (role, size). Role matters as much as size: a device-local output
+/// and a host-visible staging buffer of the same length are different memory
+/// and must never be swapped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum PoolRole {
+    /// DEVICE_LOCAL, STORAGE | TRANSFER_SRC — the chain outputs.
+    ChainOut,
+    /// Host-visible, TRANSFER_DST — readback staging.
+    StagingRead,
+}
+
+/// Per (role, size) cap. Sizes are fixed per workload so the pool self-limits,
+/// but a caller sweeping sizes should not be able to retain unboundedly.
+const POOL_MAX_PER_KEY: usize = 8;
+
+static BUF_POOL: OnceLock<Mutex<HashMap<(PoolRole, usize), Vec<Subbuffer<[u8]>>>>> =
+    OnceLock::new();
+
+fn buf_pool() -> &'static Mutex<HashMap<(PoolRole, usize), Vec<Subbuffer<[u8]>>>> {
+    BUF_POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pool_acquire(
+    context: &VkContext,
+    role: PoolRole,
+    size: usize,
+) -> Result<Subbuffer<[u8]>, String> {
+    if let Ok(mut map) = buf_pool().lock() {
+        if let Some(v) = map.get_mut(&(role, size)) {
+            if let Some(buf) = v.pop() {
+                return Ok(buf);
+            }
+        }
+    }
+
+    match role {
+        PoolRole::ChainOut => alloc_buffer(
+            context.mem_allocator.clone(),
+            size,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        ),
+        PoolRole::StagingRead => Buffer::new_slice::<u8>(
+            context.mem_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            size as u64,
+        )
+        .map_err(|e| format!("pool alloc (staging read): {e}")),
+    }
+}
+
+/// Return buffers to the pool. Call ONLY after the fence has been waited on and
+/// the contents have been copied out.
+fn pool_release(role: PoolRole, bufs: Vec<Subbuffer<[u8]>>) {
+    if let Ok(mut map) = buf_pool().lock() {
+        for buf in bufs {
+            let key = (role, buf.len() as usize);
+            let slot = map.entry(key).or_default();
+            if slot.len() < POOL_MAX_PER_KEY {
+                slot.push(buf);
+            }
+        }
+    }
+}
+
 /// Record device->staging copies into a command buffer that has NOT been
 /// submitted, so the readback rides the SAME submission as the dispatch that
 /// produced the data.
@@ -1089,20 +1184,7 @@ fn record_readback(
 
     let mut stagings = Vec::with_capacity(srcs.len());
     for src in srcs {
-        let staging = Buffer::new_slice::<u8>(
-            context.mem_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_DST,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
-                ..Default::default()
-            },
-            src.len(),
-        )
-        .map_err(|e| format!("staging alloc (recorded read): {e}"))?;
+        let staging = pool_acquire(context, PoolRole::StagingRead, src.len() as usize)?;
 
         cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
             src.clone(),
@@ -1239,26 +1321,10 @@ fn leapfrog_chain_synth<'a>(
         let p_buf = p_staged.0.clone();
         let extras_buf = extras_staged.0.clone();
 
-        let q_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let p_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let grad_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let logp_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            logp_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
+        let q_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let p_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let grad_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let logp_chain_buf = pool_acquire(context, PoolRole::ChainOut, logp_bytes)?;
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -1314,6 +1380,13 @@ fn leapfrog_chain_synth<'a>(
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
         let q_bin = chains.pop().expect("q_chain");
+
+        // Recycle. Safe HERE and not earlier: the fence has been waited on and
+        // the bytes are already copied into BEAM binaries, so neither the GPU
+        // nor the host still refers to these buffers.
+        pool_release(PoolRole::ChainOut, outs.to_vec());
+        pool_release(PoolRole::StagingRead, stagings);
+
         Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
@@ -1420,26 +1493,10 @@ fn leapfrog_chain_synth_f64<'a>(
         let p_buf = p_staged.0.clone();
         let extras_buf = extras_staged.0.clone();
 
-        let q_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let p_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let grad_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let logp_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            logp_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
+        let q_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let p_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let grad_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let logp_chain_buf = pool_acquire(context, PoolRole::ChainOut, logp_bytes)?;
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -1495,6 +1552,13 @@ fn leapfrog_chain_synth_f64<'a>(
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
         let q_bin = chains.pop().expect("q_chain");
+
+        // Recycle. Safe HERE and not earlier: the fence has been waited on and
+        // the bytes are already copied into BEAM binaries, so neither the GPU
+        // nor the host still refers to these buffers.
+        pool_release(PoolRole::ChainOut, outs.to_vec());
+        pool_release(PoolRole::StagingRead, stagings);
+
         Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
@@ -1582,26 +1646,10 @@ fn leapfrog_chain_synth_batch<'a>(
         let p_buf = p_staged.0.clone();
         let extras_buf = extras_staged.0.clone();
 
-        let q_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let p_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let grad_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            chain_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
-        let logp_chain_buf = alloc_buffer(
-            context.mem_allocator.clone(),
-            logp_bytes,
-            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-        )?;
+        let q_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let p_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let grad_chain_buf = pool_acquire(context, PoolRole::ChainOut, chain_bytes)?;
+        let logp_chain_buf = pool_acquire(context, PoolRole::ChainOut, logp_bytes)?;
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -1660,6 +1708,13 @@ fn leapfrog_chain_synth_batch<'a>(
         let grad_bin = chains.pop().expect("grad_chain");
         let p_bin = chains.pop().expect("p_chain");
         let q_bin = chains.pop().expect("q_chain");
+
+        // Recycle. Safe HERE and not earlier: the fence has been waited on and
+        // the bytes are already copied into BEAM binaries, so neither the GPU
+        // nor the host still refers to these buffers.
+        pool_release(PoolRole::ChainOut, outs.to_vec());
+        pool_release(PoolRole::StagingRead, stagings);
+
         Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
