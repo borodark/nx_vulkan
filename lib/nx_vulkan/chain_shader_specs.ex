@@ -36,14 +36,11 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
 
   d/dq_uc log p(q_uc) = α (1-q) - β q = α - (α+β) q
   """
-  def beta do
+  def beta(alpha, beta_param, logp_const)
+      when is_number(alpha) and is_number(beta_param) and is_number(logp_const) do
     %FamilySpec{
       name: "beta",
-      push_fields: """
-      float alpha;
-      float beta_param;
-      float logp_const;\
-      """,
+      params: %{"alpha" => alpha, "beta_param" => beta_param, "logp_const" => logp_const},
       grad_block: """
       float q_actual = 1.0 / (1.0 + exp(-qi));
       float grad_q = in_bounds ? pc.alpha - (pc.alpha + pc.beta_param) * q_actual : 0.0;\
@@ -56,26 +53,10 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
       float q_lp = 1.0 / (1.0 + exp(-qi));
       float lp_i = in_bounds ? pc.alpha * log(q_lp) + pc.beta_param * log(1.0 - q_lp) : 0.0;\
       """,
-      logp_final: "partial[0] + float(pc.n) * pc.logp_const"
+      logp_final: "partial[0] + float(pc.d) * pc.logp_const"
     }
   end
 
-  @doc """
-  Push-constant byte layout for Beta. Packed as the C struct:
-      uint  n; uint K; float eps; float alpha; float beta_param; float logp_const;
-  Total: 24 bytes.
-
-  Caller computes `logp_const = lgamma(α+β) - lgamma(α) - lgamma(β)`
-  and passes it explicitly — keeps `lgamma` out of `nx_vulkan`'s
-  dependency surface.
-
-  Returns binary suitable for the shim's push-constants pointer.
-  """
-  def beta_push(n, k, eps, alpha, beta, logp_const)
-      when is_number(alpha) and is_number(beta) and is_number(logp_const) do
-    <<n::little-32, k::little-32, eps::little-float-32, alpha::little-float-32,
-      beta::little-float-32, logp_const::little-float-32>>
-  end
 
   @doc """
   Gamma(α, β) on log-unconstrained space.
@@ -91,14 +72,11 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
   Push fields share Beta's layout (alpha, beta_param, logp_const). The
   logp_const captures the q-independent normalizer α·log β - lgamma(α).
   """
-  def gamma do
+  def gamma(alpha, beta_param, logp_const)
+      when is_number(alpha) and is_number(beta_param) and is_number(logp_const) do
     %FamilySpec{
       name: "gamma",
-      push_fields: """
-      float alpha;
-      float beta_param;
-      float logp_const;\
-      """,
+      params: %{"alpha" => alpha, "beta_param" => beta_param, "logp_const" => logp_const},
       grad_block: """
       float grad_q = in_bounds ? pc.alpha - pc.beta_param * exp(qi) : 0.0;\
       """,
@@ -108,20 +86,8 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
       logp_block: """
       float lp_i = in_bounds ? pc.alpha * qi - pc.beta_param * exp(qi) : 0.0;\
       """,
-      logp_final: "partial[0] + float(pc.n) * pc.logp_const"
+      logp_final: "partial[0] + float(pc.d) * pc.logp_const"
     }
-  end
-
-  @doc """
-  Push for Gamma: same 24-byte layout as Beta.
-
-  Caller computes `logp_const = α·log(β) - lgamma(α)` and passes it
-  explicitly — keeps `lgamma` out of `nx_vulkan`'s dependency surface.
-  """
-  def gamma_push(n, k, eps, alpha, beta, logp_const)
-      when is_number(alpha) and is_number(beta) and is_number(logp_const) do
-    <<n::little-32, k::little-32, eps::little-float-32, alpha::little-float-32,
-      beta::little-float-32, logp_const::little-float-32>>
   end
 
   @doc """
@@ -144,14 +110,16 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
   template handles this family. In production use the hand-written
   Normal shader (binary-identical math, vendored .spv).
   """
-  def lognormal do
+  def lognormal(mu, sigma) when is_number(mu) and is_number(sigma) do
     %FamilySpec{
       name: "lognormal",
-      push_fields: """
-      float mu;
-      float sigma;
-      float logp_const;\
-      """,
+      # logp_const = -0.5*log(2*pi*sigma^2), the per-element constant the old
+      # lognormal_push/5 computed on the host. Baked with the rest.
+      params: %{
+        "mu" => mu,
+        "sigma" => sigma,
+        "logp_const" => -0.5 * :math.log(2.0 * :math.pi() * sigma * sigma)
+      },
       grad_block: """
       float inv_sigma2 = 1.0 / (pc.sigma * pc.sigma);
       float grad_q = in_bounds ? -(qi - pc.mu) * inv_sigma2 : 0.0;\
@@ -165,18 +133,21 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
       float diff_lp = qi - pc.mu;
       float lp_i = in_bounds ? -0.5 * diff_lp * diff_lp * inv_sigma2_lp : 0.0;\
       """,
-      logp_final: "partial[0] + float(pc.n) * pc.logp_const"
+      logp_final: "partial[0] + float(pc.d) * pc.logp_const"
     }
   end
 
   @doc """
-  Push for Lognormal: 24 bytes, layout {n, K, eps, mu, sigma, logp_const}.
-  logp_const = -0.5·log(2π σ²) (per-element constant absorbed at host).
-  """
-  def lognormal_push(n, k, eps, mu, sigma) when is_number(mu) and is_number(sigma) do
-    logp_const = -0.5 * :math.log(2.0 * :math.pi() * sigma * sigma)
+  The NIF's fixed push header: `{k_steps, n_obs, d, _pad, eps}`, 20 bytes.
 
-    <<n::little-32, k::little-32, eps::little-float-32, mu::little-float-32,
-      sigma::little-float-32, logp_const::little-float-32>>
+  Family parameters are NOT here any more — they are baked into the shader
+  source as literals. They never reached the GPU from here: the NIF pushes
+  `sizeof(PushBlock)` = 20 bytes, so every byte past `eps` was dropped. This
+  builder used to emit `{n, K, eps, alpha, beta, logp_const}`, which disagreed
+  with the NIF on the header too (its `n` sat where the NIF reads `k_steps`).
+  """
+  def push(k, n_obs, d, eps) when is_integer(k) and is_integer(n_obs) and is_integer(d) do
+    <<k::little-32, n_obs::little-32, d::little-32, 0::little-32, eps::little-float-32>>
   end
+
 end

@@ -18,7 +18,6 @@ defmodule Nx.Vulkan.ChainSpecsTest do
 
   # The documented C struct, shared by all three families:
   #   uint n; uint K; float eps; float a; float b; float logp_const;
-  @struct_bytes 24
 
   defp unpack(
          <<n::little-32, k::little-32, eps::little-float-32, a::little-float-32,
@@ -27,68 +26,33 @@ defmodule Nx.Vulkan.ChainSpecsTest do
     {n, k, eps, a, b, c}
   end
 
-  describe "beta_push/6" do
-    test "packs the documented 24-byte struct in order" do
-      bin = Specs.beta_push(7, 32, 0.05, 2.0, 5.0, -1.25)
-      assert byte_size(bin) == @struct_bytes
+  describe "push/4" do
+    test "packs the NIF's fixed 20-byte header" do
+      bin = Specs.push(32, 7, 3, 0.05)
+      assert byte_size(bin) == 20
 
-      {n, k, eps, alpha, beta, logp} = unpack(bin)
-      assert n == 7
+      <<k::little-32, n_obs::little-32, d::little-32, pad::little-32,
+        eps::little-float-32>> = bin
+
       assert k == 32
+      assert n_obs == 7
+      assert d == 3
+      assert pad == 0
       assert_in_delta eps, 0.05, 1.0e-7
-      assert_in_delta alpha, 2.0, 1.0e-7
-      assert_in_delta beta, 5.0, 1.0e-7
-      assert_in_delta logp, -1.25, 1.0e-7
     end
 
-    test "the two uints are LITTLE-endian and not swapped with each other" do
-      # n and K are adjacent same-width fields, so a transposition is invisible
-      # to a length check and to any test using n == K.
-      <<n::little-32, k::little-32, _rest::binary>> = Specs.beta_push(1, 256, 0.1, 1.0, 1.0, 0.0)
-      assert n == 1
-      assert k == 256
-    end
-  end
-
-  describe "gamma_push/6" do
-    test "shares Beta's layout, as the moduledoc claims" do
-      bin = Specs.gamma_push(3, 16, 0.01, 9.0, 0.5, 2.5)
-      assert byte_size(bin) == @struct_bytes
-      assert unpack(bin) |> elem(0) == 3
-      assert unpack(bin) |> elem(1) == 16
-
-      # "Push fields share Beta's layout" — so the same arguments must produce
-      # the same bytes. If they ever diverge, this is where it shows.
-      assert Specs.gamma_push(3, 16, 0.01, 9.0, 0.5, 2.5) ==
-               Specs.beta_push(3, 16, 0.01, 9.0, 0.5, 2.5)
-    end
-  end
-
-  describe "lognormal_push/5" do
-    test "computes logp_const rather than taking it, and gets it right" do
-      # The odd one out: beta/gamma take logp_const from the caller, lognormal
-      # derives it as -0.5*log(2*pi*sigma^2).
-      sigma = 2.0
-      bin = Specs.lognormal_push(5, 8, 0.02, 1.5, sigma)
-      assert byte_size(bin) == @struct_bytes
-
-      {n, k, eps, mu, s, logp} = unpack(bin)
-      assert n == 5
-      assert k == 8
-      assert_in_delta eps, 0.02, 1.0e-7
-      assert_in_delta mu, 1.5, 1.0e-7
-      assert_in_delta s, sigma, 1.0e-7
-
-      expected = -0.5 * :math.log(2.0 * :math.pi() * sigma * sigma)
-      assert_in_delta logp, expected, 1.0e-6
+    test "carries no family parameters" do
+      # They are baked into the shader source. The NIF pushes
+      # sizeof(PushBlock) = 20 bytes, so anything appended here would be
+      # dropped before it reached the GPU — which is what the old
+      # beta_push/6, gamma_push/6 and lognormal_push/5 were doing.
+      assert byte_size(Specs.push(1, 1, 1, 0.1)) == 20
     end
 
-    test "logp_const tracks sigma" do
-      # A constant that ignored sigma would pass the single-value test above if
-      # sigma happened to be the one it was written for.
-      f = fn s -> Specs.lognormal_push(1, 1, 0.1, 0.0, s) |> unpack() |> elem(5) end
-      refute f.(1.0) == f.(3.0)
-      assert_in_delta f.(1.0), -0.5 * :math.log(2.0 * :math.pi()), 1.0e-6
+    test "field order matches the NIF, not the old shader convention" do
+      # The old builders put the DIMENSION first, where the NIF reads k_steps.
+      <<first::little-32, _::binary>> = Specs.push(99, 0, 3, 0.1)
+      assert first == 99, "offset 0 is k_steps, not d"
     end
   end
 
@@ -97,7 +61,12 @@ defmodule Nx.Vulkan.ChainSpecsTest do
       alias Nx.Vulkan.ShaderTemplate
 
       rendered =
-        for f <- [:beta, :gamma, :lognormal], do: ShaderTemplate.render(apply(Specs, f, []))
+        for spec <- [
+            Specs.beta(2.0, 5.0, 1.7),
+            Specs.gamma(3.0, 2.0, 0.9),
+            Specs.lognormal(0.0, 1.0)
+          ],
+          do: ShaderTemplate.render(spec)
 
       assert length(Enum.uniq(rendered)) == 3, "two families rendered identical source"
       for src <- rendered, do: assert(String.contains?(src, "#version"))
@@ -117,7 +86,7 @@ defmodule Nx.Vulkan.ChainSpecsTest do
     defp minimal_spec(grad_block_n) do
       %FamilySpec{
         name: "probe",
-        push_fields: "float alpha;",
+        params: %{"alpha" => 1.0},
         grad_block: "float q = exp(q_uc);\n grad_q = pc.alpha - q;",
         grad_block_n: grad_block_n,
         logp_block: "float q = exp(q_uc);",

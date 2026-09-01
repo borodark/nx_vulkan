@@ -53,9 +53,21 @@ defmodule Nx.Vulkan.ShaderTemplate do
     """
     defstruct [
       :name,
-      # GLSL text for additional push-constant fields, one per line, with
-      # leading 4 spaces. e.g. "    float alpha;\\n    float beta;"
-      :push_fields,
+      # Family parameter VALUES, baked into the rendered source as GLSL
+      # literals: %{"alpha" => 2.0, "beta_param" => 5.0}. Every `pc.<key>` in
+      # the blocks below is replaced by its literal.
+      #
+      # These used to be `push_fields`, extra members appended to the push
+      # block. That could never have worked: the NIF pushes a fixed-size parsed
+      # struct (sizeof(PushBlock) = 20 bytes), so anything declared past the
+      # header was silently dropped. Nothing called the chain NIFs from this
+      # repo, so nothing ever tripped it. exmc, the only real caller, bakes its
+      # priors as OpConstants for the same reason — verified in its SPIR-V.
+      #
+      # Baking is free for MCMC: priors are fixed for a run, only q/p vary, and
+      # Synthesis.compile/1 is content-addressed on the GLSL, so a given
+      # parameter set compiles once and hits cache thereafter.
+      :params,
       # GLSL block computing local `float grad_q` from `qi` + `in_bounds`.
       # The block sees: pc.*, qi, in_bounds. Must produce `float grad_q`.
       :grad_block,
@@ -67,7 +79,7 @@ defmodule Nx.Vulkan.ShaderTemplate do
       :logp_block,
       # GLSL expression for `logp_chain[k]` value. Has `partial[0]`,
       # `pc.*` available. e.g. "partial[0]" or
-      # "partial[0] + float(pc.n) * pc.logp_const".
+      # "partial[0] + float(pc.d) * pc.logp_const".
       :logp_final
     ]
   end
@@ -81,11 +93,16 @@ defmodule Nx.Vulkan.ShaderTemplate do
 
   layout (local_size_x = 256) in;
 
+  // Exactly Nx.Vulkan.NativeV's PushBlock: {k_steps, n_obs, d, _pad, eps},
+  // 20 bytes. The NIF pushes sizeof(PushBlock) and nothing more, so a family
+  // field declared here would never be written. Family parameters are BAKED
+  // into this source as literals instead — see ShaderTemplate.render/1.
   layout (push_constant) uniform Push {
-      uint  n;
       uint  K;
+      uint  n_obs;
+      uint  d;
+      uint  _pad;
       float eps;
-  {{push_fields}}
   } pc;
 
   layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
@@ -101,7 +118,7 @@ defmodule Nx.Vulkan.ShaderTemplate do
   void main() {
       uint i   = gl_GlobalInvocationID.x;
       uint tid = gl_LocalInvocationIndex;
-      bool in_bounds = (i < pc.n);
+      bool in_bounds = (i < pc.d);
 
       float qi = in_bounds ? q_init[i] : 0.0;
       float pi = in_bounds ? p_init[i] : 0.0;
@@ -121,9 +138,9 @@ defmodule Nx.Vulkan.ShaderTemplate do
                   pi = p_half + 0.5 * pc.eps * grad_qn;
 
                   if (in_bounds) {
-                      q_chain[k * pc.n + i]    = qi;
-                      p_chain[k * pc.n + i]    = pi;
-                      grad_chain[k * pc.n + i] = grad_qn;
+                      q_chain[k * pc.d + i]    = qi;
+                      p_chain[k * pc.d + i]    = pi;
+                      grad_chain[k * pc.d + i] = grad_qn;
                   }
               }
           }
@@ -158,12 +175,31 @@ defmodule Nx.Vulkan.ShaderTemplate do
 
     @template
     |> String.replace("{{name}}", spec.name)
-    |> String.replace("{{push_fields}}", indent(spec.push_fields, 4))
     |> String.replace("{{grad_block}}", indent(spec.grad_block, 12))
     |> String.replace("{{grad_block_n}}", indent(grad_block_n, 16))
     |> String.replace("{{logp_block}}", indent(spec.logp_block, 8))
     |> String.replace("{{logp_final}}", spec.logp_final)
+    |> bake(spec.params)
   end
+
+  # Replace every `pc.<name>` with its literal value.
+  #
+  # Word-boundary anchored, not a bare String.replace: a parameter named `alpha`
+  # would otherwise also rewrite the `alpha` inside `pc.alpha_scale`. This repo
+  # has already paid for that once — Codegen's unary templates clobbered the `r`
+  # inside `sqrt`/`round` before they were anchored the same way.
+  defp bake(glsl, params) when is_map(params) do
+    Enum.reduce(params, glsl, fn {name, value}, acc ->
+      Regex.replace(~r/\bpc\.#{Regex.escape(to_string(name))}\b/, acc, glsl_literal(value))
+    end)
+  end
+
+  defp bake(glsl, nil), do: glsl
+
+  # GLSL needs a decimal point: `2` is an int literal and will not implicitly
+  # convert in every position `2.0` is valid.
+  defp glsl_literal(v) when is_float(v), do: Float.to_string(v)
+  defp glsl_literal(v) when is_integer(v), do: Float.to_string(v * 1.0)
 
   # Auto-derive the second grad block by renaming locals to *_n. This
   # keeps simple specs DRY; complex families can override with grad_block_n.
