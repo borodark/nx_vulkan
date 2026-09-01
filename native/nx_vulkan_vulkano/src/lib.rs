@@ -774,6 +774,84 @@ fn staging_read<'a>(
     Ok(bin.into())
 }
 
+/// Read SEVERAL DEVICE_LOCAL buffers back in ONE submission.
+///
+/// `staging_read` costs a submit and fence wait per buffer. The three leapfrog
+/// synth NIFs each read back four — q_chain, p_chain, grad_chain, logp_chain —
+/// so a chain dispatch paid four fences on the readback alone.
+///
+/// That cost entered at `6b38aee`, not with any upload change. Before it,
+/// `download_buffer` was `buf.read()` in place and `staging_read` did not exist
+/// in this file; once `alloc_buffer` went DEVICE_LOCAL the buffers stopped being
+/// host-readable and every readback had to become a copy. The exmc session
+/// measured ~1.0 s of chain-path regression across exactly that interval and
+/// initially attributed it to uploads — impossible, since `upload_buffer` at
+/// `6b38aee` still did a plain host write and submitted nothing.
+///
+/// This path is the worst possible caller for a per-readback fence, and by
+/// design: the chain shader returns the whole trajectory, `3*K*d*8` bytes down
+/// against `2*d*8` up. Four fences become one.
+///
+/// Order is preserved: results come back in the order the sources were given.
+fn staging_read_many<'a>(
+    env: Env<'a>,
+    context: &VkContext,
+    srcs: Vec<Subbuffer<[u8]>>,
+) -> Result<Vec<Binary<'a>>, String> {
+    // Unified: every buffer is already host-readable, so there is nothing to
+    // submit and nothing to batch.
+    if context.unified_memory {
+        let mut out = Vec::with_capacity(srcs.len());
+        for src in srcs {
+            let guard = src.read().map_err(|e| format!("read buffer: {e}"))?;
+            let mut bin = NewBinary::new(env, guard.len());
+            bin.as_mut_slice().copy_from_slice(&guard[..]);
+            out.push(bin.into());
+        }
+        return Ok(out);
+    }
+
+    let mut stagings = Vec::with_capacity(srcs.len());
+    let mut cmd = new_cmd_builder(context)?;
+
+    for src in srcs {
+        let staging = Buffer::new_slice::<u8>(
+            context.mem_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            src.len(),
+        )
+        .map_err(|e| format!("staging alloc (read, batched): {e}"))?;
+
+        cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
+            src,
+            staging.clone(),
+        ))
+        .map_err(|e| format!("copy device->staging (batched): {e}"))?;
+
+        stagings.push(staging);
+    }
+
+    // The one fence this function exists to collapse to.
+    submit_and_wait(context, cmd)?;
+
+    let mut out = Vec::with_capacity(stagings.len());
+    for staging in stagings {
+        let guard = staging.read().map_err(|e| format!("read staging: {e}"))?;
+        let mut bin = NewBinary::new(env, guard.len());
+        bin.as_mut_slice().copy_from_slice(&guard[..]);
+        out.push(bin.into());
+    }
+    Ok(out)
+}
+
 /// Write host bytes into a DEVICE_LOCAL buffer via a staging buffer.
 ///
 /// HOST_SEQUENTIAL_WRITE here, not RANDOM_ACCESS: this side only ever writes,
@@ -946,12 +1024,16 @@ fn alloc_buffer_zeroed(
 ///
 /// One copy is still required: a BEAM binary must own its memory, and the
 /// device buffer can be recycled the moment the guard drops.
-fn download_buffer<'a>(
+/// Read several device buffers back in one submission. See
+/// `staging_read_many`. The single-buffer `download_buffer` this replaced had
+/// no callers left once the three chain NIFs were batched; `staging_read`
+/// itself is still live behind the `buf_download` NIF.
+fn download_buffers<'a>(
     env: Env<'a>,
     context: &VkContext,
-    buf: Subbuffer<[u8]>,
-) -> Result<Binary<'a>, String> {
-    staging_read(env, context, buf)
+    bufs: Vec<Subbuffer<[u8]>>,
+) -> Result<Vec<Binary<'a>>, String> {
+    staging_read_many(env, context, bufs)
 }
 
 /// Run a K-step leapfrog dispatch against the synthesised SPV.
@@ -1076,12 +1158,17 @@ fn leapfrog_chain_synth<'a>(
 
         finish_and_disarm(context, future)?;
 
-        Ok((
-            download_buffer(env, context, q_chain_buf)?,
-            download_buffer(env, context, p_chain_buf)?,
-            download_buffer(env, context, grad_chain_buf)?,
-            download_buffer(env, context, logp_chain_buf)?,
-        ))
+        // One submission for all four, not four. See `staging_read_many`.
+        let mut chains = download_buffers(
+            env,
+            context,
+            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
+        )?;
+        let logp_bin = chains.pop().expect("logp_chain");
+        let grad_bin = chains.pop().expect("grad_chain");
+        let p_bin = chains.pop().expect("p_chain");
+        let q_bin = chains.pop().expect("q_chain");
+        Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
     match result {
@@ -1229,12 +1316,17 @@ fn leapfrog_chain_synth_f64<'a>(
 
         finish_and_disarm(context, future)?;
 
-        Ok((
-            download_buffer(env, context, q_chain_buf)?,
-            download_buffer(env, context, p_chain_buf)?,
-            download_buffer(env, context, grad_chain_buf)?,
-            download_buffer(env, context, logp_chain_buf)?,
-        ))
+        // One submission for all four, not four. See `staging_read_many`.
+        let mut chains = download_buffers(
+            env,
+            context,
+            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
+        )?;
+        let logp_bin = chains.pop().expect("logp_chain");
+        let grad_bin = chains.pop().expect("grad_chain");
+        let p_bin = chains.pop().expect("p_chain");
+        let q_bin = chains.pop().expect("q_chain");
+        Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
     match result {
@@ -1382,12 +1474,17 @@ fn leapfrog_chain_synth_batch<'a>(
 
         finish_and_disarm(context, future)?;
 
-        Ok((
-            download_buffer(env, context, q_chain_buf)?,
-            download_buffer(env, context, p_chain_buf)?,
-            download_buffer(env, context, grad_chain_buf)?,
-            download_buffer(env, context, logp_chain_buf)?,
-        ))
+        // One submission for all four, not four. See `staging_read_many`.
+        let mut chains = download_buffers(
+            env,
+            context,
+            vec![q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf],
+        )?;
+        let logp_bin = chains.pop().expect("logp_chain");
+        let grad_bin = chains.pop().expect("grad_chain");
+        let p_bin = chains.pop().expect("p_chain");
+        let q_bin = chains.pop().expect("q_chain");
+        Ok((q_bin, p_bin, grad_bin, logp_bin))
     })();
 
     match result {
@@ -1608,6 +1705,38 @@ fn buf_download<'a>(env: Env<'a>, tensor: ResourceArc<VulkanoTensor>) -> NifResu
     // all — this goes through a staging buffer and a device-side copy.
     match staging_read(env, &context, tensor.buf.clone()) {
         Ok(bin) => Ok((atoms::ok(), bin).encode(env)),
+        Err(_) => Ok((atoms::error(), atoms::download_failed()).encode(env)),
+    }
+}
+
+/// Download SEVERAL device buffers in ONE submission, in the order given.
+///
+/// The Elixir-facing counterpart of `staging_read_many`, and the only way to
+/// exercise it from a test: the batched readback exists for the three chain
+/// synth NIFs, and nothing in this repo can currently drive those — their
+/// `parse_push_block` reads `d` at byte offset 8 while the synthesised shader's
+/// push block has `eps` there. That mismatch is the real content of the "chain
+/// call convention" open item; it is a push-block layout disagreement, not the
+/// f32-vs-f64 one the planning doc records.
+///
+/// Useful in its own right — reading back several tensors costs one fence
+/// rather than one each.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buf_download_many<'a>(
+    env: Env<'a>,
+    tensors: Vec<ResourceArc<VulkanoTensor>>,
+) -> NifResult<Term<'a>> {
+    if let Err(e) = flush_pending() {
+        return Ok((atoms::error(), atoms::dispatch_failed(), e).encode(env));
+    }
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env)),
+    };
+
+    let bufs: Vec<Subbuffer<[u8]>> = tensors.iter().map(|t| t.buf.clone()).collect();
+    match staging_read_many(env, &context, bufs) {
+        Ok(bins) => Ok((atoms::ok(), bins).encode(env)),
         Err(_) => Ok((atoms::error(), atoms::download_failed()).encode(env)),
     }
 }

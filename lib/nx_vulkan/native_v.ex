@@ -73,6 +73,14 @@ defmodule Nx.Vulkan.NativeV do
   @doc "Read a device buffer back to a host binary. Returns `{:ok, binary}`."
   def buf_download(_ref), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Download several device buffers in ONE submission, in the order given.
+
+  `staging_read` costs a submit and fence wait per buffer; this collapses N to
+  one. Returns `{:ok, [binary]}` with results in the order the refs were given.
+  """
+  def buf_download_many(_refs), do: :erlang.nif_error(:nif_not_loaded)
+
   @doc "Buffer size in bytes (returns integer, never crashes on a valid resource)."
   def buf_byte_size(_ref), do: :erlang.nif_error(:nif_not_loaded)
 
