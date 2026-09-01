@@ -513,6 +513,33 @@ fn upload_buffer_staged(
     bytes: &[u8],
     usage: BufferUsage,
 ) -> Result<StagedUpload, String> {
+    // Small-buffer fast path, checked BEFORE allocating anything so it does not
+    // pay for a device-local buffer it would then discard. One allocation and
+    // no copy, which is the allocation count this path had at 6b38aee.
+    // Unified memory takes the branch below instead: there is only one heap, so
+    // the staged form is already free there and the distinction is meaningless.
+    let small = !context.unified_memory
+        && small_upload_max() > 0
+        && bytes.len() <= small_upload_max();
+
+    if small {
+        let buf = Buffer::from_iter(
+            context.mem_allocator.clone(),
+            BufferCreateInfo {
+                usage,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            bytes.iter().copied(),
+        )
+        .map_err(|e| format!("small upload: {e}"))?;
+        return Ok((buf, None));
+    }
+
     let buf = alloc_buffer(
         context.mem_allocator.clone(),
         bytes.len(),
@@ -3568,6 +3595,41 @@ static BATCH_MAX: OnceLock<usize> = OnceLock::new();
 /// recycles them through a reserve, so this is pool churn rather than a hard
 /// limit — but it is hardware-sensitive, which is why the value is tunable
 /// and gets raced across the fleet rather than picked.
+static SMALL_UPLOAD_MAX: OnceLock<usize> = OnceLock::new();
+
+/// Uploads at or below this many bytes skip the staging round trip and are
+/// allocated host-visible directly, as they were before `d7b5f08`.
+/// `NXV_SMALL_UPLOAD_MAX=0` disables the fast path entirely — that is the A/B
+/// control for every measurement of it.
+///
+/// WHY A FAST PATH IS SAFE HERE AND NOT IN `buf_upload`. The BAR1 cliff that
+/// motivated the DEVICE_LOCAL move is cumulative host-visible BYTES against a
+/// fixed window (256 MiB on super-io), so what matters is how much is LIVE at
+/// once, not how big any one buffer is. The callers of `upload_buffer_staged`
+/// are the three chain synth NIFs and `fft`; every buffer they upload is a
+/// function-local `Subbuffer` dropped before the NIF returns. Their exposure is
+/// bounded by concurrent in-flight dispatches, not by workload size, so it
+/// cannot accumulate the way a held tensor does.
+///
+/// `upload_buffer_deferred` — the `buf_upload` NIF, i.e. user tensors of
+/// arbitrary size and lifetime — deliberately does NOT get this path. That is
+/// exactly where the cliff was measured: ten 32 MiB uploads held live filled
+/// the window and dropped throughput 5.5x.
+///
+/// WHY 64 KiB. Below it the device-local destination buys nothing measurable:
+/// the exmc chain path uploads `2*d*8` bytes with d <= 13, about 200 bytes, and
+/// a buffer read once or twice has no residency win to collect, while the
+/// staging round trip costs a second allocation plus a copy command
+/// unconditionally.
+fn small_upload_max() -> usize {
+    *SMALL_UPLOAD_MAX.get_or_init(|| {
+        std::env::var("NXV_SMALL_UPLOAD_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(64 * 1024)
+    })
+}
+
 fn batch_max() -> usize {
     *BATCH_MAX.get_or_init(|| {
         std::env::var("NXV_BATCH_MAX")
