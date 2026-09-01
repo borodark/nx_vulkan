@@ -80,12 +80,23 @@ defmodule Nx.Vulkan.ShaderTemplate do
       # GLSL expression for `logp_chain[k]` value. Has `partial[0]`,
       # `pc.*` available. e.g. "partial[0]" or
       # "partial[0] + float(pc.d) * pc.logp_const".
-      :logp_final
+      :logp_final,
+      # :f32 (default) or :f64. ONE template serves both — the scalar type and
+      # literal suffix are substituted. Keeping a second copy of the skeleton
+      # is what this repo must not do: the multi-RV port diverged from it once
+      # and moved the log-prob body above the position update, giving every
+      # distribution a one-step lag in logp_chain that was blamed on the GPU
+      # for a month. See the moduledoc.
+      :dtype,
+      # Optional GLSL emitted before main() — helper functions a family needs.
+      # Weibull uses this; most families do not.
+      :helpers
     ]
   end
 
   @template ~S"""
   #version 450
+  {{ext}}
 
   // SYNTHESIZED by Nx.Vulkan.ShaderTemplate for family: {{name}}
   // Generated from a templated leapfrog-chain skeleton. Do not edit;
@@ -102,40 +113,42 @@ defmodule Nx.Vulkan.ShaderTemplate do
       uint  n_obs;
       uint  d;
       uint  _pad;
-      float eps;
+      {{T}} eps;
   } pc;
 
-  layout (std430, binding = 0) readonly  buffer In_q     { float q_init[]; };
-  layout (std430, binding = 1) readonly  buffer In_p     { float p_init[]; };
-  layout (std430, binding = 2) readonly  buffer In_mass  { float inv_mass[]; };
-  layout (std430, binding = 3) writeonly buffer Out_q    { float q_chain[]; };
-  layout (std430, binding = 4) writeonly buffer Out_p    { float p_chain[]; };
-  layout (std430, binding = 5) writeonly buffer Out_grad { float grad_chain[]; };
-  layout (std430, binding = 6) writeonly buffer Out_logp { float logp_chain[]; };
+  layout (std430, binding = 0) readonly  buffer In_q     { {{T}} q_init[]; };
+  layout (std430, binding = 1) readonly  buffer In_p     { {{T}} p_init[]; };
+  layout (std430, binding = 2) readonly  buffer In_mass  { {{T}} inv_mass[]; };
+  layout (std430, binding = 3) writeonly buffer Out_q    { {{T}} q_chain[]; };
+  layout (std430, binding = 4) writeonly buffer Out_p    { {{T}} p_chain[]; };
+  layout (std430, binding = 5) writeonly buffer Out_grad { {{T}} grad_chain[]; };
+  layout (std430, binding = 6) writeonly buffer Out_logp { {{T}} logp_chain[]; };
 
-  shared float partial[256];
+  shared {{T}} partial[256];
+
+  {{helpers}}
 
   void main() {
       uint i   = gl_GlobalInvocationID.x;
       uint tid = gl_LocalInvocationIndex;
       bool in_bounds = (i < pc.d);
 
-      float qi = in_bounds ? q_init[i] : 0.0;
-      float pi = in_bounds ? p_init[i] : 0.0;
-      float mi = in_bounds ? inv_mass[i] : 0.0;
+      {{T}} qi = in_bounds ? q_init[i] : 0.0{{S}};
+      {{T}} pi = in_bounds ? p_init[i] : 0.0{{S}};
+      {{T}} mi = in_bounds ? inv_mass[i] : 0.0{{S}};
 
       for (uint k = 0; k < pc.K; k++) {
           // Half-step momentum at q
           {
   {{grad_block}}
-              float p_half = pi + 0.5 * pc.eps * grad_q;
+              {{T}} p_half = pi + 0.5{{S}} * pc.eps * grad_q;
 
               // Full-step position
               qi = qi + pc.eps * mi * p_half;
 
               {
   {{grad_block_n}}
-                  pi = p_half + 0.5 * pc.eps * grad_qn;
+                  pi = p_half + 0.5{{S}} * pc.eps * grad_qn;
 
                   if (in_bounds) {
                       q_chain[k * pc.d + i]    = qi;
@@ -173,7 +186,19 @@ defmodule Nx.Vulkan.ShaderTemplate do
   def render(%FamilySpec{} = spec) do
     grad_block_n = spec.grad_block_n || derive_grad_n(spec.grad_block)
 
+    dtype = spec.dtype || :f32
+
+    {scalar, suffix, ext} =
+      case dtype do
+        :f32 -> {"float", "", ""}
+        :f64 -> {"double", "LF", "#extension GL_ARB_gpu_shader_fp64 : require"}
+      end
+
     @template
+    |> String.replace("{{T}}", scalar)
+    |> String.replace("{{S}}", suffix)
+    |> String.replace("{{ext}}", ext)
+    |> String.replace("{{helpers}}", spec.helpers || "")
     |> String.replace("{{name}}", spec.name)
     |> String.replace("{{grad_block}}", indent(spec.grad_block, 12))
     |> String.replace("{{grad_block_n}}", indent(grad_block_n, 16))
