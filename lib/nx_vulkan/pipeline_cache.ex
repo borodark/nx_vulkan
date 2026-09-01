@@ -6,7 +6,10 @@ defmodule Nx.Vulkan.PipelineCache do
   for API compatibility with callers that haven't been updated.
   """
 
-  @cache_dir Path.expand("~/.exmc/gpu_node/pipeline_cache")
+  # Under ~/.nx_vulkan for the same reason as Nx.Vulkan.Synthesis's cache — a
+  # library should not put a `File.rm_rf` target inside its consumer's
+  # directory. `clear/0` below is that rm_rf.
+  @cache_dir Path.expand("~/.nx_vulkan/pipeline_cache")
 
   def load, do: :ok
   def persist, do: :ok

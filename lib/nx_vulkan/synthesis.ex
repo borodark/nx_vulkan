@@ -8,7 +8,7 @@ defmodule Nx.Vulkan.Synthesis do
 
   ## Cache layout
 
-      ~/.exmc/gpu_node/spv/{spec_hash}.spv
+      ~/.nx_vulkan/spv/{spec_hash}.spv
 
   where `spec_hash = :crypto.hash(:sha256, glsl_source) |> Base.encode16(case: :lower)`.
 
@@ -38,7 +38,28 @@ defmodule Nx.Vulkan.Synthesis do
 
   alias Nx.Vulkan.ShaderTemplate
 
-  @cache_dir Path.expand("~/.exmc/gpu_node/spv")
+  # Under ~/.nx_vulkan, NOT ~/.exmc/gpu_node/spv, since 2026-09-01.
+  #
+  # This library and its downstream consumer eXMC both synthesise shaders and
+  # both used that one directory — `Exmc.NUTS.CustomSynth.Compile` still does,
+  # and its own comment said "same cache directory as Nx.Vulkan.Synthesis". So
+  # `clear_cache/0` below, which is `File.rm_rf`, deleted THEIR cache too.
+  #
+  # It is not hypothetical and it is not symmetric in who notices.
+  # `synthesis_test.exs` calls `clear_cache/0` in both `setup` and `on_exit`, so
+  # every `mix test` in this repo wiped the directory — twice within half an
+  # hour during one exmc suite run on super-io, which failed with
+  #
+  #     {:error, :dispatch_failed, "read spv: No such file or directory"}
+  #
+  # three frames deep in an unrelated test, with nothing in the message
+  # suggesting another process had deleted the file. It passes in isolation
+  # every time, so only a concurrent run can see it — which is exactly when
+  # nobody is looking for it.
+  #
+  # Sharing bought nothing: the hashes are over different source text, so there
+  # were never cross-project cache hits to lose.
+  @cache_dir Path.expand("~/.nx_vulkan/spv")
 
   @doc """
   Compile a `%FamilySpec{}` to SPIR-V on disk.
