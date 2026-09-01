@@ -1,8 +1,11 @@
 # Next session — state, open items, and one live bug
 
-**HEAD `6b38aee`**, pushed to `origin` (private). Nothing pushed to `upstream`.
-Working tree clean apart from this file. Rewritten 2026-08-31, after a session
-that ran on super-io.
+**HEAD `ab2e779`**, pushed to `origin` (private). Nothing pushed to `upstream`.
+Rewritten 2026-08-31, after a session on super-io plus a Jetson verification.
+
+Two commits landed: `d7b5f08` (the `buf_upload` heap fix, and the DVFS
+correction below) and `ab2e779` (folding the staging copies into the caller's
+command buffer, which repairs a regression `d7b5f08` introduced).
 
 ---
 
@@ -89,7 +92,40 @@ BAR1 no longer moves at all — 37 MiB is the desktop's own baseline — and the
 cliff is gone. `mix test`: **833 doctests, 871 tests, 0 failures**, matching the
 recorded baseline exactly.
 
-### What it cost
+### `d7b5f08` introduced a regression, and `ab2e779` fixes it
+
+Staging cost a submit and fence wait per upload, which was the wrong trade for
+the four callers that build and submit their own command buffer. `Nx.fft` makes
+exactly one `upload_buffer` call per invocation, so it is a clean handle:
+
+    n       twiddle   6b38aee (pre)   d7b5f08 (post)   delta
+    1024      8 KiB   0.527 / 0.469   0.713 / 0.829    +0.27 ms
+    4096     32 KiB   0.741 / 0.666   0.851 / 0.874    +0.16 ms
+   16384    128 KiB   1.380 / 1.363   1.537 / 1.536    +0.17 ms
+
+The table grows 16x and the delta does not move — submission cost, not staging
+bandwidth. `leapfrog_chain_synth_f64` makes THREE such calls per chain dispatch,
+and exmc runs one dispatch per chain per draw: ~6000 fence waits on a 4-chain
+500-draw run, for copies already ordered ahead of a dispatch the NIF submits
+itself.
+
+`ab2e779`: `upload_buffer_staged` prepares the staging buffer without
+submitting, `record_upload` folds the copy into the caller's own command buffer,
+vulkano's automatic sync inserts the barrier. A fence becomes a barrier. The
+blocking `upload_buffer` had no callers left and is deleted.
+
+Verified with three arms, three rounds, arm order rotated so no arm always eats
+the cold start; 30 fft calls per timed sample. Per-call ms:
+
+    n       pre                   broken                fixed
+    1024    0.424 0.407 0.437     0.616 0.559 0.468     0.438 0.398 0.402
+    4096    0.631 0.485 0.610     0.747 0.684 0.638     0.547 0.543 0.565
+
+Two conditions, both required: broken must separate from pre (else the harness
+cannot see the effect and proves nothing), and fixed must sit with pre. At
+n=1024 broken and pre do not overlap; fixed lies inside pre at both sizes.
+
+### What the heap fix cost
 
 A/B at boost clock, per-call ms, before against after:
 
@@ -245,14 +281,25 @@ keyed on size is the obvious move and has not been tried.
 
 ## Open items, in priority order
 
-### 1. Verify the `buf_upload` fix across the fleet
+### 1. Verify across the Keplers — the Jetson is DONE
 
-Done and verified on super-io only. **The Jetson is the one that matters**: it
-takes the `unified` branch, where both `staging_write` and
-`enqueue_staging_write` write in place and queue nothing, so it should be a
-no-op there — but that is reasoning, not measurement, and this project has been
-wrong about the Jetson's memory behaviour before. The Keplers need a plain
-re-verify. Not committed yet.
+**Jetson: verified.** 833 doctests / 871 tests / 0 failures at `d7b5f08` on a
+cross-compiled NIF, on the `unified memory: true (staging path: OFF)` branch.
+The no-op claim is now measured rather than reasoned. `ab2e779` has NOT been
+run there yet, though its unified path is the same no-op by construction.
+
+**mac-247 and mac-248: untouched.** No clean A/B for either commit. The exmc
+session observed exmc suite time rising 8.8% on 247 (883 -> 960s) and 10.4% on
+248 (521 -> 576s) across `2617e5e -> 6b38aee` while super-io stayed flat, with a
+narrower chain-dispatch probe on 247 moving 3.0 -> 4.0/4.1/4.1s. Their
+before-reading is n=1 and these are suite times, so it is a direction, not a
+magnitude. Re-measure on `ab2e779`, never on `d7b5f08` — that commit alone
+slows the chain path.
+
+**Amplify any Kepler measurement.** FreeBSD reports `[N/A]` for `clocks.sm` on
+those cards, so the DVFS confound that swung a super-io number 2.6x cannot even
+be observed there. Use many dispatches per timed sample; a per-call effect of
+~0.16 ms will not survive single-call timing. Not committed yet.
 
 Worth adding at the same time: a probe that asserts which heap a buffer landed
 in, since nothing in the suite can currently see this class of bug. The BAR1
@@ -289,10 +336,45 @@ established on one box before four boxes run it. The design is still worth
 keeping: the chain shader returns the whole trajectory — `3*K*d*8` bytes down
 against `2*d*8` up.
 
-### 6. The Race 1c clock trace, staged and unrun
+### 6. Race 1c voids on the Jetson even on a QUIET box
 
-`scripts/staged/jetson_run_trace.sh`. Decides whether Race 1c is structurally
-unable to measure submission on an integrated part.
+Re-raced there at `d7b5f08` in a window with load 0.40-0.73 across 14 samples
+taken every 10s during the run, thermal control compute drift 0.0% and
+allocation drift 0.7%. It still voided: **estimator divergence 30.7% against a
+30% gate.** A contended run earlier the same evening read 177.8% divergence and
+32.7% allocation drift, so contention inflates it ~5.8x — but clean, it sits a
+few points over the threshold.
+
+That is a statement about the instrument, not about any commit: the gate and the
+method are within a few points of each other on integrated hardware. It is the
+evidence `scripts/staged/jetson_run_trace.sh` was staged to gather, and it now
+argues the trace is worth running rather than merely staged.
+
+**Harness gap found doing this:** a VOID run still writes
+`bench_results/unified_vs_discrete_<host>.json`, and the file carries no void
+marker — the verdict goes to stdout only. `load_after` is recorded but nothing
+says the run was rejected, so a later reader takes it as a result. The harness
+should refuse to write on a void, or stamp the file. I backed up the baseline
+before racing and restored it; the next person will not necessarily think to.
+
+### 7. The Jetson can now be built for in ~2 minutes, not ~47
+
+`.claude/skills/jetson-cross-build/` (untracked as of this writing) cross-builds
+the aarch64 NIF in a container on super-io: **1m55s against ~47 min native** on
+that 2-core board. Validated end to end at `d7b5f08` — deployed, loaded
+(`NVIDIA Tegra X1 (nvgpu) (IntegratedGpu)`), and passed the full suite.
+
+Deploy rules, all of them load-bearing:
+* `priv` is a symlink in both `_build/dev` and `_build/test`, so overwriting
+  `priv/native/libnx_vulkan_vulkano.so` covers every environment.
+* Run with `--no-compile` or Rustler rebuilds and silently replaces it.
+* Checksum before AND after; that is the only proof the artifact under test is
+  what ran.
+* The real ABI bar is **GLIBC** (max symbol 2.25 against the box's 2.27), not
+  LSE atomics. The artifact contains 12 LSE instructions in
+  `compiler_builtins`' outline-atomics helpers behind a HWCAP guard that reads 0
+  on that board — and the Jetson's own native build has MORE of them (20) while
+  passing today. No stable-Rust build can avoid them.
 
 ### 7. super-io's poison flip rate is still unmeasured
 
@@ -349,6 +431,23 @@ Learned expensively, all of them:
   a second run.
 * **Build large test tensors with `from_binary`, not `Nx.iota`.** Host-side
   tensor construction is GPU idle time and will silently unboost your card.
+* **Amplify an effect until it clears the noise floor, then verify BOTH
+  directions.** A ~0.16 ms per-call cost measured one call at a time sat inside
+  34% process-to-process variance on the SAME binary. Putting 30 calls in each
+  timed sample fixed it. And when verifying a fix, the broken arm must still
+  separate — "fixed looks like pre" proves nothing if the harness cannot
+  resolve broken from pre either.
+* **Rotate arm order in an A/B.** Whichever arm runs first after a binary swap
+  eats the cold start; a fixed order silently charges it to one arm.
+* **`pgrep -f "foo"` matches the shell running it.** A wait loop built that way
+  never fires. Key on a pid via `/proc`, or use `pgrep -x`. Documented in
+  `scripts/staged/jetson_run_trace.README` and walked into anyway.
+* **`mix test` reads stdin.** Inside `ssh 'bash -s'` with a heredoc it swallows
+  the rest of the script, so trailing verification lines never run. Redirect
+  with `< /dev/null`.
+* **A swapped-in `.so` needs `--no-compile` AND a checksum.** Rustler rebuilds
+  on the next `mix compile` and would silently replace the artifact under test,
+  handing you a green suite that proves nothing about it.
 
 ### Disclosure for every number in this document
 
