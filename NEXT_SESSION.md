@@ -306,6 +306,35 @@ in, since nothing in the suite can currently see this class of bug. The BAR1
 column in `scripts/staged/bar1_cliff.exs` is the whole of the current
 instrumentation.
 
+### 1b. The upload/readback work is measured — on mac-248, not here
+
+All three changes were measured by the exmc session driving the f64 chain NIF
+directly on **mac-248 (GT 750M, headless)**, N=3000/sample, 6000-dispatch
+warmup, 6 replicates. Per-dispatch cost:
+
+    nx_vulkan ab2e779   365 us
+    nx_vulkan 096d7bd   238 us   fast path OFF
+                        224 us   fast path ON
+
+Decomposing:
+
+    365 -> 238   four download fences becoming one (8cce91c)   -127 us   -35%
+    238 -> 224   small-upload fast path (b59c4a7)               -14 us    -6%
+    365 -> 224   both                                          -141 us   -39%
+
+The readback batching is nine times the fast path, which is what the byte
+asymmetry predicts: `3*K*d*8` down against `2*d*8` up.
+
+Caveat kept deliberately: the 365 arm came from a separate build rather than an
+interleaved one, so the 35% carries a build boundary. The ON/OFF pairs are the
+rigorous half — same binary, runtime knob, order balanced, non-overlapping
+(highest ON 226.7 us, lowest OFF 237.1 us).
+
+**Neither number could have been produced here.** super-io's ~900 us noise band
+is wider than both effects, and nothing in this repo could drive the chain path
+until `15abc96`. That is now fixed, so the next such measurement can be taken
+locally — on a headless box.
+
 ### 2. Pool or free-list the output buffers
 
 Allocation is ~0.59 ms at 64 MiB, clock-invariant, and paid per op. Above the
@@ -570,8 +599,9 @@ number in this document accordingly:
   comparable width, not a measurement.** It separated because the effect was
   ~0.135 ms and consistent, but do not size anything from its magnitude. It was
   used to predict a chain-path cost and the prediction was out by 3x.
-* The small-buffer fast path is not established either way and needs re-running
-  on a headless box.
+* The small-buffer fast path was re-run on a headless box and IS established:
+  **~14.5 us/dispatch, 6.1%**, non-overlapping across order-balanced replicates
+  (see below).
 
 ---
 

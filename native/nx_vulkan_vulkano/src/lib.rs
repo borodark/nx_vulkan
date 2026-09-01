@@ -1085,6 +1085,32 @@ fn leapfrog_chain_synth<'a>(
     if k == 0 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
+    // 128 is Vulkan's guaranteed floor for `maxPushConstantsSize` — the
+    // smallest value any conformant implementation may report — so a push block
+    // larger than this is not portable even in principle.
+    //
+    // But note what this is actually checking. This NIF forwards
+    // `sizeof(PushBlock)` and nothing else (see the `push_constants` call
+    // below), so bytes past that header NEVER REACH THE GPU. The bound is
+    // therefore not protecting the device; it is refusing input whose tail this
+    // NIF would silently drop. That is the point: a caller who packs family
+    // parameters into a tail expecting them to be forwarded gets an error
+    // instead of a shader reading uninitialised push memory.
+    //
+    // It is load-bearing in a way that is not obvious. The exmc session packed
+    // a header plus a prior tail, baked those same priors into its SPIR-V as
+    // literals, and so had a tail that was inert everywhere except here — where
+    // it was the sole cause of a width limit. Packing header-only took an 8-RV
+    // model from 0 chain dispatches / 160.9 s to 2564 dispatches / 12.3 s, a
+    // 13.1x change with the posterior unchanged and correct against the
+    // closed-form conjugate. The real width bound on that path is the shader's
+    // `local_size_x = 256`, i.e. d <= 256, not the 13 or so this implies.
+    //
+    // Keep the bound. Removing it would trade a loud refusal for a silent drop,
+    // which is the worse failure. But it means "your tail will be ignored", not
+    // "your model is too wide", and callers read it as the latter.
+    // Same 128-byte push bound as leapfrog_chain_synth; see the note there for
+    // what it actually protects and why it is not a width limit.
     if push.len() == 0 || push.len() > 128 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
@@ -1264,6 +1290,8 @@ fn leapfrog_chain_synth_f64<'a>(
     if k == 0 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
+    // Same 128-byte push bound as leapfrog_chain_synth; see the note there for
+    // what it actually protects and why it is not a width limit.
     if push.len() == 0 || push.len() > 128 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
@@ -1436,6 +1464,8 @@ fn leapfrog_chain_synth_batch<'a>(
     if k == 0 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
+    // Same 128-byte push bound as leapfrog_chain_synth; see the note there for
+    // what it actually protects and why it is not a width limit.
     if push.len() == 0 || push.len() > 128 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
@@ -3669,6 +3699,28 @@ static SMALL_UPLOAD_MAX: OnceLock<usize> = OnceLock::new();
 /// a buffer read once or twice has no residency win to collect, while the
 /// staging round trip costs a second allocation plus a copy command
 /// unconditionally.
+///
+/// MEASURED, on mac-248 (GT 750M, headless), by the exmc session driving the
+/// f64 chain NIF directly. Same binary throughout, toggled by the env knob,
+/// arm order balanced ON/OFF/ON/OFF, N=3000/sample, 6000-dispatch warmup,
+/// 6 replicates per arm:
+///
+///     fast path ON    224.7 us/dispatch   (224.0 .. 226.7, 1.2%)
+///     fast path OFF   238.6 us/dispatch   (237.8 .. 241.1, 1.4%)
+///     fast path ON    223.2 us/dispatch   (222.5 .. 224.2, 0.8%)
+///     fast path OFF   237.9 us/dispatch   (237.1 .. 240.0, 1.2%)
+///
+/// Completely non-overlapping — highest ON is 226.7, lowest OFF is 237.1 — and
+/// both ON runs agree within 1.5 us, both OFF within 0.7 us, so there is no
+/// order effect and no drift. **~14.5 us/dispatch, 6.1%.**
+///
+/// This was committed as "mechanically sound, NOT measurably established"
+/// because super-io could not resolve it: that box is a desktop compositing
+/// Firefox and Cinnamon on the same GPU, giving a ~900 us noise band, and its
+/// null arm (a size above the threshold, where this code cannot act) reproduced
+/// 4.6% of a 7.2% "effect". The effect size was roughly right and the
+/// instrument could not show it. Pick a headless host; see the host-selection
+/// note in NEXT_SESSION.md.
 fn small_upload_max() -> usize {
     *SMALL_UPLOAD_MAX.get_or_init(|| {
         std::env::var("NXV_SMALL_UPLOAD_MAX")
