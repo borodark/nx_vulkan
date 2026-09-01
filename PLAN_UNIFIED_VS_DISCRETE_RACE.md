@@ -261,9 +261,17 @@ show up.
    the memory story is dead.
 
 **Design:** sweep `K ∈ {1, 4, 16, 64, 256}` × `d ∈ {16, 128, 1024}` against a
-fixed total step budget `N = 4096`, one of the shipped f64 chain shaders
-(`leapfrog_chain_normal_f64` — the hand-written one, not a synthesised spec, to
-keep glslang out of the timer). Report per box: total wall time, and time
+fixed total step budget `N = 4096`, against
+`Nx.Vulkan.ChainShaderSpecsF64.normal/2`.
+
+This used to say "`leapfrog_chain_normal_f64` — the hand-written one, not a
+synthesised spec, to keep glslang out of the timer". Those six hand-written
+shaders were **deleted in 2026-09-01**: they were undriveable by this repo's own
+NIFs (32-byte push blocks with family params inline against a NIF that pushes a
+fixed 24-byte header) and were shipped in that state for months. The concern
+behind the wording still stands and is still satisfiable —
+`Synthesis.compile/1` is content-addressed, so compile the spec ONCE before the
+timer starts and glslang never enters it. Report per box: total wall time, and time
 normalised to that box's own `K = 1` point.
 
 **Cost:** ~45 min per box. Run only after Race 1, and only on the two required

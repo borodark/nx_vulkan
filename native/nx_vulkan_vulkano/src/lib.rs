@@ -669,13 +669,23 @@ fn record_upload(cmd: &mut CmdBuilder, staged: &StagedUpload) -> Result<(), Stri
 /// **ONE KNOWN EXCEPTION, and the original wording of this note claimed there
 /// were none.** The leapfrog chain NIFs allocate `K * d * 4` bytes and dispatch
 /// `[1, 1, 1]` with `local_size_x = 256`, so only 256 invocations exist however
-/// large `d` is. `leapfrog_chain_normal_f64.comp` states the precondition as a
-/// comment — "Single workgroup; n <= 256" — and nothing enforces it. For
-/// `d > 256` the tail was previously zeros and is now undefined, and these
-/// buffers are handed back WHOLE by `download_buffer` with no logical-size
-/// slice.
+/// large `d` is. `Nx.Vulkan.ShaderTemplate` emits `local_size_x = 256` and a
+/// `shared` array of that width, and nothing enforces the matching bound on
+/// `d`. For `d > 256` the tail was previously zeros and is now undefined, and
+/// these buffers are handed back WHOLE by `download_buffer` with no
+/// logical-size slice. (The six hand-written `leapfrog_chain_*_f64.comp`
+/// shaders that used to state this as a comment were deleted on 2026-09-01;
+/// see `Nx.Vulkan.ChainShaderSpecsF64`.)
 ///
-/// Low severity: `d` is bounded near 13 in practice by the push-block budget,
+/// Severity was recorded as low because "`d` is bounded near 13 in practice by
+/// the push-block budget". **That reasoning is retired.** The 128-byte budget
+/// only ever bounded callers who packed family parameters into the push tail —
+/// bytes this NIF drops anyway — and the templated path bakes them as literals
+/// instead, so nothing constrains `d` below the workgroup width now. The exmc
+/// session hit exactly this: packing header-only took an 8-RV model from 0
+/// dispatches to 2564. The real bound is 256, and it is still unenforced.
+///
+/// Historical note on the old reasoning: `d` was bounded near 13,
 /// and the `logp` reduction was already wrong past 256 — so `d > 256` is
 /// already broken for a different reason. Recorded because "nothing is in the
 /// second class" was an absolute claim and it does not survive this. Analytic,

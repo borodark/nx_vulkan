@@ -374,11 +374,15 @@ constants, everything else in buffers.**
 * **exmc obeys it.** Its synthesised shaders declare exactly that 24-byte block
   and carry priors in the `extras` buffer. It has always been self-consistent,
   and it dispatches its OWN shaders — never `glsl/leapfrog_chain_*_f64.spv`.
-* **nx_vulkan's own shaders do not.** `glsl/leapfrog_chain_normal_f64.comp`
-  declares `{uint n; uint K; double eps; double mu; double sigma}` = 32 bytes
-  with family parameters INLINE. `mu` and `sigma` are never forwarded, and the
-  header disagrees besides — the shader's `n` is the DIMENSION at offset 0,
-  where the NIF writes `k_steps`.
+* **nx_vulkan's own shaders did not.** `glsl/leapfrog_chain_normal_f64.comp`
+  declared `{uint n; uint K; double eps; double mu; double sigma}` = 32 bytes
+  with family parameters INLINE. `mu` and `sigma` were never forwarded, and the
+  header disagreed besides — the shader's `n` was the DIMENSION at offset 0,
+  where the NIF writes `k_steps`. **RESOLVED**: all six ported onto the
+  templated path as `Nx.Vulkan.ChainShaderSpecsF64` and verified bit-exact
+  against a host leapfrog; the hand-written `.comp` and their shipped `.spv`
+  were deleted on 2026-09-01 rather than repaired, because a baked shader is
+  parameter-specific and there is no static artifact to replace them with.
 * **`ShaderTemplate` and `ChainShaderSpecs` have the same shape**:
   `{uint n; uint K; float eps; <family fields>}`, family params inline,
   `beta_push/6` packing to match.
