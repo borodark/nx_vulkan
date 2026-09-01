@@ -873,4 +873,34 @@ defmodule Nx.Vulkan.FallbackTest do
     x = tf32([[1.0, 5.0, 2.0], [9.0, 3.0, 4.0]], backend)
     Nx.equal(x, Nx.reduce_max(x, axes: [1], keep_axes: true))
   end
+  describe "pow through the broadcast path" do
+    # `Nx.pow(t, 2.0)` is the ordinary way to write a square, and a scalar
+    # exponent takes the BROADCAST path. That path had no `pow` arm, so float
+    # pow left the GPU for anyone who wrote it naturally, while
+    # `Nx.pow(t, tensor_of_twos)` stayed resident. Found by censusing a per-op
+    # Weibull leapfrog; confirmed independently on Tegra.
+    test "a scalar exponent stays on the GPU and matches the same-shape path" do
+      vals = [3.0, 1.5, 7.0]
+
+      for ty <- [{:f, 32}, {:f, 64}] do
+        t = Nx.tensor(vals, type: ty, backend: Nx.Vulkan.VulkanoBackend)
+        scalar = Nx.tensor(0.5, type: ty, backend: Nx.Vulkan.VulkanoBackend)
+        same = Nx.tensor([0.5, 0.5, 0.5], type: ty, backend: Nx.Vulkan.VulkanoBackend)
+
+        {bcast, c1} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t, scalar) end)
+        {direct, c2} = Nx.Vulkan.Fallback.count(fn -> Nx.pow(t, same) end)
+
+        assert Map.values(c1) |> Enum.sum() == 0, "#{inspect(ty)} bcast pow fell back"
+        assert Map.values(c2) |> Enum.sum() == 0, "#{inspect(ty)} same-shape pow fell back"
+
+        # The two paths must agree exactly. f64 goes through the same f32
+        # boundary cast on both — GLSL.std.450 has no f64 Pow — so this pins
+        # them together rather than to BinaryBackend, which computes in full
+        # f64 and legitimately differs by ~1.6e-7.
+        assert Nx.to_flat_list(bcast) == Nx.to_flat_list(direct),
+               "#{inspect(ty)} broadcast and same-shape pow disagree"
+      end
+    end
+  end
+
 end

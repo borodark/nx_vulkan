@@ -497,10 +497,20 @@ defmodule Nx.Vulkan.VulkanoBackend do
   defp pow_ok_direct?({:u, 32}, 4, _b), do: true
   defp pow_ok_direct?(_type, 4, b), do: nonneg_exponent?(b)
 
-  # The broadcasting path. Floats stay out of it, as they always have: the f64
-  # bcast shader has no `pow` arm at all, so admitting code 4 there would hit
-  # its `default:`. Integers ride the same data gate as above.
+  # The broadcasting path. Floats used to be excluded here because the bcast
+  # shaders had no `pow` arm and code 4 would have hit their `default:` — a
+  # silent zero. They have one now (f32 native, f64 boundary-cast through f32
+  # exactly as `pow_f64` does on the same-shape path), so the exclusion is gone.
+  #
+  # It mattered more than it looks. `Nx.pow(t, 2.0)` is the ordinary way to
+  # write a square, and a scalar exponent takes the BROADCAST path, so float
+  # `pow` left the GPU for every caller who wrote it naturally while
+  # `Nx.pow(t, tensor_of_twos)` stayed resident. Found by censusing a per-op
+  # leapfrog for the Weibull family, which is the one distribution in
+  # `ChainShaderSpecsF64` whose per-op form needs it; confirmed independently on
+  # Tegra by the exmc session. Integers ride the same data gate as above.
   defp pow_ok_bcast?(_type, code, _b) when code != 4, do: true
+  defp pow_ok_bcast?({:f, _}, 4, _b), do: true
   defp pow_ok_bcast?({:s, 32}, 4, b), do: nonneg_exponent?(b)
   defp pow_ok_bcast?({:u, 32}, 4, _b), do: true
   defp pow_ok_bcast?(_type, 4, _b), do: false

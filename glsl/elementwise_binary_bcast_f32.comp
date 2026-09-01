@@ -58,6 +58,7 @@ void main() {
         case 1: r = x * y; break;
         case 2: r = x - y; break;
         case 3: r = x / y; break;
+        case 4: r = pow(x, y); break;
         case 5: r = max(x, y); break;
         case 6: r = min(x, y); break;
         // remainder — the sign of the DIVIDEND, not the divisor.

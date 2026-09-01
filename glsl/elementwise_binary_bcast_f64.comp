@@ -58,6 +58,10 @@ void main() {
         case 1: r = x * y; break;
         case 2: r = x - y; break;
         case 3: r = x / y; break;
+        // Boundary-cast through f32, identical to `pow_f64` in
+        // elementwise_binary_f64.comp: GLSL.std.450 has no f64 Pow. Same
+        // precision cost as the same-shape path, deliberately not a different one.
+        case 4: r = double(pow(float(x), float(y))); break;
         case 5: r = max(x, y); break;
         case 6: r = min(x, y); break;
         // remainder — the sign of the DIVIDEND, not the divisor.
