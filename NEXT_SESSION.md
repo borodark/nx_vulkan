@@ -327,7 +327,61 @@ populations at the same size. Unchanged from last session, and now more
 interesting: if allocation is clock-invariant on Ampere, a bimodal allocation
 cost on the Tegra is unlikely to be DVFS either.
 
-### 5. Race 5 (MCMC) has never run
+### 5. The chain path: the blocker is NOT f32-vs-f64, and the fix is local
+
+This doc has recorded the blocker as "the templated path in `ShaderTemplate`
+emits f32 while the active NIF wants f64". Both are f32-capable. The real
+situation, established by reading all three sides:
+
+**The NIF pushes a FIXED-SIZE parsed struct, not the caller's bytes.**
+`push_constants(layout, 0, push_block)` sends `sizeof(PushBlock)` = 20 bytes
+(f32) or `sizeof(PushBlockF64)` = 24 bytes (f64), laid out
+`{k_steps, n_obs, d, _pad, eps}`. Anything a caller puts in the push block
+beyond that header is silently dropped.
+
+So the contract these NIFs actually implement is: **a fixed header in push
+constants, everything else in buffers.**
+
+* **exmc obeys it.** Its synthesised shaders declare exactly that 24-byte block
+  and carry priors in the `extras` buffer. It has always been self-consistent,
+  and it dispatches its OWN shaders — never `glsl/leapfrog_chain_*_f64.spv`.
+* **nx_vulkan's own shaders do not.** `glsl/leapfrog_chain_normal_f64.comp`
+  declares `{uint n; uint K; double eps; double mu; double sigma}` = 32 bytes
+  with family parameters INLINE. `mu` and `sigma` are never forwarded, and the
+  header disagrees besides — the shader's `n` is the DIMENSION at offset 0,
+  where the NIF writes `k_steps`.
+* **`ShaderTemplate` and `ChainShaderSpecs` have the same shape**:
+  `{uint n; uint K; float eps; <family fields>}`, family params inline,
+  `beta_push/6` packing to match.
+
+This is not an offset bug. It is a design difference, and it means the shipped
+chain shaders and the whole templated path are **structurally undriveable** by
+the NIFs in this repo. Nothing here calls those NIFs — the `synthesis.ex:33` and
+`node.ex:44` references are inside `@moduledoc` blocks — so nothing ever tripped
+it.
+
+**The fix is local and breaks nothing downstream.** Move family parameters out
+of the push block and into a buffer, matching the design exmc already proves
+works, and align the header. That is a change to `ShaderTemplate`,
+`ChainShaderSpecs` and the six shipped `.comp` files — all inside nx_vulkan,
+with no contract change for exmc, which never touches any of them.
+
+Doing that would also give this repo its first working chain caller, which is
+what would let it verify its own chain NIFs. `8cce91c`'s batched readback had to
+be measured by exmc for exactly this reason.
+
+**Landed meanwhile:** `5693ddf` bounds `d` by `q_init.len()` in all three chain
+NIFs, so a layout disagreement returns `:size_mismatch` instead of requesting a
+multi-gigabyte allocation. It picks no layout.
+
+**Rejected:** deriving `d` from `q_init.len()` and treating push as opaque
+passthrough. It would decouple the NIF from the layout, but it does NOT make the
+templated path work, because the NIF would still forward only the fixed header
+and drop the inline family params. Confirmed by reading the `push_constants`
+call rather than assuming. exmc confirmed `q_init` is exactly `d` elements
+(unpadded) if that inference is ever wanted for another reason.
+
+### 5b. Race 5 (MCMC) has never run
 
 Nothing in this repo calls `leapfrog_chain_synth_f64`. The shipped chain shaders
 are consumed by eXMC downstream, and the templated path in `ShaderTemplate`
