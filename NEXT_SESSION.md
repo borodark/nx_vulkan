@@ -374,12 +374,33 @@ be measured by exmc for exactly this reason.
 NIFs, so a layout disagreement returns `:size_mismatch` instead of requesting a
 multi-gigabyte allocation. It picks no layout.
 
-**Rejected:** deriving `d` from `q_init.len()` and treating push as opaque
-passthrough. It would decouple the NIF from the layout, but it does NOT make the
-templated path work, because the NIF would still forward only the fixed header
-and drop the inline family params. Confirmed by reading the `push_constants`
-call rather than assuming. exmc confirmed `q_init` is exactly `d` elements
-(unpadded) if that inference is ever wanted for another reason.
+**Rejected, for two independent reasons:** deriving `d` from `q_init.len()`
+instead of reading it from the push block.
+
+1. It does not make the templated path work. The NIF would still forward only
+   the fixed header and drop the inline family params. Found by reading the
+   `push_constants` call after the compiler rejected the edit.
+2. **It would be a regression for padded callers.** The parsed `d` is not just
+   used for sizing — it is pushed to the shader, which indexes with it
+   (`q_chain[k * pc.d + i]`). Sizing from `push_block.d` therefore agrees with
+   the shader BY CONSTRUCTION. Deriving from the buffer instead would decouple
+   the two: a caller that legitimately pads `q_init` gets outputs sized for the
+   padded width while the shader writes the unpadded one — over-long binaries
+   with trailing garbage, a silent wrong answer. Today that caller is correct.
+
+exmc confirmed empirically at d=1 and d=3 that its `q_init` is exactly `d*8`
+bytes, and green-lit the derivation. It is still the wrong change: their
+confirmation removes the risk to *them*, not the reason the design is worse.
+
+**So the correct action here was no code change beyond `5693ddf`'s guard**, and
+`<=` is the right bound — it catches a misread `d` (which is wild, ~1.2e9) while
+permitting padding, which is legitimate and works today. Tightening to `==`
+would reject a currently-correct caller for no gain.
+
+**Verified while in there:** `logp_chain` is sized `K` (and `n_instances * K`),
+never `K*d`, in all three NIFs. exmc flagged this as a place where a `K*d`
+assumption would silently over-allocate by a factor of d, invisible at d=1. The
+code is already right; noted so nobody 'fixes' it.
 
 ### 5b. Race 5 (MCMC) has never run
 
