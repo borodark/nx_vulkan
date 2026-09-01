@@ -439,6 +439,32 @@ Learned expensively, all of them:
   resolve broken from pre either.
 * **Rotate arm order in an A/B.** Whichever arm runs first after a binary swap
   eats the cold start; a fixed order silently charges it to one arm.
+* **Pick the measurement host by CONTENTION, not by clock observability — and
+  they are anti-correlated.** super-io is the only box where `clocks.sm` reads,
+  which is why four DVFS incidents pushed every measurement onto it. It is also
+  a DESKTOP: Firefox and Cinnamon composite on that GPU throughout, and
+  `nvidia-smi --query-compute-apps` shows nothing, so the contention is
+  invisible to the check this project uses. The exmc session measured the same
+  chain benchmark on both boxes, N=3000/sample, 6000-dispatch warmup, 6
+  replicates:
+
+      super-io  RTX 3060 Ti   822 .. 1741 us/dispatch   57% of median
+      mac-248   GT 750M       364.5 .. 365.4 us          0.3% of median
+
+  The headless Kepler is faster in absolute terms AND three orders of magnitude
+  tighter. super-io's noise band is ~900 us wide, so anything under ~1 ms is
+  unmeasurable there. **Use a headless box.** The clock-observability argument
+  that put measurements on super-io selected for the worst available host.
+* **A control that should show nothing must actually show nothing.** The
+  small-buffer fast path A/B put its over-threshold size in both arms, where the
+  change cannot act — and that control reproduced 4.6% of the 7.2% "treatment"
+  effect. Without it the result would have read as a win. Build the null arm
+  into the experiment, not the interpretation.
+* **Warmup can look exactly like a leak.** The exmc chain benchmark read
+  625 -> 902 -> 969 us across its first three replicates at a 300-dispatch
+  warmup, which reads as a retained-allocation leak — a false alarm this project
+  has now had three times. At 6000 dispatches it settles. Discard early
+  replicates before diagnosing a trend.
 * **`pgrep -f "foo"` matches the shell running it.** A wait loop built that way
   never fires. Key on a pid via `/proc`, or use `pgrep -x`. Documented in
   `scripts/staged/jetson_run_trace.README` and walked into anyway.
@@ -457,6 +483,20 @@ cinnamon, 2.1-2.6 GiB resident, P0 throughout. No foreign *compute* client (the
 document's own rule about checking `pstate,memory.used` reads dirty here by
 construction. The clock-state separation was verified out-of-process and is
 unambiguous: idle windows held 210 MHz, boost windows held 1920-1935 MHz.
+
+**This caveat turned out to be the headline, not a footnote.** The desktop
+contention is worth ~900 us of noise (see the host-selection invariant above),
+which is wider than most of the per-call effects measured here. Read every
+number in this document accordingly:
+
+* The elementwise slope figures (431 GB/s etc.) are large-signal and survive.
+* The DVFS finding survives — a 2.6x swing is far outside the band.
+* **~0.16 ms per submit-and-fence is an estimate taken inside noise of
+  comparable width, not a measurement.** It separated because the effect was
+  ~0.135 ms and consistent, but do not size anything from its magnitude. It was
+  used to predict a chain-path cost and the prediction was out by 3x.
+* The small-buffer fast path is not established either way and needs re-running
+  on a headless box.
 
 ---
 
