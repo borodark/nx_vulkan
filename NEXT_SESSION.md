@@ -335,6 +335,41 @@ is wider than both effects, and nothing in this repo could drive the chain path
 until `15abc96`. That is now fixed, so the next such measurement can be taken
 locally — on a headless box.
 
+### 1c. SIXTEEN unallowlisted fallbacks, and strict mode cannot see them
+
+I claimed `pow` was "the one real gap". It was not — it was the one my
+leapfrog-shaped census happened to touch, and it was already an `@allowlist`
+entry, so the repo knew. A wider sweep of the op surface finds **17 fallbacks,
+identical on f32 and f64**:
+
+    rsqrt  sin  cos  tan  asin  acos  atan  sinh  cosh
+    erf  erfc  cbrt  expm1  log1p        (14 unary)
+    atan2 (both scalar and same-shape forms)
+    sort                                  (allowlisted, deliberate)
+
+**Only `sort` is on the allowlist. The other 16 are not.** Strict mode would
+raise on every one of them — it passes because the test suite never calls them.
+That is the day's pattern once more: a green run over an unexercised path is not
+evidence, and `scripts/strict_test.sh` returning 0 failures means "no unlisted
+fallback in the tested paths", never "no unlisted fallbacks".
+
+Covered already, for contrast: `exp`, `log`, `sqrt`, `tanh`, `logistic`, `abs`,
+`negate`, `sign`, `floor`, `ceil`, `round`, and every binary/reduction/shape op
+swept. So the unary shader has the easy transcendentals and is missing the
+trigonometric, hyperbolic and error families.
+
+**Most of these are cheap for f32.** GLSL.std.450 provides `Sin`, `Cos`, `Tan`,
+`Asin`, `Acos`, `Atan`, `Atan2`, `Sinh`, `Cosh`, `InverseSqrt`, `Log1p`-able
+forms and `Pow` — so the f32 arms are op-code additions to
+`elementwise_unary_f32.comp`, the same shape of change as the `pow` fix in
+`cf7b689`. `erf`/`erfc` are NOT in GLSL.std.450 and need a polynomial
+approximation or a documented host path. f64 has no transcendentals at all and
+must boundary-cast, exactly as `pow_f64` does.
+
+**Whichever way each one goes, it should end up either on the GPU or on the
+allowlist with a reason.** Sixteen ops currently sit in neither category, which
+is the state the allowlist exists to prevent.
+
 ### 2. Pool or free-list the output buffers
 
 Allocation is ~0.59 ms at 64 MiB, clock-invariant, and paid per op. Above the

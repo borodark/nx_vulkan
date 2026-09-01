@@ -250,11 +250,19 @@ defmodule Nx.Vulkan.Fallback do
   #   :float_output        — permitted only when the OUTPUT is a float type; an
   #                          integer result means the reason does not apply
   @allowlist [
-    {{:pow, 3}, :float_output,
-     "broadcasting/scalar-exponent pow has no shader: elementwise_binary_bcast_* " <>
-       "omits op code 4 because GLSL.std.450 has no f64 pow. Equal-shape f32/f64 " <>
-       "pow does run on the GPU; only the broadcasting form lands here. " <>
-       "INTEGER pow is deliberately NOT covered — see the note below."},
+    # {{:pow, 3}, :float_output, ...} was here until 2026-09-01. FLOAT pow now
+    # runs on the GPU in both forms, so the exemption is deleted rather than
+    # kept — a stale allowlist entry silently permits the regression it was
+    # written to describe.
+    #
+    # Its reason was half right and worth recording: it said the bcast shaders
+    # "omit op code 4 because GLSL.std.450 has no f64 pow". True of f64, which
+    # now boundary-casts through f32 exactly as `pow_f64` already did on the
+    # same-shape path. NOT true of f32, which could have had a native `pow` arm
+    # all along and did not, so f32 callers paid for an f64 limitation.
+    #
+    # INTEGER pow remains uncovered and is still admitted by DATA, not type —
+    # see `nonneg_exponent?/1` and the note below.
     {{:window_scatter_max, 6}, :always,
      "OVERLAPPING pooling backward only. One thread per input element is what " <>
        "avoids float atomics, and that only holds for non-overlapping windows; " <>
