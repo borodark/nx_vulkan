@@ -420,7 +420,8 @@ fn bytes_to_u32_words(bytes: &[u8]) -> Result<Vec<u32>, &'static str> {
         .collect())
 }
 
-/// Upload host bytes into a fresh DEVICE_LOCAL buffer.
+/// Upload host bytes into a fresh DEVICE_LOCAL buffer, staging copy ENQUEUED
+/// into the pending batch.
 ///
 /// This asked for `PREFER_DEVICE | HOST_SEQUENTIAL_WRITE` until 2026-08-31 —
 /// the same preference-plus-requirement defect `alloc_buffer` carried, and the
@@ -452,27 +453,8 @@ fn bytes_to_u32_words(bytes: &[u8]) -> Result<Vec<u32>, &'static str> {
 /// resident on the backend, and the fallback census counts nothing — only the
 /// heap is wrong.
 ///
-/// This variant BLOCKS until the copy has executed. Use it for callers that go
-/// on to build and submit their own command buffer without draining the pending
-/// batch — the three leapfrog synth NIFs and `fft` all do exactly that, and a
-/// deferred copy would leave them reading an uninitialised buffer. Callers
-/// whose result is only ever consumed through `enqueue_dispatch` should prefer
-/// `upload_buffer_deferred`.
-fn upload_buffer(
-    context: &VkContext,
-    bytes: &[u8],
-    usage: BufferUsage,
-) -> Result<Subbuffer<[u8]>, String> {
-    let buf = alloc_buffer(
-        context.mem_allocator.clone(),
-        bytes.len(),
-        usage | BufferUsage::TRANSFER_DST,
-    )?;
-    staging_write(context, buf.clone(), bytes)?;
-    Ok(buf)
-}
-
-/// `upload_buffer`, but the staging copy is ENQUEUED rather than submitted.
+///
+/// The staging copy is enqueued rather than submitted.
 ///
 /// The blocking variant would put a full submit and fence wait on a path that
 /// previously did neither — `buf_upload` was a plain host write. That path is
@@ -500,6 +482,83 @@ fn upload_buffer_deferred(
     )?;
     enqueue_staging_write(context, buf.clone(), bytes)?;
     Ok(buf)
+}
+
+/// A device buffer plus the staging source whose copy has NOT been recorded
+/// yet. `None` on unified memory, where the write already happened in place.
+type StagedUpload = (Subbuffer<[u8]>, Option<Subbuffer<[u8]>>);
+
+/// Allocate a DEVICE_LOCAL buffer and prepare its host->device copy WITHOUT
+/// submitting anything. The caller MUST record the copy with `record_upload`
+/// into its own command buffer before any dispatch that reads the destination.
+///
+/// This exists because the blocking `upload_buffer` costs a full submit and
+/// fence wait per call. Measured on super-io by A/B-ing `Nx.fft`, which makes
+/// exactly one such call per invocation for its twiddle table, at boost clock,
+/// median of 15, two alternating replicates each:
+///
+///     n       twiddle   6b38aee (pre)   d7b5f08 (post)   delta
+///     1024      8 KiB   0.527 / 0.469   0.713 / 0.829    +0.27 ms
+///     4096     32 KiB   0.741 / 0.666   0.851 / 0.874    +0.16 ms
+///    16384    128 KiB   1.380 / 1.363   1.537 / 1.536    +0.17 ms
+///
+/// The table grows 16x while the delta stays flat, so this is submission cost,
+/// not staging bandwidth. `leapfrog_chain_synth_f64` makes THREE such calls per
+/// chain dispatch and exmc runs one dispatch per chain per draw — a 4-chain
+/// 500-draw run paid ~6000 fence waits for copies that were already strictly
+/// ordered before a dispatch the NIF submits itself. Folding them into that
+/// command buffer costs a barrier instead of a fence.
+fn upload_buffer_staged(
+    context: &VkContext,
+    bytes: &[u8],
+    usage: BufferUsage,
+) -> Result<StagedUpload, String> {
+    let buf = alloc_buffer(
+        context.mem_allocator.clone(),
+        bytes.len(),
+        usage | BufferUsage::TRANSFER_DST,
+    )?;
+
+    // Unified: the buffer is host-writable, so there is nothing to record.
+    // The guard is scoped so it drops before `buf` is moved into the return.
+    if context.unified_memory {
+        {
+            let mut guard = buf.write().map_err(|e| format!("write buffer: {e}"))?;
+            guard.copy_from_slice(bytes);
+        }
+        return Ok((buf, None));
+    }
+
+    let staging = Buffer::from_iter(
+        context.mem_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        bytes.iter().copied(),
+    )
+    .map_err(|e| format!("staging alloc (write): {e}"))?;
+
+    Ok((buf, Some(staging)))
+}
+
+/// Record a staged upload's copy into `cmd`. A no-op on unified memory.
+/// vulkano's automatic synchronisation inserts the barrier between this copy
+/// and a later dispatch that reads the destination.
+fn record_upload(cmd: &mut CmdBuilder, staged: &StagedUpload) -> Result<(), String> {
+    if let Some(staging) = &staged.1 {
+        cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
+            staging.clone(),
+            staged.0.clone(),
+        ))
+        .map_err(|e| format!("copy staging->device (recorded): {e}"))?;
+    }
+    Ok(())
 }
 
 /// Allocate an output buffer WITHOUT initialising it.
@@ -942,21 +1001,15 @@ fn leapfrog_chain_synth<'a>(
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
 
-        let q_buf = upload_buffer(
-            context,
-            q_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let p_buf = upload_buffer(
-            context,
-            p_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let extras_buf = upload_buffer(
-            context,
-            extras.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
+        // Staged, not blocking: the copies are recorded into this NIF's own
+        // command buffer below, ahead of the dispatch that reads them.
+        let q_staged = upload_buffer_staged(context, q_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let p_staged = upload_buffer_staged(context, p_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let extras_staged =
+            upload_buffer_staged(context, extras.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let q_buf = q_staged.0.clone();
+        let p_buf = p_staged.0.clone();
+        let extras_buf = extras_staged.0.clone();
 
         let q_chain_buf = alloc_buffer(
             context.mem_allocator.clone(),
@@ -1001,6 +1054,10 @@ fn leapfrog_chain_synth<'a>(
             CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
+
+        record_upload(&mut cmd, &q_staged)?;
+        record_upload(&mut cmd, &p_staged)?;
+        record_upload(&mut cmd, &extras_staged)?;
 
         cmd.bind_pipeline_compute(pipeline.clone())
             .map_err(|e| format!("bind pipeline: {e}"))?
@@ -1097,21 +1154,15 @@ fn leapfrog_chain_synth_f64<'a>(
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
 
-        let q_buf = upload_buffer(
-            context,
-            q_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let p_buf = upload_buffer(
-            context,
-            p_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let extras_buf = upload_buffer(
-            context,
-            extras.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
+        // Staged, not blocking: the copies are recorded into this NIF's own
+        // command buffer below, ahead of the dispatch that reads them.
+        let q_staged = upload_buffer_staged(context, q_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let p_staged = upload_buffer_staged(context, p_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let extras_staged =
+            upload_buffer_staged(context, extras.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let q_buf = q_staged.0.clone();
+        let p_buf = p_staged.0.clone();
+        let extras_buf = extras_staged.0.clone();
 
         let q_chain_buf = alloc_buffer(
             context.mem_allocator.clone(),
@@ -1156,6 +1207,10 @@ fn leapfrog_chain_synth_f64<'a>(
             CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
+
+        record_upload(&mut cmd, &q_staged)?;
+        record_upload(&mut cmd, &p_staged)?;
+        record_upload(&mut cmd, &extras_staged)?;
 
         cmd.bind_pipeline_compute(pipeline.clone())
             .map_err(|e| format!("bind pipeline: {e}"))?
@@ -1249,21 +1304,15 @@ fn leapfrog_chain_synth_batch<'a>(
         let layout = cached.layout.clone();
         let pipeline = cached.pipeline.clone();
 
-        let q_buf = upload_buffer(
-            context,
-            q_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let p_buf = upload_buffer(
-            context,
-            p_init.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
-        let extras_buf = upload_buffer(
-            context,
-            extras.as_slice(),
-            BufferUsage::STORAGE_BUFFER,
-        )?;
+        // Staged, not blocking: the copies are recorded into this NIF's own
+        // command buffer below, ahead of the dispatch that reads them.
+        let q_staged = upload_buffer_staged(context, q_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let p_staged = upload_buffer_staged(context, p_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let extras_staged =
+            upload_buffer_staged(context, extras.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let q_buf = q_staged.0.clone();
+        let p_buf = p_staged.0.clone();
+        let extras_buf = extras_staged.0.clone();
 
         let q_chain_buf = alloc_buffer(
             context.mem_allocator.clone(),
@@ -1308,6 +1357,10 @@ fn leapfrog_chain_synth_batch<'a>(
             CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
+
+        record_upload(&mut cmd, &q_staged)?;
+        record_upload(&mut cmd, &p_staged)?;
+        record_upload(&mut cmd, &extras_staged)?;
 
         // KEY DIFFERENCE vs single-instance: dispatch [n_instances, 1, 1]
         // — each workgroup handles one instance, scaling compute with the
@@ -3113,11 +3166,12 @@ fn fft<'a>(
             tw_bytes.extend_from_slice(&ang.cos().to_le_bytes());
             tw_bytes.extend_from_slice(&ang.sin().to_le_bytes());
         }
-        let tw_buf = upload_buffer(
+        let tw_staged = upload_buffer_staged(
             context,
             &tw_bytes,
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
         )?;
+        let tw_buf = tw_staged.0.clone();
 
         let bitrev = get_or_create_pipeline(&bitrev_spv, None)?;
         let stage = get_or_create_pipeline(&stage_spv, None)?;
@@ -3128,6 +3182,8 @@ fn fft<'a>(
             CommandBufferUsage::SimultaneousUse,
         )
         .map_err(|e| format!("cmd builder: {e}"))?;
+
+        record_upload(&mut cmd, &tw_staged)?;
 
         // Stage 0: bit-reversed load, in_ref -> out_ref (complex).
         let load_set = PersistentDescriptorSet::new(
