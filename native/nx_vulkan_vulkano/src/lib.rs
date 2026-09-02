@@ -694,6 +694,23 @@ fn record_upload(cmd: &mut CmdBuilder, staged: &StagedUpload) -> Result<(), Stri
 ///
 /// **If you add a kernel that accumulates or partially writes, use
 /// `alloc_buffer_zeroed`.** Getting this wrong is silent.
+/// The chain shaders dispatch ONE workgroup at `local_size_x = 256`, so only
+/// 256 invocations exist however large `d` is, and the `shared` reduction array
+/// is that wide. Past it the chains get an undefined tail — the buffers are
+/// handed back WHOLE, with no logical-size slice — and the `logp` tree reduce
+/// sums only the first 256 elements, so the log-probability is silently WRONG
+/// rather than merely truncated.
+///
+/// Unenforced until 2026-09-01, and harmless only by accident: `d` sat near 13
+/// because of a push-block budget that turned out to bound bytes the GPU never
+/// receives. Removing that cap downstream took a model from 0 dispatches to
+/// 2564 and put 7..256 free RVs through this shader for the first time, so the
+/// accident that kept `d` small is gone and the bound has to be real.
+///
+/// A wrong posterior that looks plausible is the worst thing this code can
+/// produce. Refusing is the only correct answer until the shaders grid-stride.
+const CHAIN_MAX_D: usize = 256;
+
 fn alloc_buffer(
     alloc: Arc<StandardMemoryAllocator>,
     n_bytes: usize,
@@ -1296,6 +1313,12 @@ fn leapfrog_chain_synth<'a>(
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
     }
 
+    // See CHAIN_MAX_D: past 256 the chains get an undefined tail and the
+    // logp reduce silently sums only the first 256 elements.
+    if d > CHAIN_MAX_D {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
     let chain_bytes = (k as usize) * d * 4;
     let logp_bytes = (k as usize) * 4;
 
@@ -1467,6 +1490,12 @@ fn leapfrog_chain_synth_f64<'a>(
     if d == 0 || d.saturating_mul(8) > q_init.len() {
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
     }
+
+    // See CHAIN_MAX_D: past 256 the chains get an undefined tail and the
+    // logp reduce silently sums only the first 256 elements.
+    if d > CHAIN_MAX_D {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
     // f64 = 8 bytes per element (vs 4 for f32)
     let chain_bytes = (k as usize) * d * 8;
     let logp_bytes = (k as usize) * 8;
@@ -1619,6 +1648,12 @@ fn leapfrog_chain_synth_batch<'a>(
     // Same guard as the single-instance NIFs; see the layout table there.
     if d == 0 || n_instances.saturating_mul(d).saturating_mul(4) > q_init.len() {
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    // See CHAIN_MAX_D: past 256 the chains get an undefined tail and the
+    // logp reduce silently sums only the first 256 elements.
+    if d > CHAIN_MAX_D {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
     // f32 = 4 bytes; per-instance chain: K * d * 4; total: n_instances * K * d * 4
     let chain_bytes = n_instances * (k as usize) * d * 4;

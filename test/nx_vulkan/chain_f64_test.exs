@@ -182,4 +182,39 @@ defmodule Nx.Vulkan.ChainF64Test do
     end
   end
 
+  describe "the d <= 256 workgroup bound" do
+    # The shaders dispatch ONE workgroup at local_size_x = 256. Past that the
+    # chains get an undefined tail AND the logp tree reduce sums only the first
+    # 256 elements — a silently wrong log-probability, not a truncated one.
+    #
+    # This went unenforced for a long time and was harmless only by accident:
+    # d sat near 13 because of a push-block budget that bounded bytes the GPU
+    # never receives. That accident is gone.
+    test "d = 256 runs and d = 257 is refused" do
+      {:ok, spv} = Synthesis.compile(ChainShaderSpecsF64.normal(0.0, 1.0))
+      k = 2
+
+      ok_d = 256
+      q = f64(for i <- 1..ok_d, do: i / 1000.0)
+      p = f64(for _ <- 1..ok_d, do: 0.0)
+      m = f64(for _ <- 1..ok_d, do: 1.0)
+
+      assert {:ok, {qc, _, _, lc}} =
+               NativeV.leapfrog_chain_synth_f64(q, p, m, push(k, ok_d, 0.01), k, spv)
+
+      assert byte_size(qc) == k * ok_d * 8
+      assert byte_size(lc) == k * 8
+      for v <- doubles(qc) ++ doubles(lc), do: assert(v == v, "NaN at d = 256")
+
+      over = 257
+      q2 = f64(for i <- 1..over, do: i / 1000.0)
+      p2 = f64(for _ <- 1..over, do: 0.0)
+      m2 = f64(for _ <- 1..over, do: 1.0)
+
+      assert {:error, :bad_input} =
+               NativeV.leapfrog_chain_synth_f64(q2, p2, m2, push(k, over, 0.01), k, spv),
+             "d = 257 must be refused, not silently miscomputed"
+    end
+  end
+
 end
