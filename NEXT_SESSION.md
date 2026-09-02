@@ -30,22 +30,46 @@ eXMC's own decomposition of a chain dispatch, on the Jetson at MAXN:
 
 ## Blocked on the exmc session — do not re-derive these here
 
-Two changes are committed with honest "not established on this host" labels.
-super-io cannot resolve either; **mac-248 (headless) can**, and they have the
-real workload.
+**MEASURED ON mac-248 (2026-09-02). Both real, both smaller than super-io
+said.** Three arms, four rounds, order rotated each round, N=3000/sample,
+6000-dispatch warmup, d=13 K=32, `.so` swap with `--no-compile`:
 
-* **`8cd19ee`** — readback rides the dispatch submission, one fence per call
-  instead of two. Rotated A/B here at K=1: 328.6 -> 209.4 us, non-overlapping,
-  **-36% of fixed cost**. Wants confirming on 248.
-* **`d210601`** — buffer pool for the chain NIFs' ~11 internal allocations.
-  239.7 -> 199.5 us median, -17%, five of six replicates below the before
-  median, but **Mann-Whitney U=10 against a critical 7 at 6v6, not
-  significant**. Needs 248 outright.
+    f4c00f4  before the fold   209.6 210.7 210.9 209.3   median 210.2 us
+    8cd19ee  fence fold        172.1 172.1 171.8 171.9   median 172.0 us
+    d210601  + buffer pool     169.5 170.8 169.5 170.0   median 169.8 us
 
-Already settled by them on 248, for reference:
+Spreads 0.1-0.6%. All three arms completely non-overlapping.
 
-    ab2e779 -> 096d7bd   365 -> 238 us   four readback fences becoming one  -35%
-    096d7bd fast path    238 -> 224 us   small-upload fast path              -6%
+    fence fold   210.2 -> 172.0   -38.2 us   -18.2%
+    buffer pool  172.0 -> 169.8    -2.2 us    -1.3%
+    combined     210.2 -> 169.8   -40.4 us   -19.2%
+
+**Both super-io figures were inflated — the fold by 2x (-36% claimed), the pool
+by 13x (-17% claimed).** The pool was labelled "not significant here", which was
+right, but the number was badly wrong too. A ~900 us noise band does not merely
+fail to resolve a small effect; it manufactures a large one. Treat every
+super-io per-dispatch delta in this document as an upper bound.
+
+**The buffer pool is real but marginal.** 2.2 us for a global mutex, a
+size-keyed cache, retained buffers and a contamination hazard needing two
+dedicated tests. Kept because it is written, tested and harmless — but it should
+be the first thing dropped if it ever complicates something.
+
+Cumulative on 248, chaining the exmc session's earlier arms with these:
+
+    ab2e779              365 us
+    096d7bd fast OFF     238 us   8cce91c, four readback fences -> one   -35%
+    096d7bd fast ON      224 us   b59c4a7, small-upload fast path         -6%
+    f4c00f4              210 us
+    8cd19ee              172 us   fence fold                            -18%
+    d210601              170 us   buffer pool                            -1.3%
+
+**365 -> 170 us, about -53% per chain dispatch.**
+
+Note the arms could not be the ones originally proposed (096d7bd / 8cd19ee /
+d210601): 096d7bd predates `13619fd`, so `ChainShaderSpecsF64` does not exist
+there and the chain path is not driveable from this repo at that commit.
+`f4c00f4` is the commit immediately before the fold that has it.
 
 ---
 
