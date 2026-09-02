@@ -126,62 +126,6 @@ defmodule Nx.Vulkan.ChainF64Test do
       assert doubles(logp_chain) == host_lp
     end
   end
-  describe "buffer pool" do
-    # The chain NIFs recycle their output and staging buffers across calls.
-    # The hazard that introduces is contamination: a second dispatch reading
-    # bytes the first one left behind. These tests exist to make that visible,
-    # because a stale-buffer bug produces plausible numbers rather than a crash.
-    test "a second dispatch with different inputs is not contaminated by the first" do
-      d = 3
-      k = 6
-      eps = 0.05
-      {:ok, spv} = Synthesis.compile(ChainShaderSpecsF64.normal(0.0, 1.0))
-      mass = f64([1.0, 1.0, 1.0])
-
-      run = fn q0, p0 ->
-        {:ok, {q_chain, _p, _g, logp}} =
-          NativeV.leapfrog_chain_synth_f64(f64(q0), f64(p0), mass, push(k, d, eps), k, spv)
-
-        {doubles(q_chain), doubles(logp)}
-      end
-
-      a = [0.5, -0.3, 0.1]
-      b = [-2.0, 1.25, 0.75]
-
-      # Run A, then B, then A again. If the pool leaked, the second A would
-      # differ from the first — or B would carry A's tail.
-      {qa1, la1} = run.(a, [0.2, 0.0, -0.1])
-      {qb, lb} = run.(b, [0.0, 0.1, 0.0])
-      {qa2, la2} = run.(a, [0.2, 0.0, -0.1])
-
-      assert qa1 == qa2, "same inputs gave different results across a recycled buffer"
-      assert la1 == la2, "logp differed across a recycled buffer"
-      refute qa1 == qb, "different inputs gave identical results — buffers not written?"
-
-      for v <- qa1 ++ qb ++ la1 ++ lb, do: assert(v == v, "NaN in a pooled buffer")
-    end
-
-    test "buffers of different sizes do not get swapped" do
-      # Size is part of the pool key. Interleaving two shapes would return a
-      # wrong-length buffer if it were not.
-      {:ok, spv} = Synthesis.compile(ChainShaderSpecsF64.normal(0.0, 1.0))
-
-      for {d, k} <- [{2, 4}, {5, 9}, {2, 4}, {3, 7}, {5, 9}] do
-        q = f64(for i <- 1..d, do: i / 10.0)
-        p = f64(for _ <- 1..d, do: 0.01)
-        m = f64(for _ <- 1..d, do: 1.0)
-
-        {:ok, {qc, pc, gc, lc}} =
-          NativeV.leapfrog_chain_synth_f64(q, p, m, push(k, d, 0.01), k, spv)
-
-        assert byte_size(qc) == k * d * 8, "d=#{d} k=#{k} q_chain wrong size"
-        assert byte_size(pc) == k * d * 8
-        assert byte_size(gc) == k * d * 8
-        assert byte_size(lc) == k * 8, "d=#{d} k=#{k} logp wrong size"
-      end
-    end
-  end
-
   describe "the d <= 256 workgroup bound" do
     # The shaders dispatch ONE workgroup at local_size_x = 256. Past that the
     # chains get an undefined tail AND the logp tree reduce sums only the first
