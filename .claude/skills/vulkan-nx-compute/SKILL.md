@@ -140,16 +140,30 @@ longer exists.
 `glsl/*.spv` are build intermediates and are **gitignored**. `priv/shaders/` is
 the canonical location and the only one `vulkano_backend.ex` resolves.
 
-**PIN THE COMPILER IN YOUR HEAD: glslang 15.1.0, SPIR-V 1.6 (`0x00010600`),
-generator 11.** SPIR-V output is a function of the compiler — a different
-glslang emits a different generator stamp and can order instructions
-differently — so a `.spv` rebuilt under another version will NOT be
-byte-identical to the committed one even when the GLSL is unchanged. Every
-reproducibility claim this project makes is relative to that version: 87 of 87
-byte-identical, verified on x86_64 and on aarch64 with a locally built glslang.
-Nothing enforces this; a version mismatch produces a working shader and a
-useless comparison, so check `glslangValidator --version` before concluding a
-`.spv` diff means anything.
+**Record the compiler version with any byte-comparison — but it is far less
+load-bearing than this section used to claim.** The committed `.spv` were built
+with glslang 15.1.0, SPIR-V 1.6 (`0x00010600`), generator 11.
+
+This paragraph used to say a `.spv` rebuilt under another version "will NOT be
+byte-identical to the committed one even when the GLSL is unchanged". **That was
+never tested and it is false for this shader set.** Measured on mac-248
+(2026-09-02), rebuilding every committed shader from its `.comp`:
+
+    glslang 16.2.0 vs committed (15.1.0):   81 identical, 0 differ
+    glslang 16.5.0 vs committed (15.1.0):   81 identical, 0 differ
+
+A full major version plus five minors, and nothing moved. The SPIR-V generator
+word encodes glslang's GENERATOR version, not its release version, and Khronos
+did not bump it across that range — which is the detail the old wording missed.
+(81 rather than 87 because the six hand-written f64 chain shaders were deleted
+on 2026-09-01; same set otherwise.)
+
+So: still record the version alongside any byte-comparison, because a future
+release could bump the generator word and this is cheap insurance. But do NOT
+treat a version mismatch as invalidating a comparison without checking — the
+check takes seconds and the assumption cost a rebuild here. `-DENABLE_OPT=0`
+also produces identical output for plain `-V`, verified the same way, which
+matters on hosts without python3 to fetch SPIRV-Tools.
 
 JIT kernels are compiled the same way but at runtime by
 `Codegen.compile_cached/1`
