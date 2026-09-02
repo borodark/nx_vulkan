@@ -457,4 +457,20 @@ defmodule Nx.Vulkan.NativeV do
 
   def leapfrog_chain_synth_batch(_q, _p, _extras, _push, _k, _spv_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  f64 batched leapfrog chain — N independent chains in ONE submission.
+
+  Push block is 24 bytes, `{k_steps, n_obs, d, n_instances, eps}` with `eps` an
+  f64 at offset 16. Inputs are `n_instances * d` f64 elements each; outputs are
+  `n_instances * K * d * 8` bytes per chain buffer and `n_instances * K * 8` for
+  logp, instance-major.
+
+  Exists because at exmc's operating point (d=4, K<=16) a dispatch is 86% fixed
+  cost, so four chains batched cost roughly one intercept instead of four —
+  ~3.9x on the in-dispatch term, measured on mac-248. Use
+  `Nx.Vulkan.ChainShaderSpecsF64.batched/1` to render the matching shader.
+  """
+  def leapfrog_chain_synth_batch_f64(_q, _p, _extras, _push, _k, _spv_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

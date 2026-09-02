@@ -90,7 +90,12 @@ defmodule Nx.Vulkan.ShaderTemplate do
       :dtype,
       # Optional GLSL emitted before main() — helper functions a family needs.
       # Weibull uses this; most families do not.
-      :helpers
+      :helpers,
+      # true renders the BATCHED layout: one workgroup per instance, indices
+      # offset by `inst`. Same skeleton, so the two cannot drift — which is the
+      # whole reason this is a flag rather than a second template. See the
+      # moduledoc for what drift cost last time.
+      :batched
     ]
   end
 
@@ -129,13 +134,13 @@ defmodule Nx.Vulkan.ShaderTemplate do
   {{helpers}}
 
   void main() {
-      uint i   = gl_GlobalInvocationID.x;
+  {{preamble}}
       uint tid = gl_LocalInvocationIndex;
       bool in_bounds = (i < pc.d);
 
-      {{T}} qi = in_bounds ? q_init[i] : 0.0{{S}};
-      {{T}} pi = in_bounds ? p_init[i] : 0.0{{S}};
-      {{T}} mi = in_bounds ? inv_mass[i] : 0.0{{S}};
+      {{T}} qi = in_bounds ? q_init[{{IN}}] : 0.0{{S}};
+      {{T}} pi = in_bounds ? p_init[{{IN}}] : 0.0{{S}};
+      {{T}} mi = in_bounds ? inv_mass[{{IN}}] : 0.0{{S}};
 
       for (uint k = 0; k < pc.K; k++) {
           // Half-step momentum at q
@@ -151,9 +156,9 @@ defmodule Nx.Vulkan.ShaderTemplate do
                   pi = p_half + 0.5{{S}} * pc.eps * grad_qn;
 
                   if (in_bounds) {
-                      q_chain[k * pc.d + i]    = qi;
-                      p_chain[k * pc.d + i]    = pi;
-                      grad_chain[k * pc.d + i] = grad_qn;
+                      q_chain[{{OUT}}]    = qi;
+                      p_chain[{{OUT}}]    = pi;
+                      grad_chain[{{OUT}}] = grad_qn;
                   }
               }
           }
@@ -172,7 +177,7 @@ defmodule Nx.Vulkan.ShaderTemplate do
           }
 
           if (tid == 0u) {
-              logp_chain[k] = {{logp_final}};
+              logp_chain[{{LOGP}}] = {{logp_final}};
           }
 
           barrier();
@@ -187,6 +192,24 @@ defmodule Nx.Vulkan.ShaderTemplate do
     grad_block_n = spec.grad_block_n || derive_grad_n(spec.grad_block)
 
     dtype = spec.dtype || :f32
+    batched = spec.batched || false
+
+    # ONE skeleton serves both layouts. Batched dispatches [n_instances, 1, 1]
+    # and gives each instance its own workgroup, so `shared partial[256]` and
+    # every barrier are already per-instance — only the indexing changes.
+    #
+    # Single-instance keeps gl_GlobalInvocationID.x, which is identical to
+    # gl_LocalInvocationIndex at one workgroup but is what the shipped shaders
+    # have always said.
+    {preamble, in_idx, out_idx, logp_idx} =
+      if batched do
+        {"    uint inst = gl_WorkGroupID.x;\n      uint i    = gl_LocalInvocationIndex;",
+         "inst * pc.d + i",
+         "inst * pc.K * pc.d + k * pc.d + i",
+         "inst * pc.K + k"}
+      else
+        {"    uint i   = gl_GlobalInvocationID.x;", "i", "k * pc.d + i", "k"}
+      end
 
     {scalar, suffix, ext} =
       case dtype do
@@ -199,6 +222,10 @@ defmodule Nx.Vulkan.ShaderTemplate do
     |> String.replace("{{S}}", suffix)
     |> String.replace("{{ext}}", ext)
     |> String.replace("{{helpers}}", spec.helpers || "")
+    |> String.replace("{{preamble}}", preamble)
+    |> String.replace("{{IN}}", in_idx)
+    |> String.replace("{{OUT}}", out_idx)
+    |> String.replace("{{LOGP}}", logp_idx)
     |> String.replace("{{name}}", spec.name)
     |> String.replace("{{grad_block}}", indent(spec.grad_block, 12))
     |> String.replace("{{grad_block_n}}", indent(grad_block_n, 16))

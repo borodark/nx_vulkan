@@ -231,4 +231,22 @@ defmodule Nx.Vulkan.ChainShaderSpecsF64 do
       weibull(2.0, 1.0, 0.0)
     ]
   end
+  @doc """
+  Turn any f64 family spec into its BATCHED form: one workgroup per chain,
+  indices offset by instance. Same skeleton, so the two cannot drift.
+  """
+  def batched(%FamilySpec{} = spec), do: %{spec | name: spec.name <> "_batch", batched: true}
+
+  @doc """
+  The batched push header: `{k_steps, n_obs, d, n_instances, eps}`, 24 bytes.
+
+  `n_instances` sits where the single-instance block keeps `_pad`, which is why
+  the two layouts agree on their first twelve bytes.
+  """
+  def batch_push(k, n_obs, d, n_instances, eps)
+      when is_integer(k) and is_integer(n_obs) and is_integer(d) and is_integer(n_instances) do
+    <<k::little-32, n_obs::little-32, d::little-32, n_instances::little-32,
+      eps::little-float-64>>
+  end
+
 end

@@ -161,4 +161,112 @@ defmodule Nx.Vulkan.ChainF64Test do
     end
   end
 
+  describe "batched f64 chains" do
+    # N chains in one submission. The correctness bar is not "plausible" — each
+    # instance must be BIT-IDENTICAL to the same chain dispatched alone, because
+    # the batched shader is the same skeleton with indices offset by `inst` and
+    # any difference means the offsetting is wrong.
+    defp chain_inputs(d, c) do
+      {f64(for i <- 1..d, do: (c * 10 + i) / 100.0), f64(for i <- 1..d, do: (c - i) / 50.0),
+       f64(for _ <- 1..d, do: 1.0)}
+    end
+
+    test "each instance is bit-identical to its own single dispatch" do
+      d = 4
+      k = 6
+      ni = 4
+      eps = 0.02
+      spec = ChainShaderSpecsF64.normal(0.0, 1.0)
+      {:ok, single_spv} = Synthesis.compile(spec)
+      {:ok, batch_spv} = Synthesis.compile(ChainShaderSpecsF64.batched(spec))
+
+      chains = for c <- 1..ni, do: chain_inputs(d, c)
+
+      singles =
+        for {q, p, m} <- chains do
+          {:ok, r} = NativeV.leapfrog_chain_synth_f64(q, p, m, push(k, d, eps), k, single_spv)
+          r
+        end
+
+      join = fn idx -> chains |> Enum.map(&elem(&1, idx)) |> Enum.join() end
+
+      assert {:ok, {bq, bp, bg, bl}} =
+               NativeV.leapfrog_chain_synth_batch_f64(
+                 join.(0),
+                 join.(1),
+                 join.(2),
+                 ChainShaderSpecsF64.batch_push(k, 0, d, ni, eps),
+                 k,
+                 batch_spv
+               )
+
+      assert byte_size(bq) == ni * k * d * 8
+      assert byte_size(bl) == ni * k * 8
+
+      chain_stride = k * d * 8
+      logp_stride = k * 8
+
+      for {{sq, sp, sg, sl}, idx} <- Enum.with_index(singles) do
+        assert binary_part(bq, idx * chain_stride, chain_stride) == sq, "q_chain, instance #{idx}"
+        assert binary_part(bp, idx * chain_stride, chain_stride) == sp, "p_chain, instance #{idx}"
+        assert binary_part(bg, idx * chain_stride, chain_stride) == sg, "grad, instance #{idx}"
+        assert binary_part(bl, idx * logp_stride, logp_stride) == sl, "logp, instance #{idx}"
+      end
+    end
+
+    test "instances do not bleed into each other" do
+      # Instance 0 gets inputs that would produce a very different trajectory
+      # from instance 1. If the `inst` offset were dropped anywhere, they would
+      # come back equal — which a size check cannot see.
+      d = 3
+      k = 4
+      spec = ChainShaderSpecsF64.batched(ChainShaderSpecsF64.normal(0.0, 1.0))
+      {:ok, spv} = Synthesis.compile(spec)
+
+      a = f64([2.0, 2.0, 2.0])
+      b = f64([-5.0, -5.0, -5.0])
+      zero = f64([0.0, 0.0, 0.0])
+      ones = f64([1.0, 1.0, 1.0])
+
+      assert {:ok, {q_chain, _, _, logp}} =
+               NativeV.leapfrog_chain_synth_batch_f64(
+                 a <> b,
+                 zero <> zero,
+                 ones <> ones,
+                 ChainShaderSpecsF64.batch_push(k, 0, d, 2, 0.05),
+                 k,
+                 spv
+               )
+
+      stride = k * d * 8
+      refute binary_part(q_chain, 0, stride) == binary_part(q_chain, stride, stride)
+      refute binary_part(logp, 0, k * 8) == binary_part(logp, k * 8, k * 8)
+    end
+
+    test "n_instances = 1 matches the single-instance path exactly" do
+      d = 5
+      k = 3
+      spec = ChainShaderSpecsF64.normal(0.0, 1.0)
+      {:ok, single_spv} = Synthesis.compile(spec)
+      {:ok, batch_spv} = Synthesis.compile(ChainShaderSpecsF64.batched(spec))
+      {q, p, m} = chain_inputs(d, 1)
+
+      {:ok, {sq, _, _, sl}} =
+        NativeV.leapfrog_chain_synth_f64(q, p, m, push(k, d, 0.01), k, single_spv)
+
+      {:ok, {bq, _, _, bl}} =
+        NativeV.leapfrog_chain_synth_batch_f64(
+          q,
+          p,
+          m,
+          ChainShaderSpecsF64.batch_push(k, 0, d, 1, 0.01),
+          k,
+          batch_spv
+        )
+
+      assert bq == sq
+      assert bl == sl
+    end
+  end
+
 end

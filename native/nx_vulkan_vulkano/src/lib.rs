@@ -388,6 +388,42 @@ fn parse_push_block_batch(bytes: &[u8]) -> Result<PushBlockBatch, &'static str> 
     })
 }
 
+/// f64 sibling of `PushBlockBatch`. Same 4 u32s, then an f64 `eps` at offset
+/// 16 — so 24 bytes rather than 20, exactly the relationship `PushBlockF64`
+/// has to `PushBlock`. `n_instances` occupies the slot the single-instance
+/// blocks use for `_pad`.
+#[derive(Clone, Copy, BufferContents)]
+#[repr(C)]
+struct PushBlockBatchF64 {
+    k_steps: u32,
+    n_obs: u32,
+    d: u32,
+    n_instances: u32,
+    eps: f64,
+}
+
+fn parse_push_block_batch_f64(bytes: &[u8]) -> Result<PushBlockBatchF64, &'static str> {
+    if bytes.len() < 24 {
+        return Err("push block (batch f64) must be >= 24 bytes");
+    }
+    let u32_at = |off: usize| {
+        u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+    };
+    let f64_at = |off: usize| {
+        f64::from_le_bytes([
+            bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3],
+            bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7],
+        ])
+    };
+    Ok(PushBlockBatchF64 {
+        k_steps: u32_at(0),
+        n_obs: u32_at(4),
+        d: u32_at(8),
+        n_instances: u32_at(12),
+        eps: f64_at(16),
+    })
+}
+
 fn parse_push_block_f64(bytes: &[u8]) -> Result<PushBlockF64, &'static str> {
     if bytes.len() < 24 {
         return Err("push block (f64) must be >= 24 bytes");
@@ -1596,6 +1632,191 @@ fn leapfrog_chain_synth_batch<'a>(
     // f32 = 4 bytes; per-instance chain: K * d * 4; total: n_instances * K * d * 4
     let chain_bytes = n_instances * (k as usize) * d * 4;
     let logp_bytes = n_instances * (k as usize) * 4;
+
+    let context = match ctx() {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok((atoms::error(), atoms::vulkan_init_failed(), e).encode(env));
+        }
+    };
+
+    let result = (|| -> Result<(Binary<'a>, Binary<'a>, Binary<'a>, Binary<'a>), String> {
+        let cached = get_or_create_pipeline(&spv_path, None)?;
+        let layout = cached.layout.clone();
+        let pipeline = cached.pipeline.clone();
+
+        // Staged, not blocking: the copies are recorded into this NIF's own
+        // command buffer below, ahead of the dispatch that reads them.
+        let q_staged = upload_buffer_staged(context, q_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let p_staged = upload_buffer_staged(context, p_init.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let extras_staged =
+            upload_buffer_staged(context, extras.as_slice(), BufferUsage::STORAGE_BUFFER)?;
+        let q_buf = q_staged.0.clone();
+        let p_buf = p_staged.0.clone();
+        let extras_buf = extras_staged.0.clone();
+
+        let q_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let p_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let grad_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            chain_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+        let logp_chain_buf = alloc_buffer(
+            context.mem_allocator.clone(),
+            logp_bytes,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        )?;
+
+        let set = PersistentDescriptorSet::new(
+            &context.set_allocator,
+            layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::buffer(0, q_buf.clone()),
+                WriteDescriptorSet::buffer(1, p_buf.clone()),
+                WriteDescriptorSet::buffer(2, extras_buf.clone()),
+                WriteDescriptorSet::buffer(3, q_chain_buf.clone()),
+                WriteDescriptorSet::buffer(4, p_chain_buf.clone()),
+                WriteDescriptorSet::buffer(5, grad_chain_buf.clone()),
+                WriteDescriptorSet::buffer(6, logp_chain_buf.clone()),
+            ],
+            [],
+        )
+        .map_err(|e| format!("descriptor set: {e}"))?;
+
+        let mut cmd = AutoCommandBufferBuilder::primary(
+            &context.cmd_allocator,
+            context.queue.queue_family_index(),
+            CommandBufferUsage::SimultaneousUse,
+        )
+        .map_err(|e| format!("cmd builder: {e}"))?;
+
+        record_upload(&mut cmd, &q_staged)?;
+        record_upload(&mut cmd, &p_staged)?;
+        record_upload(&mut cmd, &extras_staged)?;
+
+        // KEY DIFFERENCE vs single-instance: dispatch [n_instances, 1, 1]
+        // — each workgroup handles one instance, scaling compute with the
+        // batch size while dispatch overhead stays constant.
+        cmd.bind_pipeline_compute(pipeline.clone())
+            .map_err(|e| format!("bind pipeline: {e}"))?
+            .bind_descriptor_sets(PipelineBindPoint::Compute, layout.clone(), 0, set.clone())
+            .map_err(|e| format!("bind descriptor: {e}"))?
+            .push_constants(layout.clone(), 0, push_block)
+            .map_err(|e| format!("push_constants: {e}"))?
+            .dispatch([n_instances as u32, 1, 1])
+            .map_err(|e| format!("dispatch: {e}"))?;
+
+        // The readback rides THIS command buffer, after the dispatch: one
+        // submit-and-fence for the whole call instead of two.
+        let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
+        let stagings = record_readback(context, &mut cmd, &outs)?;
+
+        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+
+        let future = sync::now(context.device.clone())
+            .then_execute(context.queue.clone(), cmd_buf)
+            .map_err(|e| format!("then_execute: {e}"))?;
+
+        finish_and_disarm(context, future)?;
+
+        let mut chains = finish_readback(env, &outs, &stagings)?;
+        let logp_bin = chains.pop().expect("logp_chain");
+        let grad_bin = chains.pop().expect("grad_chain");
+        let p_bin = chains.pop().expect("p_chain");
+        let q_bin = chains.pop().expect("q_chain");
+
+        Ok((q_bin, p_bin, grad_bin, logp_bin))
+    })();
+
+    match result {
+        Ok((q_bin, p_bin, g_bin, l_bin)) => {
+            Ok((atoms::ok(), (q_bin, p_bin, g_bin, l_bin)).encode(env))
+        }
+        Err(msg) => Ok((atoms::error(), atoms::dispatch_failed(), msg).encode(env)),
+    }
+}
+
+/// f64 batched leapfrog chain: N independent chains in ONE submission.
+///
+/// Why this exists. Measured on mac-248 at the operating point exmc actually
+/// runs — d=4, K<=16 — a chain dispatch is 91.3 us of fixed cost against
+/// 2.5 us per leapfrog step, so **86% of the call is intercept**. Four chains
+/// dispatched separately pay four intercepts; batched they pay one.
+///
+///     4 chains serial     4 x (91.3 + 2.5*6)      = 424.7 us
+///     4 chains batched    91.3 + 2.5*7 (padded)   = 108.7 us   ~3.9x
+///
+/// NUTS trajectories double until a per-chain U-turn, so the chains rarely
+/// agree on depth — exmc measured all four agreeing on only 16% of draws, and
+/// padding to the deepest wastes 31.6% of the STEPS. That waste is nearly free
+/// because it lands on the 2.5 us/step term, which is 14% of the call. 31.6%
+/// of 14% is not what decides this; three intercepts is.
+///
+/// The dispatch is `[n_instances, 1, 1]`, one workgroup per chain, so
+/// `shared partial[256]` and every barrier stay per-instance and the padded
+/// chains cost wall time only to the extent the GPU cannot run the workgroups
+/// concurrently. At d=4 a single-instance dispatch occupies 4 of 256 threads,
+/// so there is a great deal of room.
+///
+/// Shader comes from `ShaderTemplate` with `batched: true` — the SAME skeleton
+/// as the single-instance path, with only the indexing offset by `inst`. Not a
+/// second template, deliberately: see the moduledoc for what skeleton drift
+/// cost this project last time.
+#[rustler::nif(schedule = "DirtyIo")]
+fn leapfrog_chain_synth_batch_f64<'a>(
+    env: Env<'a>,
+    q_init: Binary<'a>,
+    p_init: Binary<'a>,
+    extras: Binary<'a>,
+    push: Binary<'a>,
+    k: u32,
+    spv_path: String,
+) -> NifResult<Term<'a>> {
+    if q_init.len() != p_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+    if k == 0 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+    // Same 128-byte push bound as leapfrog_chain_synth; see the note there for
+    // what it actually protects and why it is not a width limit.
+    if push.len() == 0 || push.len() > 128 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    let push_block = match parse_push_block_batch_f64(push.as_slice()) {
+        Ok(p) => p,
+        Err(_) => return Ok((atoms::error(), atoms::bad_input()).encode(env)),
+    };
+
+    let d = push_block.d as usize;
+    let n_instances = push_block.n_instances as usize;
+    if n_instances == 0 {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    // Same guard as the single-instance NIFs; see the layout table there.
+    if d == 0 || n_instances.saturating_mul(d).saturating_mul(8) > q_init.len() {
+        return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
+    }
+
+    // See CHAIN_MAX_D: past 256 the chains get an undefined tail and the
+    // logp reduce silently sums only the first 256 elements.
+    if d > CHAIN_MAX_D {
+        return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+    // f64 = 8 bytes; per-instance chain: K * d * 8; total: n_instances * K * d * 8
+    let chain_bytes = n_instances * (k as usize) * d * 8;
+    let logp_bytes = n_instances * (k as usize) * 8;
 
     let context = match ctx() {
         Ok(c) => c,
