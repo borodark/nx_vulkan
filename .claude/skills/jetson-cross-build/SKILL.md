@@ -140,23 +140,47 @@ Rustler rebuilds the NIF on the next `mix compile` and silently replaces the
 copy. A green suite that used a natively rebuilt `.so` proves nothing about the
 cross artifact.
 
-`skip_compilation?` is not needed. **Run with `--no-compile`**, which is sound
-whenever no Elixir source changed since the box's last build — check with:
+Two cases, and the second used to be a dead end.
+
+**Rust-only commit — use `--no-compile`.** Sound whenever no Elixir source
+changed since the box's last build:
 
     git diff --name-only <box_HEAD> <target_commit> | grep -E "^(lib|test)/"
 
-**If that is NOT empty, this whole skill buys you nothing for that commit.** The
-box needs a real `mix compile` for the Elixir side, which triggers Rustler,
-which builds the crate natively anyway — so the cross artifact saves no time and
-you should just let the box build. Speed is the only thing this skill offers;
-it applies to **Rust-only commits**, which is the common case for a NIF change
-but not for a mixed one.
+Empty means `_build` is current and only the NIF differs.
 
-Do not be tempted to run `--no-compile` anyway to keep the fast path. Seven
-changed Elixir sources with a stale `_build` will run the OLD tests against the
-OLD lib and report green, which is a worse outcome than a slow build. Verified
-the hard way on 2026-08-31: the guard cost ~25 minutes and prevented exactly
-that.
+**Mixed Elixir+Rust commit — use `NXV_SKIP_NIF_BUILD=1`.** The box needs a real
+`mix compile` for the Elixir side, and that normally triggers Rustler, which
+rebuilds the crate natively and overwrites the artifact you just shipped. This
+section used to say the skill therefore "buys you nothing" for such commits.
+That was wrong: `config/config.exs` now sets Rustler's `skip_compilation?` when
+that variable is set, so the Elixir side compiles and `priv/native` is left
+alone.
+
+    NXV_SKIP_NIF_BUILD=1 mix compile        # Elixir only, .so untouched
+    NXV_SKIP_NIF_BUILD=1 mix test
+
+It prints a warning to stderr when active, because a stale or wrong-architecture
+`.so` under this flag gives a green suite that says nothing about the code you
+just compiled.
+
+Do not run plain `--no-compile` on a mixed commit to keep the fast path. Seven
+changed Elixir sources against a stale `_build` will run the OLD tests against
+the OLD lib and report green.
+
+### `mix compile` does not necessarily refresh `priv/native`
+
+Found 2026-09-02 and it applies to EVERY workflow here, not just this skill.
+Replacing `priv/native/libnx_vulkan_vulkano.so` with 25 bytes of text and
+running a plain `mix compile` — no flags, an Elixir source touched — left the
+corrupted file in place and produced 1622 test failures. Cargo saw no change to
+the Rust sources, reported the crate up to date, and Rustler never re-copied.
+
+So **a swapped, stale or wrong-architecture `.so` is not fixed by recompiling.**
+To force it, touch a Rust source or remove the crate's `target/` directory. This
+is why the checksum discipline below is not optional and is not specific to the
+skip flag: a benchmark `.so` swap left behind on another checkout will survive
+an ordinary rebuild and silently misattribute every result after it.
 
 **Checksum before AND after the run.** That is the only proof the artifact under
 test is the one that executed:
