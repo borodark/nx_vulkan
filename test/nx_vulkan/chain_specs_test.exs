@@ -170,4 +170,117 @@ defmodule Nx.Vulkan.ChainSpecsTest do
       assert String.ends_with?(PipelineCache.default_path(), "/pipeline_cache/vulkano.bin")
     end
   end
+  describe "f32 batched chains" do
+    @moduletag :gpu
+
+    # `leapfrog_chain_synth_batch/6` has existed since Task #154 with NO shader
+    # in this repo to drive it — the batched template it was written against
+    # lives downstream. So the NIF shipped, was never exercised here, and could
+    # not have been: exactly the condition that let the chain push-block layout
+    # mismatch survive for months without anything contradicting it.
+    #
+    # `ShaderTemplate` now renders batched f32, so it is driveable and these are
+    # the first tests it has ever had.
+    defp f32(list), do: for(v <- list, into: <<>>, do: <<v::float-32-little>>)
+
+    defp f32_chain(d, c) do
+      {f32(for i <- 1..d, do: (c * 10 + i) / 100.0), f32(for i <- 1..d, do: (c - i) / 50.0),
+       f32(for _ <- 1..d, do: 1.0)}
+    end
+
+    test "every f32 family batches identically to its single dispatch" do
+      d = 3
+      k = 5
+      ni = 3
+      eps = 0.01
+
+      families = [
+        Specs.beta(2.0, 5.0, 1.7047480922384253),
+        Specs.gamma(3.0, 2.0, 0.9),
+        Specs.lognormal(0.0, 1.0)
+      ]
+
+      for spec <- families do
+        {:ok, single_spv} = Nx.Vulkan.Synthesis.compile(spec)
+        {:ok, batch_spv} = Nx.Vulkan.Synthesis.compile(Specs.batched(spec))
+
+        chains = for c <- 1..ni, do: f32_chain(d, c)
+
+        singles =
+          for {q, p, m} <- chains do
+            {:ok, r} =
+              Nx.Vulkan.NativeV.leapfrog_chain_synth(
+                q, p, m, Specs.push(k, 0, d, eps), k, single_spv
+              )
+
+            r
+          end
+
+        join = fn idx -> chains |> Enum.map(&elem(&1, idx)) |> Enum.join() end
+
+        assert {:ok, {bq, bp, bg, bl}} =
+                 Nx.Vulkan.NativeV.leapfrog_chain_synth_batch(
+                   join.(0),
+                   join.(1),
+                   join.(2),
+                   Specs.batch_push(k, 0, d, ni, eps),
+                   k,
+                   batch_spv
+                 ),
+               "#{spec.name} failed to dispatch batched"
+
+        assert byte_size(bq) == ni * k * d * 4
+        assert byte_size(bl) == ni * k * 4
+
+        cs = k * d * 4
+        ls = k * 4
+
+        for {{sq, sp, sg, sl}, i} <- Enum.with_index(singles) do
+          assert binary_part(bq, i * cs, cs) == sq, "#{spec.name} q_chain, instance #{i}"
+          assert binary_part(bp, i * cs, cs) == sp, "#{spec.name} p_chain, instance #{i}"
+          assert binary_part(bg, i * cs, cs) == sg, "#{spec.name} grad_chain, instance #{i}"
+          assert binary_part(bl, i * ls, ls) == sl, "#{spec.name} logp_chain, instance #{i}"
+        end
+      end
+    end
+
+    test "instances do not bleed, and n_instances = 1 matches the single path" do
+      d = 2
+      k = 4
+      eps = 0.02
+      spec = Specs.beta(2.0, 5.0, 1.7047480922384253)
+      {:ok, single_spv} = Nx.Vulkan.Synthesis.compile(spec)
+      {:ok, batch_spv} = Nx.Vulkan.Synthesis.compile(Specs.batched(spec))
+
+      a = f32([1.5, 1.5])
+      b = f32([-2.5, -2.5])
+      zero = f32([0.0, 0.0])
+      one = f32([1.0, 1.0])
+
+      {:ok, {q2, _, _, l2}} =
+        Nx.Vulkan.NativeV.leapfrog_chain_synth_batch(
+          a <> b, zero <> zero, one <> one, Specs.batch_push(k, 0, d, 2, eps), k, batch_spv
+        )
+
+      stride = k * d * 4
+      refute binary_part(q2, 0, stride) == binary_part(q2, stride, stride)
+      refute binary_part(l2, 0, k * 4) == binary_part(l2, k * 4, k * 4)
+
+      # n_instances = 1 through the BATCHED shader must equal the
+      # single-instance shader exactly. (An earlier version of this test
+      # dispatched the single path twice and asserted it equalled itself, which
+      # is true of any implementation whatsoever.)
+      {:ok, {sq, _, _, sl}} =
+        Nx.Vulkan.NativeV.leapfrog_chain_synth(a, zero, one, Specs.push(k, 0, d, eps), k, single_spv)
+
+      {:ok, {b1q, _, _, b1l}} =
+        Nx.Vulkan.NativeV.leapfrog_chain_synth_batch(
+          a, zero, one, Specs.batch_push(k, 0, d, 1, eps), k, batch_spv
+        )
+
+      assert b1q == sq
+      assert b1l == sl
+    end
+  end
+
 end

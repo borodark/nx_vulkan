@@ -171,6 +171,60 @@ defmodule Nx.Vulkan.ChainF64Test do
        f64(for _ <- 1..d, do: 1.0)}
     end
 
+    test "EVERY family batches identically to its single dispatch" do
+      # Only Normal was covered before. Weibull is the one that matters most:
+      # it is the sole family with `helpers` — GLSL functions emitted before
+      # main() — and nothing had checked that they behave under `inst`-offset
+      # indexing. They take q_uc as a parameter so they should be index-blind,
+      # but "should be" is what this test replaces.
+      d = 3
+      k = 5
+      ni = 3
+      eps = 0.01
+
+      for spec <- ChainShaderSpecsF64.all() do
+        {:ok, single_spv} = Synthesis.compile(spec)
+        {:ok, batch_spv} = Synthesis.compile(ChainShaderSpecsF64.batched(spec))
+
+        chains = for c <- 1..ni, do: chain_inputs(d, c)
+
+        singles =
+          for {q, p, m} <- chains do
+            {:ok, r} = NativeV.leapfrog_chain_synth_f64(q, p, m, push(k, d, eps), k, single_spv)
+            r
+          end
+
+        join = fn idx -> chains |> Enum.map(&elem(&1, idx)) |> Enum.join() end
+
+        assert {:ok, {bq, bp, bg, bl}} =
+                 NativeV.leapfrog_chain_synth_batch_f64(
+                   join.(0),
+                   join.(1),
+                   join.(2),
+                   ChainShaderSpecsF64.batch_push(k, 0, d, ni, eps),
+                   k,
+                   batch_spv
+                 ),
+               "#{spec.name} failed to dispatch batched"
+
+        cs = k * d * 8
+        ls = k * 8
+
+        for {{sq, sp, sg, sl}, i} <- Enum.with_index(singles) do
+          assert binary_part(bq, i * cs, cs) == sq, "#{spec.name} q_chain, instance #{i}"
+          assert binary_part(bp, i * cs, cs) == sp, "#{spec.name} p_chain, instance #{i}"
+          assert binary_part(bg, i * cs, cs) == sg, "#{spec.name} grad_chain, instance #{i}"
+          assert binary_part(bl, i * ls, ls) == sl, "#{spec.name} logp_chain, instance #{i}"
+        end
+
+        # and nothing is silently NaN, which bit-identity alone would not catch
+        # if BOTH paths produced NaN
+        for v <- doubles(bq) ++ doubles(bl) do
+          assert v == v, "#{spec.name} produced NaN under batching"
+        end
+      end
+    end
+
     test "each instance is bit-identical to its own single dispatch" do
       d = 4
       k = 6

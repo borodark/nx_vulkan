@@ -150,4 +150,28 @@ defmodule Nx.Vulkan.ChainShaderSpecs do
     <<k::little-32, n_obs::little-32, d::little-32, 0::little-32, eps::little-float-32>>
   end
 
+  @doc """
+  Turn an f32 family spec into its BATCHED form: one workgroup per instance,
+  indices offset by `inst`. Same skeleton as the single-instance shader.
+
+  `Nx.Vulkan.NativeV.leapfrog_chain_synth_batch/6` has existed since Task #154
+  with **no shader in this repo to drive it** — the batched template it names
+  lives downstream in exmc. So the NIF could not be exercised here at all, which
+  is the same condition that let the chain push-block layout mismatch survive
+  unnoticed for months. This closes it.
+  """
+  def batched(%FamilySpec{} = spec), do: %{spec | name: spec.name <> "_batch", batched: true}
+
+  @doc """
+  The f32 batched push header: `{k_steps, n_obs, d, n_instances, eps}`, 20 bytes
+  with `eps` an f32 at offset 16 — matching `PushBlockBatch` in the NIF.
+
+  `n_instances` sits where the single-instance block keeps `_pad`.
+  """
+  def batch_push(k, n_obs, d, n_instances, eps)
+      when is_integer(k) and is_integer(n_obs) and is_integer(d) and is_integer(n_instances) do
+    <<k::little-32, n_obs::little-32, d::little-32, n_instances::little-32,
+      eps::little-float-32>>
+  end
+
 end
