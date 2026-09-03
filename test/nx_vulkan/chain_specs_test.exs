@@ -171,7 +171,11 @@ defmodule Nx.Vulkan.ChainSpecsTest do
     end
   end
   describe "f32 batched chains" do
-    @moduletag :gpu
+    # NOT @moduletag — that tags the whole module, and most of this file is
+    # pure push-constant layout assertions that need no device. A future
+    # `--exclude gpu` would have silently skipped them, which is the quietest
+    # possible way to lose coverage.
+    @describetag :gpu
 
     # `leapfrog_chain_synth_batch/6` has existed since Task #154 with NO shader
     # in this repo to drive it — the batched template it was written against
