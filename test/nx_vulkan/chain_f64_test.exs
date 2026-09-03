@@ -19,7 +19,30 @@ defmodule Nx.Vulkan.ChainF64Test do
   defp push(k, d, eps),
     do: <<k::little-32, 0::little-32, d::little-32, 0::little-32, eps::little-float-64>>
 
-  defp doubles(bin), do: for(<<v::float-64-little <- bin>>, do: v)
+  # Decode, and REFUSE to lose elements while doing it.
+  #
+  # `for <<v::float-64-little <- bin>>` does not raise on a NaN or Infinity bit
+  # pattern — it silently SKIPS the segment and returns a shorter list. So the
+  # obvious `for v <- doubles(bin), do: assert v == v` NaN guard is vacuous: a
+  # NaN removes itself from the list before the assertion ever sees it, and the
+  # surviving finite values all pass. Verified:
+  #
+  #     <<0,0,0,0,0,0,240,127>> (+inf) -> []
+  #     <<1,0,0,0,0,0,240,127>> (NaN)  -> []
+  #     <<0,0,0,0,0,0,248,63>>  (1.5)  -> [1.5]
+  #
+  # Checking the arity is what actually catches it, so this does that and every
+  # caller inherits the guard.
+  defp doubles(bin) do
+    vals = for <<v::float-64-little <- bin>>, do: v
+    expected = div(byte_size(bin), 8)
+
+    assert length(vals) == expected,
+           "decoded #{length(vals)} of #{expected} doubles — the missing ones are " <>
+             "NaN or Infinity, which the binary comprehension drops silently"
+
+    vals
+  end
 
   describe "every family" do
     test "renders with no un-baked parameter and compiles to SPIR-V" do
