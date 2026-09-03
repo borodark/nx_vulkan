@@ -1619,6 +1619,27 @@ fn leapfrog_chain_synth_batch<'a>(
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
     }
 
+    // One workgroup per instance, so n_instances is a workgroup COUNT and the
+    // device's limit applies. Queried rather than hardcoded: Vulkan guarantees
+    // only 65535 in x, and the Keplers may report exactly that, while this
+    // RTX 3060 Ti reports far more — 70000 instances compute correctly there,
+    // with no clamping and no zeroed tail. Hardcoding 65535 would refuse work
+    // that runs; ignoring the limit risks a silent clamp on the boxes that have
+    // it, which is the d > 256 failure again in a different field.
+    {
+        let max_groups = ctx()
+            .map(|c| {
+                c.device
+                    .physical_device()
+                    .properties()
+                    .max_compute_work_group_count[0] as usize
+            })
+            .unwrap_or(65535);
+        if n_instances > max_groups {
+            return Ok((atoms::error(), atoms::bad_input()).encode(env));
+        }
+    }
+
     // Same guard as the single-instance NIFs; see the layout table there.
     if d == 0 || n_instances.saturating_mul(d).saturating_mul(4) > q_init.len() {
         return Ok((atoms::error(), atoms::size_mismatch()).encode(env));
@@ -1802,6 +1823,27 @@ fn leapfrog_chain_synth_batch_f64<'a>(
     let n_instances = push_block.n_instances as usize;
     if n_instances == 0 {
         return Ok((atoms::error(), atoms::bad_input()).encode(env));
+    }
+
+    // One workgroup per instance, so n_instances is a workgroup COUNT and the
+    // device's limit applies. Queried rather than hardcoded: Vulkan guarantees
+    // only 65535 in x, and the Keplers may report exactly that, while this
+    // RTX 3060 Ti reports far more — 70000 instances compute correctly there,
+    // with no clamping and no zeroed tail. Hardcoding 65535 would refuse work
+    // that runs; ignoring the limit risks a silent clamp on the boxes that have
+    // it, which is the d > 256 failure again in a different field.
+    {
+        let max_groups = ctx()
+            .map(|c| {
+                c.device
+                    .physical_device()
+                    .properties()
+                    .max_compute_work_group_count[0] as usize
+            })
+            .unwrap_or(65535);
+        if n_instances > max_groups {
+            return Ok((atoms::error(), atoms::bad_input()).encode(env));
+        }
     }
 
     // Same guard as the single-instance NIFs; see the layout table there.
