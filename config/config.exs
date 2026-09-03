@@ -21,8 +21,18 @@ import Config
 # priv/native/libnx_vulkan_vulkano.so before and after. The skill documents the
 # procedure; this comment exists so the trap is visible from the config too.
 if System.get_env("NXV_SKIP_NIF_BUILD") == "1" do
-  IO.puts(:stderr, "[nx_vulkan] NXV_SKIP_NIF_BUILD=1 — Rustler will NOT build the crate; " <>
-                     "priv/native/*.so is used as-is. Checksum it.")
+  IO.puts(:stderr, """
+  [nx_vulkan] NXV_SKIP_NIF_BUILD=1 — Rustler will NOT build the crate;
+              priv/native/*.so is used as-is. CHECKSUM IT.
+
+              This is Application.compile_env, so the value is BAKED INTO the
+              compiled module and Elixir refuses to boot when the runtime value
+              differs. Set this variable for `mix compile` AND every `mix run`
+              or `mix test` after it. To go back to normal builds, unset it and
+              force a recompile of the NIF module — deleting
+              _build/<env>/lib/nx_vulkan/ebin/Elixir.Nx.Vulkan.NativeV.beam is
+              enough; a plain `mix compile` will NOT clear it.
+  """)
 
   config :nx_vulkan, Nx.Vulkan.NativeV, skip_compilation?: true
 end

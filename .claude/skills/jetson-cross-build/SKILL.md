@@ -164,6 +164,23 @@ It prints a warning to stderr when active, because a stale or wrong-architecture
 `.so` under this flag gives a green suite that says nothing about the code you
 just compiled.
 
+**The flag is sticky, and this bit me within the hour.** Rustler reads it via
+`Application.compile_env`, so the value is baked into the compiled module and
+Elixir refuses to boot when the runtime value differs:
+
+    ** (Mix) the application :nx_vulkan has a different value set for key
+       Nx.Vulkan.NativeV during runtime compared to compile time.
+       Compile time value was set to: [skip_compilation?: true]
+       Runtime value was not set
+
+So set it for `mix compile` AND for every `mix run` / `mix test` afterwards —
+which is why both lines above carry it. To return to ordinary builds, unset it
+and force the NIF module to recompile: **a plain `mix compile` will not clear
+it**, but deleting
+`_build/<env>/lib/nx_vulkan/ebin/Elixir.Nx.Vulkan.NativeV.beam` will. Note the
+shape — the same "a rebuild does not necessarily rebuild" problem as the
+`.so` section below, one layer up.
+
 Do not run plain `--no-compile` on a mixed commit to keep the fast path. Seven
 changed Elixir sources against a stale `_build` will run the OLD tests against
 the OLD lib and report green.
