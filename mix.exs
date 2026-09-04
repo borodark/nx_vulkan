@@ -59,6 +59,17 @@ defmodule Nx.Vulkan.MixProject do
       extras: [
         "README.md",
         "WHY.md",
+        # The README is a front door now; these are where its content went.
+        # Each was checked for cascade before adding — outbound links either
+        # land on another extra or were rewritten to absolute GitHub URLs.
+        "docs/CAPABILITIES.md",
+        "docs/STANDING.md",
+        "docs/BENCHMARKS.md",
+        "docs/FLEET.md",
+        "docs/STRICT_MODE.md",
+        "docs/BUILDING.md",
+        "docs/PROPERTY_TESTING.md",
+        "docs/BACKWARD_PASS_AUDIT.md",
         # Ships because §1 documents a real precision limit a user cannot
         # otherwise discover: f64 exp/log/tanh/sigmoid compute at f32 precision
         # on the device. Checked for cascade before adding — its only outbound
@@ -198,6 +209,13 @@ defmodule Nx.Vulkan.MixProject do
           native/nx_vulkan_vulkano/src
           priv/shaders
           LIMITATIONS.md
+          docs/CAPABILITIES.md
+          docs/STANDING.md
+          docs/BENCHMARKS.md
+          docs/FLEET.md
+          docs/STRICT_MODE.md
+          docs/BUILDING.md
+          docs/PROPERTY_TESTING.md
           docs/BACKWARD_PASS_AUDIT.md
           docs/BACKEND_VERIFICATION_GAP.md
           docs/PARITY_STATUS.md

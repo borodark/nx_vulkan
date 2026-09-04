@@ -69,7 +69,7 @@ Neither reference backend has a blanket silent fallback (EXLA touches
 `BinaryBackend` in 3 places; Torchx raises), so nobody upstream has this bug
 class — and a shared conformance kit that only checked *values* would not have
 caught it either. Detail in
-[`BACKEND_VERIFICATION_GAP.md`](BACKEND_VERIFICATION_GAP.md).
+[`BACKEND_VERIFICATION_GAP.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/BACKEND_VERIFICATION_GAP.md).
 
 **The durable fix is `Nx.Vulkan.Fallback`** — count fallbacks, assert zero. It
 found instances 3–8 in minutes each, against a day of measurement and source
@@ -203,7 +203,7 @@ prints its loss and is excluded from ratios if it is not a number.
 
 Ordered by expected value, with the evidence each rests on. These are tracked as
 actionable items — with a "done when" and a risk for each — in
-[`PLAN_AFTER_BACKWARD_PASS.md`](../PLAN_AFTER_BACKWARD_PASS.md).
+[`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md).
 
 ### 8.1 Cut dispatch overhead (§4 says this is the gap)
 
