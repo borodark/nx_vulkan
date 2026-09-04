@@ -1,13 +1,23 @@
 # Next session — state, what is blocked, what is open
 
-**HEAD `d210601`**, pushed to `origin` (private). Nothing pushed to `upstream`.
-Working tree clean. Rewritten 2026-09-01 after a long session on super-io with
-the exmc session working the same problem from the consumer side.
+**HEAD `a29246f`**, pushed to `origin` (private). Nothing pushed to `upstream`.
+Working tree clean. Rewritten 2026-09-04.
 
-**Verified:** 833 doctests / 882 tests / 0 failures on super-io, and the same
-under `sh scripts/strict_test.sh` (163 excluded). Residency 755/833 (90.6%),
-unchanged. The Jetson passed 833/876/0 at `15abc96`; it has NOT run anything
-since.
+**Verified on all four boxes at `a29246f`** — full suite, the property file
+alone, and `sh scripts/strict_test.sh`:
+
+    box                   suite    properties   strict
+    super-io  Ampere      18.2s      1.1s       0 failures
+    jetson    Tegra X1    41.7s      5.9s       0 failures
+    mac-247   GT 650M     14.8s      3.6s       0 failures
+    mac-248   GT 750M     10.7s      1.5s       0 failures
+
+833 doctests, 903 tests, 0 failures everywhere; 163 excluded under strict.
+Residency 755/833 (90.6%).
+
+Note both 2012 Keplers run the suite FASTER than the modern Ampere desktop.
+That is not a curiosity, it is the host-selection finding below showing up in
+wall clock.
 
 ---
 
@@ -15,218 +25,182 @@ since.
 
 **The goal is helping eXMC.** It is the only real consumer, it is **f64**, and
 its cost is per-dispatch. Work that does not reduce per-dispatch cost on the f64
-chain path is worth less than it looks — this session spent a stretch adding f32
-transcendentals before that was said out loud, and they help nobody today.
-
-eXMC's own decomposition of a chain dispatch, on the Jetson at MAXN:
-
-    ~1.2 ms   GPU executing
-    ~1.0 ms   CPU inside the NIF call     <- ours, and this session attacked it
-    ~1.9 ms   CPU in their NUTS tree logic <- theirs, and now the largest term
-    ------
-     4.1 ms   wall, GPU busy ~29% of a sampling run
+chain path is worth less than it looks — an earlier session spent a stretch
+adding f32 transcendentals before that was said out loud, and they help nobody
+today.
 
 ---
 
-## Blocked on the exmc session — do not re-derive these here
+## Blocked on the exmc session
 
-**MEASURED ON mac-248 (2026-09-02). Both real, both smaller than super-io
-said.** Three arms, four rounds, order rotated each round, N=3000/sample,
-6000-dispatch warmup, d=13 K=32, `.so` swap with `--no-compile`:
+**The batched f64 chain path is built, correct on both memory architectures,
+measured — and unreachable from their DEFAULT path.** Their vectorized sampler
+(`sampler.ex:1256`) runs chains sequentially, `Enum.map` over chain states, so
+there is never a moment when four chains want a leapfrog together. Nothing to
+batch.
 
-    f4c00f4  before the fold   209.6 210.7 210.9 209.3   median 210.2 us
-    8cd19ee  fence fold        172.1 172.1 171.8 171.9   median 172.0 us
-    d210601  + buffer pool     169.5 170.8 169.5 170.0   median 169.8 us
+The route that exists: their non-vectorized path (`sampler.ex:119`) drives
+chains through `Task.async_stream`, so they arrive concurrently, and their
+`BatchCoordinator` was built to coalesce exactly that — inert since written
+because nothing ever set `:exmc_chain_coord`.
 
-Spreads 0.1-0.6%. All three arms completely non-overlapping.
+**One fix is theirs and is written down on their side:** the coordinator's
+partition key is `{phash2(meta), k, eps}`. **K is in the key**, so it refuses to
+batch chains of differing depth — full batching on 16% of draws and singletons
+on the other 84%, against their own histogram. Dropping `k` and padding at flush
+is correct, and safe because of the prefix property pinned in `cccbd71`.
 
-    fence fold   210.2 -> 172.0   -38.2 us   -18.2%
-    buffer pool  172.0 -> 169.8    -2.2 us    -1.3%
-    combined     210.2 -> 169.8   -40.4 us   -19.2%
-
-**Both super-io figures were inflated — the fold by 2x (-36% claimed), the pool
-by 13x (-17% claimed).** The pool was labelled "not significant here", which was
-right, but the number was badly wrong too. A ~900 us noise band does not merely
-fail to resolve a small effect; it manufactures a large one. Treat every
-super-io per-dispatch delta in this document as an upper bound.
-
-**The buffer pool is real but marginal.** 2.2 us for a global mutex, a
-size-keyed cache, retained buffers and a contamination hazard needing two
-dedicated tests. Kept because it is written, tested and harmless — but it should
-be the first thing dropped if it ever complicates something.
-
-Cumulative on 248, chaining the exmc session's earlier arms with these:
-
-    ab2e779              365 us
-    096d7bd fast OFF     238 us   8cce91c, four readback fences -> one   -35%
-    096d7bd fast ON      224 us   b59c4a7, small-upload fast path         -6%
-    f4c00f4              210 us
-    8cd19ee              172 us   fence fold                            -18%
-    d210601              170 us   buffer pool                            -1.3%
-
-**365 -> 170 us, about -53% per chain dispatch.**
-
-Note the arms could not be the ones originally proposed (096d7bd / 8cd19ee /
-d210601): 096d7bd predates `13619fd`, so `ChainShaderSpecsF64` does not exist
-there and the chain path is not driveable from this repo at that commit.
-`f4c00f4` is the commit immediately before the fold that has it.
+**The batching contract, so their key is right:** same shader (identical priors,
+since parameters are baked), same `d`, K may differ (pad to deepest — nearly
+free), inputs instance-major, `n_instances` bounded by the device workgroup
+limit.
 
 ---
 
-## What changed this session, in one place
+## What is measured, and on which box
 
-**The chain path can be driven from this repo for the first time** (`15abc96`,
-`13619fd`). It never could before: the NIF pushes a fixed 20/24-byte struct, so
-family parameters declared inline in `ShaderTemplate` were silently dropped, and
-the header disagreed besides. Parameters are now baked into the generated GLSL
-as literals — the design eXMC arrived at independently, verified in their
-SPIR-V. All six f64 families ported (`ChainShaderSpecsF64`); the Normal chain
-reproduces a host leapfrog **bit-exact**, `max |GPU - host| = 0.0`. The six
-hand-written `glsl/leapfrog_chain_*_f64.comp` and their `.spv` were deleted
-(`8006a4d`) — a baked shader is parameter-specific, so there was no static
-artifact to replace them with.
+Everything per-dispatch below is **mac-248, headless**. super-io is a desktop
+compositing Firefox on the same GPU: a ~900 us noise band that does not merely
+fail to resolve small effects but **manufactures large ones**. It reported the
+buffer pool at 17% when the truth was 1.3%, and the fence fold at 36% when the
+truth was 18.2%.
 
-That is why this matters beyond tidiness: **a repo cannot benchmark a path it
-cannot drive**, which is why `8cce91c` had to be measured downstream.
+Chain dispatch cost, cumulative:
 
-**Per-dispatch fixed cost, measured by sweeping K and separating the intercept**
-(d=13, super-io):
+    ab2e779           365 us
+    096d7bd fast OFF  238 us   8cce91c four readback fences -> one   -35%
+    096d7bd fast ON   224 us   b59c4a7 small-upload fast path         -6%
+    f4c00f4           210 us
+    8cd19ee           172 us   fence fold, readback rides dispatch   -18.2%
+    d210601           170 us   buffer pool                            -1.3%  REVERTED
 
-    before this session   296.8 us fixed vs 278.5 us GPU at K=32  -> 51.6% overhead
-    after 8cd19ee         225.5 us fixed
-    after d210601         ~199 us fixed (not significant here)
+**365 -> 170 us, about -53% per chain dispatch.** Both large wins are
+readback-side, which the `3*K*d*8` down against `2*d*8` up asymmetry predicted.
 
-**`buf_upload` had `alloc_buffer`'s heap bug** (`d7b5f08`). Presents as a cliff
-on cumulative BAR1 pressure, not a constant tax: BAR1 saturates at 229 MiB and
-throughput falls **5.5x at constant buffer size**. Invisible to tests — values
-are bit-identical, the tensor genuinely is resident, only the heap is wrong.
-`ab2e779` repaired the regression that fix introduced.
+**The buffer pool was reverted (`190bf67`).** Worth 2.2 us at concurrency one
+and NOTHING at M >= 2 — both arms plateau at ~7350 dispatches/s from M=2, because
+every dispatch does `submit_and_wait` on a single queue and the queue saturates
+at two callers. It optimised something off the critical path in the regime the
+only consumer runs.
 
-**We were deleting eXMC's shader cache** (`b024ad1`). `Synthesis.clear_cache/0`
-is `File.rm_rf` and both projects used `~/.exmc/gpu_node/spv`;
-`synthesis_test.exs` calls it in `setup` AND `on_exit`, so every `mix test` here
-wiped it. Broke their in-flight suite twice in one 20-minute window. Both caches
-moved under `~/.nx_vulkan/`, verified with sentinel files.
+**That ~7350/s ceiling is a fact about this path.** exmc's sampling run does
+244/s — **3% of it**. Concurrency is not their lever; dispatch COUNT is, which
+is what the batched path attacks.
+
+At their operating point (d=4, K<=16, measured on 248): **intercept 91.3 us
+against slope 2.5 us/step, so 86% of a dispatch is fixed cost.** Hence batching:
+
+    4 chains serial     4 x (91.3 + 2.5*6)     = 424.7 us
+    4 chains batched    91.3 + 2.5*7 (padded)  = 108.7 us
+
+Measured at their depth histogram: **3.4-4.3x**, and batched cost is FLAT in
+chain count (119 us at 2 instances, 111 at 4, 119 at 8) — the GPU runs the
+workgroups concurrently, so 8 chains would be 9.6x. At d=4 a single-instance
+dispatch occupies 4 of 256 threads; there is a great deal of room.
+
+**What this does NOT touch:** their host-side tree logic, which stays per-chain.
+The wall-time fraction is **unknown** — both estimates of it (1.9 ms, then
+68-80%) were withdrawn by their author, the second after producing physically
+impossible negative values.
 
 ---
 
 ## Open items, ranked by value to eXMC
 
-### 1. The ~1.9 ms in NUTS tree logic — theirs, and now the largest term
+### 1. The host-side NUTS cost — theirs
 
-Handed over with a method rather than a guess: measure the split rather than
-subtract it; establish whether it is per-dispatch or per-DRAW (a NUTS trajectory
-doubles until a U-turn, so tree logic runs O(2^depth) per draw while dispatches
-run per step); census what the tree does with the `3*K*d*8` bytes it gets back;
-and check for per-step `:binary.part/3` or list conversion, which looks like GPU
-work until a K-sweep separates it.
+Handed over with a method: measure the split rather than subtract it; establish
+whether it is per-dispatch or per-DRAW (trajectories double until a U-turn, so
+tree logic runs O(2^depth) per draw while dispatches run per step); census what
+the tree does with the `3*K*d*8` bytes it gets back; check for per-step
+`:binary.part/3` or list conversion, which looks like GPU work until a K-sweep
+separates it.
 
-If it turns out irreducible, the GPU is starved **by design** at their model
-sizes and the lever moves to batching draws rather than making dispatches
-cheaper. That is a conclusion to reach from a measurement, not an assumption.
+### 2. What is left of the in-NIF cost
 
-### 2. What is left of the ~1.0 ms in-NIF cost
-
-Three bites taken (4 fences -> 1, 2 submissions -> 1, ~8 allocations pooled).
-What remains per chain dispatch: descriptor-set construction, the command-buffer
-build, the three upload buffers (NOT pooled — they go through
-`upload_buffer_staged`'s small path, which uses `Buffer::from_iter` and would
-need converting to allocate-then-write), and four `NewBinary` allocations.
-
-Measure before building. The K-sweep intercept is the instrument.
+Three bites taken: 4 fences -> 1, then 2 submissions -> 1. What remains per
+chain dispatch: descriptor-set construction, the command-buffer build, three
+upload buffers, four `NewBinary` allocations. **Measure before building** — the
+K-sweep intercept is the instrument, and the buffer pool is what happens
+otherwise.
 
 ### 3. Race 5 (MCMC) could now actually run
 
-It never could before, because nothing could drive the chain path. That has
-changed. `examples/` has no chain benchmark; the harness used this session is in
-the scratchpad only and is worth committing if Race 5 is attempted.
+It never could before, because nothing could drive the chain path. The harness
+used this session lives in the scratchpad only and is worth committing if Race 5
+is attempted.
 
 ### 4. Remaining fallbacks
 
 f32 is down to **5**: `erf`, `erfc`, `atan2` (both forms), `sort`. Only `sort`
 is allowlisted.
 
-* `erf`/`erfc` are not in GLSL.std.450 and need a polynomial that agrees with
-  `:math.erf` — note the f64 shader's old `erf_approx` was deleted as
-  unreachable, and a series more accurate than BinaryBackend would DISAGREE
-  with it, which is the wrong direction.
+* `erf`/`erfc` are not in GLSL.std.450 and need a polynomial agreeing with
+  `:math.erf`. Note the f64 shader's old `erf_approx` was deleted as unreachable,
+  and a series MORE accurate than BinaryBackend would DISAGREE with it.
 * `atan2` needs a new binary op code across four shaders.
-* The **twelve f64 transcendental forms are a deliberate decline**, not a gap.
+* The **twelve f64 transcendental forms are a deliberate decline**, not a gap:
   `Nx.sin(f64 1)` would return 0.8414708971977234 against 0.8414709848078965.
   Admitting them turned 22 of Nx's own doctests red and would invalidate the
   78-entry residency register. `exp/log/sqrt/sigmoid/tanh` keep their f64
-  boundary cast as a standing decision with `grad_test` tolerances calibrated to
-  it; new ops do not inherit it.
+  boundary cast as a standing decision with `grad_test` calibrated to it; new ops
+  do not inherit it.
 
 Low value to eXMC either way — it is f64.
 
-### 5. Jetson: `ab2e779` onward has not run there
+### 5. Race 1c voids on the Jetson even on a QUIET box
 
-It passed 833/876/0 at `15abc96`. Nine commits since. The unified path is a
-no-op by construction for the upload/readback work (`record_readback` returns
-empty, `record_upload` does nothing), but that is reasoning, and this session
-twice had reasoning about that box need measuring.
-
-**The Jetson switched to nvpmodel MAXN at ~21:35 on 2026-08-31** — 4 cores (was
-2), 1479 MHz (was 918), GPU 921.6 MHz (was 640). **Every Jetson timing from
-before that boundary is incomparable with anything after.** Pre-switch
-reference: exmc suite 6054 s at 5W.
-
-### 6. Race 1c voids on the Jetson even on a QUIET box
-
-Re-raced at `d7b5f08` with load 0.40-0.73 across 14 in-run samples, thermal
-control 0.0% compute drift / 0.7% allocation drift. Still voided: **estimator
-divergence 30.7% against a 30% gate.** Contended it read 177.8%. So contention
-inflates it ~5.8x, but clean it still sits a few points over.
-
-That is a statement about the instrument, and it is what
-`scripts/staged/jetson_run_trace.sh` was staged to gather. Still unrun. Note it
-needs re-baselining after MAXN.
+Load 0.40-0.73 across 14 in-run samples, thermal control 0.0%/0.7% drift, and it
+still voided at **estimator divergence 30.7% against a 30% gate**. Contended it
+read 177.8%. So contention inflates it ~5.8x, but clean it still sits a few
+points over — a statement about the instrument.
+`scripts/staged/jetson_run_trace.sh` was staged to gather exactly this and is
+still unrun. Needs re-baselining after MAXN.
 
 **Harness gap found doing it:** a VOID run still writes
-`bench_results/unified_vs_discrete_<host>.json` with no void marker — the
-verdict goes to stdout only. A later reader takes it as a result.
+`bench_results/unified_vs_discrete_<host>.json` with no void marker. A later
+reader takes it as a result.
 
-### 7. Jetson's below-cliff `alloc_buffer` is bimodal
+### 6. Jetson's below-cliff `alloc_buffer` is bimodal
 
 24 and 28 MiB read 0.109-0.122 ms; 26 and 30 read 0.150-0.342. Two populations
-at the same size. More interesting now that allocation is known to be
-clock-invariant on Ampere.
+at one size. More interesting now that allocation is known clock-invariant.
 
-### 8. super-io's poison flip rate is still unmeasured
+### 7. super-io's poison flip rate is still unmeasured
 
-Two samples, both 20/20, and one showing 19/40 effectiveness with 20/20 padding
-— which breaks the lockstep claim. The cross-box table is already retired.
+Two samples, both 20/20, one showing 19/40 effectiveness with 20/20 padding —
+which breaks the lockstep claim. The cross-box table is already retired.
 
 ---
 
 ## What is settled, so nobody re-litigates it
 
-* **The elementwise shaders are not a bottleneck on Ampere.** 431 GB/s of 448,
-  measured by slope at verified boost. The "27x is now ~14x, find the rest"
-  headline in the previous edition of this file was a **210 MHz reading** — the
-  card's idle floor. There was never anything to find.
-* **The 32 MiB allocation cliff is vulkano's**, per-allocation, reproduced 6/6
-  across every box and commit.
-* **The BAR1 cliff is a different cliff**: 256 MiB on super-io, cumulative
-  across live host-visible buffers, a whole-process budget. Do not conflate.
+* **The elementwise shaders are not a bottleneck on Ampere.** 431 GB/s of 448.
+  The "27x is now ~14x, find the rest" headline two editions ago was a **210 MHz
+  reading** — the card's idle floor. There was never anything to find.
+* **The 32 MiB allocation cliff is vulkano's**, per-allocation, 6/6 across boxes.
+* **The BAR1 cliff is a different cliff**: 256 MiB on super-io, cumulative across
+  live host-visible buffers, a whole-process budget. Do not conflate.
 * **`buf_alloc` is not clock-bound; shader work is.** 1.08-1.38x idle-to-boost
-  against 3.5-4.7x. Allocation is driver bookkeeping and does not shrink when
-  the card boosts.
+  against 3.5-4.7x. Allocation is driver bookkeeping.
 * **The chain NIFs push a FIXED header.** 20 bytes f32, 24 f64,
-  `{k_steps, n_obs, d, _pad, eps}`. Anything a caller puts past it is dropped.
-  Family parameters belong in the shader source or in a buffer, never in a push
-  tail.
+  `{k_steps, n_obs, d, _pad, eps}` (`n_instances` replaces `_pad` when batched).
+  Anything past it is dropped. Family parameters belong in the shader source or
+  a buffer, never a push tail.
 * **The 128-byte push cap is not a width limit.** It guards bytes that never
-  reach the GPU. eXMC's `d <= 13` bound was an artifact of it; packing
-  header-only took an 8-RV model from 0 dispatches to 2564, **13.1x**. The real
-  bound is the shader's `local_size_x = 256`, and it is still unenforced.
+  reach the GPU. exmc's `d <= 13` was an artifact of it; header-only packing took
+  an 8-RV model from 0 dispatches to 2564, **13.1x**.
+* **`d <= 256` is the real bound and is now ENFORCED** (`6d3a651`). Past it the
+  chains get an undefined tail AND the logp tree reduce silently sums only the
+  first 256 elements — a wrong posterior, not an error. Verified on all four
+  boxes: 256 accepted, 257 refused, including on both 2012 Keplers.
+* **The glslang pin is not load-bearing.** 81 of 81 shaders byte-identical at
+  15.1.0, 16.2.0 AND 16.5.0. The SPIR-V generator word encodes glslang's
+  GENERATOR version, not its release version. Record the version with a
+  byte-comparison; do not treat a mismatch as invalidating one without checking.
 * **The unified-vs-discrete question is unanswered and four designs failed.**
-  The fleet's GPUs differ 21x in throughput, which swamps the effect.
 * **The control pair is not a pair.** mac-247 and mac-248 differ 1.39x on
-  submission cost, in the opposite direction from their per-dispatch GPU work.
-* **The poison-control rate is not a cross-box observable.** It moves with the
-  commit.
+  submission cost, opposite in direction to their per-dispatch GPU work.
 
 ---
 
@@ -234,87 +208,100 @@ Two samples, both 20/20, and one showing 19/40 effectiveness with 20/20 padding
 
 ### Measurement
 
-* **Pick the host by CONTENTION, not clock observability, and they are
-  anti-correlated.** super-io is the only box where `clocks.sm` reads and it is
-  a desktop compositing Firefox on the same GPU: ~900 us noise band, 57% spread.
-  Headless mac-248 resolves the same benchmark to **0.3%**. Anything under ~1 ms
-  is unmeasurable on super-io.
+* **Pick the host by CONTENTION, not clock observability — they are
+  anti-correlated.** super-io is the only box where `clocks.sm` reads and it is a
+  desktop: 57% spread against headless mac-248's **0.3%**. Anything under ~1 ms
+  is unmeasurable there. Both 2012 Keplers run the suite faster than it does.
+* **A noisy host does not merely fail to resolve a small effect. It manufactures
+  a large one.** 1.3% measured as 17%; 18.2% measured as 36%.
 * **Run a null arm on the candidate host FIRST.** A control where the change
-  cannot act tells you whether the instrument can resolve the effect at all. The
-  small-buffer A/B's null arm reproduced 4.6% of a 7.2% "effect" — the host
-  disqualifying itself in advance, an hour before it was read that way.
-* **Record the GPU clock for every timed quantity, from OUTSIDE the process.**
-  Four DVFS incidents. `nvidia-smi` polled inline costs 50-100 ms of GPU idle
-  and drops the boost it is measuring.
-* **Sanity-check every derived figure against a physical bound.** A corrupted
-  run announced itself by reporting 804 GB/s on a 448 GB/s card.
-* **Amplify until the effect clears the noise floor, then replicate, then rotate
-  arm order.** A 0.16 ms effect measured one call at a time sat inside 34%
-  process-to-process variance on the SAME binary. Whichever arm runs first after
-  a binary swap eats the cold start.
-* **When verifying a FIX, the broken arm must still separate.** "Fixed looks
-  like pre" proves nothing if the harness cannot resolve broken from pre either.
-* **Prefer slopes to intercepts, and a measurement to a subtraction.** The
-  ~0.16 ms per-fence figure was a subtraction and missed the chain path by 3x.
+  cannot act tells you whether the instrument can resolve anything. One reported
+  4.6% of a 7.2% "effect" — the host disqualifying itself, an hour before that
+  was read as such.
+* **Record the GPU clock from OUTSIDE the process.** Four DVFS incidents.
+  Polling `nvidia-smi` inline costs 50-100 ms of idle and drops the boost it is
+  measuring.
+* **Sanity-check derived figures against a physical bound.** One corrupted run
+  announced itself by reporting 804 GB/s on a 448 GB/s card.
+* **Amplify until the effect clears the noise floor, replicate, rotate arm
+  order.** Whichever arm runs first after a binary swap eats the cold start.
+* **When verifying a FIX, the broken arm must still separate.** "Fixed looks like
+  pre" proves nothing if the harness cannot resolve broken from pre either.
+* **Prefer a measurement to a subtraction.** A per-fence figure derived by
+  subtraction missed the chain path by 3x; a split table built by differencing
+  two noisy quantities produced physically impossible negatives.
+* **Measure the tolerance, do not guess it.** The finite-difference h=1e-3 was
+  chosen from measured error; h=1e-4 is WORSE, because the f32 boundary cast puts
+  ~1e-7 on logp and a central difference divides it by 2h.
 * **Warmup can look exactly like a leak.** 625 -> 902 -> 969 us across three
   replicates at a 300-dispatch warmup; it settles at 6000.
-* **Check contention DURING the run, not just at the ends.** Sample load every
-  10s and report the samples.
 
 ### Instruments that lie
 
-* **`mix run` and `mix test` use DIFFERENT `_build` trees.** `mix test` compiles
-  into `_build/test`; `mix run` reads `_build/dev`. `mix run --no-compile` after
-  a green `mix test` runs STALE code, confidently. Run `mix compile` first.
+* **`mix run` and `mix test` use DIFFERENT `_build` trees.** `mix run
+  --no-compile` after a green `mix test` runs STALE code, confidently.
+* **`mix compile` does not necessarily refresh `priv/native`.** A `.so` replaced
+  with 25 bytes of text SURVIVED a plain rebuild — cargo found the sources
+  unchanged and Rustler never re-copied. A swapped, stale or wrong-architecture
+  artifact is not fixed by recompiling; touch a Rust source or clear `target/`.
+  `mix deps.compile` is NOT sufficient.
+* **`NXV_SKIP_NIF_BUILD` is sticky.** Rustler reads it via
+  `Application.compile_env`, so the value is baked into the module and Elixir
+  refuses to boot when the runtime value differs. Set it for compile AND every
+  run after; to clear it, delete
+  `_build/<env>/lib/nx_vulkan/ebin/Elixir.Nx.Vulkan.NativeV.beam`.
 * **A check that cannot run fails OPEN.** `file` was not installed in the
-  cross-build image, so the ELF-architecture bar printed `command not found` and
-  was never checked, while the lines around it went green. **A verification step
-  that can be skipped must fail loudly when it is skipped.**
-* **`nm -D` sees only dynamic symbols.** It reported 0 outline-atomics helpers
-  where plain `nm` finds 22, and NIF functions are registered in a table rather
-  than exported — so a symbol check is not a capability check. **Ask the
-  artifact to do the thing.**
-* **`pgrep -f "foo"` matches the shell running it.** A wait loop built that way
-  never fires. Key on a pid via `/proc`, or use `pgrep -x`.
+  cross-build image, so an ELF-architecture bar printed `command not found` and
+  was never applied while the lines around it went green.
+* **A binary comprehension DROPS NaN and Infinity silently.**
+  `for <<v::float-64-little <- bin>>` returns a SHORTER list, so
+  `for v <- doubles(bin), do: assert v == v` **cannot fail**. Check the arity.
+* **`nm -D` sees only dynamic symbols** — it reported 0 outline-atomics helpers
+  where plain `nm` finds 22, and NIF functions never appear there at all. Ask the
+  artifact to do the thing.
+* **`pgrep -f "foo"` matches the shell running it.** Key on a pid via `/proc`,
+  or use `pgrep -x`.
 * **`mix` reads stdin.** Inside `ssh host 'bash -s'` with a heredoc it swallows
-  the rest of the script, so trailing verification lines never run and their
-  absence looks like a truncated transcript. Redirect with `< /dev/null`.
-* **A swapped-in `.so` needs `--no-compile` AND a checksum**, before and after.
-* **Set `Nx.default_backend/1` and your "host reference" is computed on the
-  GPU.** A `max_err = 0.0` that should have been ~3e-8 is what exposed it.
-  Compute references with `:math` outside Nx entirely.
+  the rest of the script and the missing lines look like a truncated transcript.
+  Redirect with `< /dev/null` on EVERY mix call. (Documented, then repeated.)
+* **Setting `Nx.default_backend/1` makes your "host reference" run on the GPU.**
+  A `max_err = 0.0` that should have been ~3e-8 is what exposed it.
 * **A control that fails to trigger is not evidence the instrument is broken.**
   It is evidence of nothing until you show the control CAN trigger.
 * **A green strict run means "no unlisted fallback in the TESTED paths"**, never
-  "no unlisted fallbacks". Sixteen unallowlisted fallbacks sat behind a green
-  `strict_test.sh` because the suite never called them.
+  "no unlisted fallbacks". Sixteen sat behind a green run because nothing called
+  them.
 
 ### Code and process
 
-* **A passing test can be evidence FOR a defect.** eXMC found five tests
-  defending the 128-byte cap, four under a describe block named "the push block
-  caps model width at 13 prior floats", complete with a measured table. They
-  were pinning a defect in place.
+* **A passing test can be evidence FOR a defect.** exmc found five tests
+  defending the 128-byte cap, under a describe block named for the limit they
+  enforced, complete with a measured table. They were pinning a defect in place.
+* **Three vacuous checks were found in one day**: a `file` bar never applied; a
+  test that dispatched the single path twice and asserted it equalled itself; and
+  a NaN guard that could not fail. **Every property test should have a null arm**
+  — the finite-difference check has one, comparing one family's logp against
+  another's grad and asserting it FAILS.
 * **Read the decisions file before "fixing" a gap.** MISSION.md §3.2 lists
   broadcasting `pow` under "Decisions — recorded, not oversights"; `cf7b689`
-  overturned it by accident, having found the gap by census instead.
+  overturned it by accident, having found the gap by census.
 * **A stale allowlist entry silently permits the regression it describes.**
-  Delete it when the gap closes, and narrow the condition rather than reusing a
-  loose one.
+* **`@moduletag` inside a `describe` tags the WHOLE module.** Use `@describetag`,
+  or a future `--exclude` silently drops unrelated tests.
 * **A library must not put a `File.rm_rf` target inside its consumer's
-  directory.**
-* **Word-boundary anchor every template substitution.** `~r/\bpc\.alpha\b/`, not
-  `String.replace`, or a parameter named `alpha` rewrites `pc.alpha_scale`.
-  Codegen's unary templates had the same bug with the `r` in `sqrt`.
-* **One template, two dtypes.** The chain skeleton is parameterised on scalar
-  type rather than duplicated: a previous divergence moved the log-prob body
-  above the position update and gave every distribution a one-step `logp` lag,
-  blamed on the GPU for a month.
-* **A control must re-measure the KIND of work it certifies.** A matmul cannot
-  vouch for an allocation.
-* **GC inside any loop that allocates.** A retained-allocation leak has appeared
-  three times, once in a throwaway diagnostic written to investigate the
-  previous two.
+  directory.** `Synthesis.clear_cache/0` deleted exmc's shader cache on every
+  `mix test` here.
+* **Restore a shared box when you are done with it.** Two were left broken in one
+  session: an artifact of unverifiable provenance on 248, and the Jetson
+  compiled with a sticky flag so plain `mix test` died at boot.
+* **Word-boundary anchor every template substitution.** `~r/\bpc\.alpha\b/`, or a
+  parameter named `alpha` rewrites `pc.alpha_scale`.
+* **One template, N variants.** The chain skeleton is parameterised on dtype AND
+  on batched-vs-single rather than copied: a previous divergence moved the
+  log-prob body above the position update and gave every distribution a one-step
+  `logp` lag, blamed on the GPU for a month.
+* **Interior test values are literals, not draws.** A failure on the Jetson takes
+  minutes to reproduce; a seed-replay step is one nobody takes.
 * **Build large test tensors with `from_binary`, not `Nx.iota`** — host-side
   construction is GPU idle time and will silently unboost the card.
 * **Coordinate before adding load to a shared box.** The Jetson's failures are
@@ -323,38 +310,60 @@ Two samples, both 20/20, and one showing 19/40 effectiveness with 20/20 padding
 
 ---
 
-## Tooling added this session
+## Test coverage as it now stands
 
-* **`.claude/skills/jetson-cross-build/`** — cross-builds the Jetson's aarch64
-  NIF in a container on super-io: **1m55s against ~47 min native**. Validated
-  end to end. Applies to **Rust-only commits**: if an Elixir source changed, the
-  box needs a real `mix compile` which drags Rustler along anyway and the skill
-  buys nothing.
+`test/nx_vulkan/chain_properties_test.exs` (14 tests, 1.1-5.9s across the fleet):
+
+* **All seven guard branches** — length mismatch, `k=0`, push length at both
+  boundaries, malformed push, `d=0`, `d` past the buffer, `d>256` in both dtypes,
+  `n_instances=0`. All were untested; none reach GPU dispatch.
+* **The prefix property in f32**, single and batched — it existed only for f64,
+  and it is what exmc's ragged-depth padding depends on.
+* **Shape sweep** for batched-equals-single, boundaries hit rather than sampled.
+* **Determinism** — the same inputs dispatched twice must give the same bits.
+* **`grad` is the derivative of `logp`**, by central difference, for all six f64
+  families. Five had no numerical validation at all. Needs no second density
+  implementation and the normalising constant drops out.
+
+Plus, in `chain_f64_test.exs` / `chain_specs_test.exs`: every f64 AND f32 family
+batches bit-identically to its single dispatch; instances do not bleed;
+`n_instances=1` equals the single path; Normal reproduces a host leapfrog
+bit-exactly.
+
+**`leapfrog_chain_synth_batch/6` (f32) had existed since Task #154 with no
+shader in this repo to drive it** — it shipped, was never exercised, and could
+not have been. Same condition that let the push-block layout mismatch survive.
+Closed in `f07e1f7`.
+
+---
+
+## Tooling
+
+* **`.claude/skills/jetson-cross-build/`** — cross-builds the aarch64 NIF on
+  super-io in ~2 minutes against ~47 native. With `NXV_SKIP_NIF_BUILD=1` it now
+  applies to **every** commit, not just Rust-only ones. A full Jetson cycle
+  measured at **61 seconds**.
 * **`scripts/tegrastats_bars.sh`** — live bar graph with peak markers that never
-  fall, for the one box with no `clocks.sm`. NOT yet run against the live box.
+  fall, for the one box with no `clocks.sm`. Still not run against the live box.
 * **`buf_download_many/1`** — batched readback, exposed mainly so
   `staging_read_many` is reachable from a test.
 
 ---
 
-## Disclosure for every number in this document
+## Disclosure
 
-Taken on super-io with a live desktop session on the same card — Firefox and
-Cinnamon, 2.1-2.6 GiB resident, P0 throughout. **That caveat is the headline,
-not a footnote**: it is worth ~900 us of noise, wider than most per-call effects
-here. Read accordingly — the elementwise slopes and the DVFS finding are
-large-signal and survive; the small per-dispatch deltas are directional and
-belong on mac-248.
-
-Numbers attributed to the exmc session were measured on **headless mac-248** or
-on the Jetson, and are marked where they appear.
+Per-dispatch numbers are from **headless mac-248** and are marked where they
+appear. Anything measured on super-io is an upper bound: it is a desktop with
+Firefox and Cinnamon on the same GPU, worth ~900 us of noise, wider than most
+per-call effects in this document.
 
 ---
 
 ## Publishing (operator decision, not done)
 
-* `~/projects/learn_erl/pymc/www.dataalienist.com` — two posts committed and
-  **not deployed**: "An Absence Mistaken for a Discovery" and the correction
-  banner on "The Copy That Wasn't There".
+* `~/projects/learn_erl/pymc/www.dataalienist.com` — **three** posts committed
+  and not deployed: "An Absence Mistaken for a Discovery", the correction banner
+  on "The Copy That Wasn't There", and "The Artifact That Survived Its Own
+  Replacement".
 * `mix hex.retire nx_vulkan 0.2.0`, `upstream/main` publishing, consumer pin
   bump — all still outstanding.
