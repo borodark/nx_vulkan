@@ -272,12 +272,10 @@ If phase 1–4 lands as planned, exmc gains:
 ## Cross-references
 
 - [PLAN.md](PLAN.md) — Nx.Vulkan v0.1 master roadmap
-- [PERSISTENT_BUFFERS_PLAN.md](PERSISTENT_BUFFERS_PLAN.md) — the
-  persistent-pipeline + buffer-pool optimization that mitigates
-  the dispatch-overhead gap
-- [SHADERS_PLAN.md](SHADERS_PLAN.md) — shader inventory, gates
-  some of phase 1 here (per-axis reductions need a new shader,
-  not just a backend callback)
+- `PERSISTENT_BUFFERS_PLAN.md` and `SHADERS_PLAN.md` — referenced by this
+  April 2026 plan but never committed to the repo. The buffer-pool half was
+  eventually built and reverted on measurement (see `ROADMAP.md`); the shader
+  inventory it describes is superseded by `priv/shaders/` itself.
 - exmc repo: `~/projects/learn_erl/pymc/exmc/`
 - Nx documentation: <https://hexdocs.pm/nx/Nx.Backend.html>
 - Nx.Defn.Grad source: <https://github.com/elixir-nx/nx/blob/main/nx/lib/nx/defn/grad.ex>

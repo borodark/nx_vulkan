@@ -227,8 +227,8 @@ That second line is also the assertion that the box took the `unified` branch of
 `alloc_buffer` — worth reading, not skipping, since several code paths are
 no-ops only on that branch.
 
-Gate any deploy on the box's own correctness suite: **833 doctests, 871 tests,
-0 failures**. Note the suite prints a `GenServer terminating ** (RuntimeError)
+Gate any deploy on the box's own correctness suite: **833 doctests, 903 tests,
+0 failures** (871 before the 2026-09 property-test tier). Note the suite prints a `GenServer terminating ** (RuntimeError)
 boom` trace from `node_test.exs` — that is an intentional test, not a failure.
 
 ## Jetson environment traps (they will bite the test run, not the build)

@@ -13,7 +13,7 @@ are measured on the fleet (RTX 3060 Ti / GT 650M / GT 750M) unless stated.
 ## 1. The defect class: gates written against the forward pass
 
 Every GPU fast path in this backend was guarded by a predicate describing the
-shapes a *forward* pass produces. `Nx.Defn.Grad` emits shapes no human writes,
+shapes a *forward* pass produces. `Nx.Defn.grad/2` emits shapes no human writes,
 so those predicates refused the backward pass and silently routed it to the CPU.
 Eight instances, found one at a time:
 
@@ -161,7 +161,7 @@ wherever values repeat — and a relu's output is full of exact ties at zero.
 `remainder()` data creates ties by construction; random floats never do.
 
 **Sometimes the reference is the broken one.**
-`Nx.BinaryBackend.window_scatter_max/5` round-trips f64 through f32
+`window_scatter_max/6` in `Nx.BinaryBackend` round-trips f64 through f32
 (`2.4715269558223154` → `2.471526861190796`). For f64 pooling gradients this
 backend is now *more accurate than the thing it is tested against*. The test
 asserts values are exact elements of `src` — stronger than agreement, and it

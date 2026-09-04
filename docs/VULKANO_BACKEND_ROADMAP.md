@@ -42,7 +42,7 @@ The C++ Elixir backend has since been **removed** (commit `bb94217`);
 | Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
 | Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
 
-Test coverage (2026-08): **833 doctests, 871 tests, 0 failures** on four boxes — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux) and a Tegra X1 Jetson Nano (unified memory, Ubuntu). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
+Test coverage (2026-09): **833 doctests, 903 tests, 0 failures** on four boxes — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux) and a Tegra X1 Jetson Nano (unified memory, Ubuntu). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
 ## Stage breakdown
 
@@ -171,9 +171,12 @@ number until a GEMM improvement has actually been raced.
 
 ## Open architectural questions
 
-1. **Persistent buffer pool.** Per-call alloc/free works but hits
+1. **Persistent buffer pool.** ~~Per-call alloc/free works but hits
    the allocator on every op. A `SubbufferAllocator` keyed by size
-   class would amortise this. Defer until stage 11.
+   class would amortise this.~~ **Settled by measurement in 2026-09
+   and reverted**: worth 2.2 µs at concurrency one and nothing from two
+   concurrent callers up, because the single queue saturates first. See
+   ROADMAP.md. Do not rebuild this without a fresh measurement.
 
 2. **Pipeline cache.** vulkano supports `PipelineCache::with_data`
    for disk-persisted compiled pipelines. Plumb through after

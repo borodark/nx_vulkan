@@ -31,7 +31,7 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 (roadmap stages 1–8) the `Nx.Defn` fusion compiler landed — whole-graph
 fusion with a multi-stage split at dot/conv/reduce/transpose boundaries,
 f32 and f64. Main branch is stable across Linux + Ampere (RTX 3060 Ti)
-and FreeBSD + Kepler (GT 650M, GT 750M): **833 doctests, 871 tests, 0 failures** on the fleet. The vulkano-only architecture (C++ spirit
+and FreeBSD + Kepler (GT 650M, GT 750M): **833 doctests, 903 tests, 0 failures** on the fleet. The vulkano-only architecture (C++ spirit
 backend dropped) merged 2026-07-13.
 
 | Feature | Status |
@@ -48,7 +48,7 @@ backend dropped) merged 2026-07-13.
 | Cross-Kepler bit-determinism (GT 650M ≡ GT 750M) | ✓ |
 | Ampere `primary_buffer_count=128` cmd-buffer fix | ✓ |
 | Batched command submission (one submit + fence per batch) | ✓ |
-| Persistent buffer pool | open — see T4 |
+| Persistent buffer pool | **measured, then reverted** — see below |
 | f64 matmul (`matmul_f64.spv`) | ✓ |
 | Scholar native linalg shaders (SVD/QR/cholesky/solve) | open — unscheduled |
 | Polynomial f64 log/exp (behind config) — exmc side | ✓ (default: f32-cast) |
@@ -142,13 +142,20 @@ months: `PLAN_GPU_NODE.md`'s H3 measured **1.13 ms fence wait against
 by 8× is exactly what batching amortises. The finding sat in a plan
 document until the EXLA race independently pointed at per-dispatch cost.
 
-**Persistent buffer pool.** Still open — per-call allocation through
-vulkano's `StandardMemoryAllocator`. The old note here claimed it "costs
-a millisecond per dispatch"; that figure is **unverified** and predates
-batched submission, which changed the per-dispatch picture, so treat it
-as a hypothesis to measure rather than a number to quote. Tracked as T4
-in [`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md),
-whose "done when" is that allocation stops appearing in a per-step profile.
+**Persistent buffer pool.** Built, raced, and **reverted** (`190bf67`). The
+long-standing note here claimed per-call allocation "costs a millisecond per
+dispatch"; that figure was never verified, and when it finally was, it was
+wrong. A size-classed pool over the chain NIFs' internal allocations is worth
+**2.2 µs at concurrency one and nothing at all from two concurrent callers
+upward** — the single queue saturates at M=2, so the allocator was never the
+constraint. It was built on a 17% figure that a contended host manufactured out
+of a real 1.3%; re-measured on a quiet box, the effect disappeared.
+
+Kept from the exercise: a measured ceiling of ~7350 dispatches/s. The consumer
+this was built for runs at 244/s — 3% of it — which is independent evidence
+about where their bottleneck is *not*. T4 in
+[`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md)
+is closed by measurement rather than by implementation.
 
 **f64 matmul.** Done — `matmul_f64.spv` ships and rank-2 matmul runs
 natively in f64. The backend now dtype-dispatches **native f32** as
