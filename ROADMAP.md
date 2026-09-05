@@ -48,7 +48,8 @@ backend dropped) merged 2026-07-13.
 | Cross-Kepler bit-determinism (GT 650M ≡ GT 750M) | ✓ |
 | Ampere `primary_buffer_count=128` cmd-buffer fix | ✓ |
 | Batched command submission (one submit + fence per batch) | ✓ |
-| Persistent buffer pool | **measured, then reverted** — see below |
+| Persistent buffer pool (chain NIFs) | **measured, then reverted** — see below |
+| Persistent buffer pool (per-op `buf_alloc`) | open, unmeasured — T4 |
 | f64 matmul (`matmul_f64.spv`) | ✓ |
 | Scholar native linalg shaders (SVD/QR/cholesky/solve) | open — unscheduled |
 | Polynomial f64 log/exp (behind config) — exmc side | ✓ (default: f32-cast) |
@@ -151,11 +152,20 @@ upward** — the single queue saturates at M=2, so the allocator was never the
 constraint. It was built on a 17% figure that a contended host manufactured out
 of a real 1.3%; re-measured on a quiet box, the effect disappeared.
 
-Kept from the exercise: a measured ceiling of ~7350 dispatches/s. The consumer
-this was built for runs at 244/s — 3% of it — which is independent evidence
-about where their bottleneck is *not*. T4 in
+**What this does NOT settle.** The pool covered the chain NIFs' *function-local*
+allocations only — outputs and readback staging, keyed by `(role, size)`.
+`buf_alloc`'s ResourceArc-backed buffers were deliberately left out, because
+their lifetime belongs to the BEAM's GC and the pool cannot see it. So T4's
+"every op `buf_alloc`s its output" bullet in
 [`PLAN_AFTER_BACKWARD_PASS.md`](https://github.com/borodark/nx_vulkan/blob/main/PLAN_AFTER_BACKWARD_PASS.md)
-is closed by measurement rather than by implementation.
+is a *different* allocation site and remains **open and unmeasured**. Do not
+read the revert as evidence against it; read it as evidence that the
+measurement must be done at the concurrency the consumer actually runs, on a
+quiet box, before any of it is built.
+
+Kept from the exercise: a measured ceiling of ~7350 dispatches/s on this path,
+pool or no pool. The consumer it was built for runs at 244/s — 3% of it — which
+is independent evidence about where their bottleneck is *not*.
 
 **f64 matmul.** Done — `matmul_f64.spv` ships and rank-2 matmul runs
 natively in f64. The backend now dtype-dispatches **native f32** as

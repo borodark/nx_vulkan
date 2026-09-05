@@ -40,7 +40,7 @@ The C++ Elixir backend has since been **removed** (commit `bb94217`);
 | Linalg ops — native SPV implementations | ✗ |
 | Persistent buffer pool / `SubbufferAllocator` | ✗ |
 | Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
-| Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ |
+| Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ — planned in [`MULTI_DEVICE_PLAN.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/MULTI_DEVICE_PLAN.md) |
 
 Test coverage (2026-09): **833 doctests, 903 tests, 0 failures** on four boxes — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux) and a Tegra X1 Jetson Nano (unified memory, Ubuntu). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
@@ -167,16 +167,29 @@ number until a GEMM improvement has actually been raced.
 - CUDA-specific features (tensor cores, mixed precision) — vulkano
   abstracts over them, but extracting them is out of scope until
   stages 1–10 are done.
-- Multi-GPU. Single device per process for now.
+- Multi-GPU. Single device per process for now — the engineering is scoped in
+  [`MULTI_DEVICE_PLAN.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/MULTI_DEVICE_PLAN.md), which is blocked on a
+  *driver* gap rather than a code one: mac-247 has both an Intel HD 4000 and the
+  GT 650M on the PCI bus, but `vulkaninfo` enumerates only the NVIDIA card and
+  llvmpipe, because Mesa's `anv` is not loaded on the FreeBSD side. The code gap
+  behind it — picking the first `DiscreteGpu` and ignoring the rest — depends on
+  the ArcSwap refactor in
+  [`CONTEXT_LIFECYCLE_PLAN.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/CONTEXT_LIFECYCLE_PLAN.md), which is the
+  same prerequisite for tearing a context down and rebuilding it.
 
 ## Open architectural questions
 
-1. **Persistent buffer pool.** ~~Per-call alloc/free works but hits
+1. **Persistent buffer pool.** Per-call alloc/free works but hits
    the allocator on every op. A `SubbufferAllocator` keyed by size
-   class would amortise this.~~ **Settled by measurement in 2026-09
-   and reverted**: worth 2.2 µs at concurrency one and nothing from two
-   concurrent callers up, because the single queue saturates first. See
-   ROADMAP.md. Do not rebuild this without a fresh measurement.
+   class would amortise this. Defer until stage 11. **Still open and
+   still unmeasured** as of 2026-09 — but note that the *adjacent*
+   experiment has been run and lost: a pool over the chain NIFs'
+   function-local buffers was built and reverted (`190bf67`), worth
+   2.2 µs at concurrency one and nothing from two concurrent callers up,
+   because the single queue saturates before the allocator does. That
+   says nothing directly about this item, whose buffers are GC-owned
+   rather than function-local — but it does say to measure at realistic
+   concurrency on a quiet box first. See `ROADMAP.md`.
 
 2. **Pipeline cache.** vulkano supports `PipelineCache::with_data`
    for disk-persisted compiled pipelines. Plumb through after

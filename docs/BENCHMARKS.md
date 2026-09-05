@@ -127,3 +127,32 @@ Milliseconds per dispatch, median of 50–200 iterations:
 | 1024×1024 | n/a (hours) | n/a (hours) | 2,323 | 2,843 |
 
 Full bench: [`examples/full_bench.exs`](https://github.com/borodark/nx_vulkan/blob/main/examples/full_bench.exs).
+
+## How these were measured
+
+Two working documents carry the method behind the numbers above, and neither is
+a summary — they are the raw investigations, kept because the wrong turns in
+them are the useful part.
+
+- [`ELEMENTWISE_PCIE_TAX.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/ELEMENTWISE_PCIE_TAX.md) — how a bandwidth
+  deficit was localised to the allocator rather than the shader. `Nx.multiply`
+  on a 448 GB/s card was sustaining 16.4 GB/s, and the elimination is the
+  method: not dispatch overhead (chaining N ops gives a flat marginal cost), not
+  a fallback (`Fallback.count/1` returns an empty map), not the shader. It was
+  the memory-type filter — `PREFER_DEVICE | HOST_*` pairs a preference with a
+  requirement, and the requirement wins, so every output buffer lived in system
+  RAM and every store the shader executed crossed PCIe. **Resolved since:** the
+  fix landed and the same path now measures 431 GB/s of 448. The follow-on
+  "27x is now ~14x, find the rest" headline was a **210 MHz DVFS reading** — the
+  card's idle floor — and there was nothing left to find. The doc's closing
+  "not yet checked" list is partly answered too: the 32 MiB cliff is vulkano's,
+  per-allocation, agreed 6/6 across boxes, and the BAR1 cliff is a separate
+  256 MiB cumulative whole-process budget. Do not conflate them.
+- [`DTRACE_VULKAN_PROFILING.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/DTRACE_VULKAN_PROFILING.md) — profiling the
+  dispatch stack on FreeBSD. **Read the banner and the "probes that actually
+  work" section; the rest is kept for technique, not symbol names.** The trap it
+  documents is worth the visit on its own: `vkQueueSubmit` and `vkWaitForFences`
+  exist in `libvulkan.so.1` and appear in `dtrace -l`, so they look probeable —
+  but vulkano resolves driver pointers through `vkGetDeviceProcAddr` and calls
+  the ICD directly, so probing them records **zero events**. A probe that fires
+  never is indistinguishable from a code path that runs never.
