@@ -12,7 +12,7 @@ alone, and `sh scripts/strict_test.sh`:
     mac-247   GT 650M     14.8s      3.6s       0 failures
     mac-248   GT 750M     10.7s      1.5s       0 failures
 
-833 doctests, 903 tests, 0 failures everywhere; 163 excluded under strict.
+833 doctests, 907 tests, 0 failures everywhere; 163 excluded under strict.
 Residency 755/833 (90.6%).
 
 Note both 2012 Keplers run the suite FASTER than the modern Ampere desktop.

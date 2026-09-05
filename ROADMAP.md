@@ -31,7 +31,7 @@ and [`docs/VULKANO_BACKEND_ROADMAP.md`](docs/VULKANO_BACKEND_ROADMAP.md)
 (roadmap stages 1–8) the `Nx.Defn` fusion compiler landed — whole-graph
 fusion with a multi-stage split at dot/conv/reduce/transpose boundaries,
 f32 and f64. Main branch is stable across Linux + Ampere (RTX 3060 Ti)
-and FreeBSD + Kepler (GT 650M, GT 750M): **833 doctests, 903 tests, 0 failures** on the fleet. The vulkano-only architecture (C++ spirit
+and FreeBSD + Kepler (GT 650M, GT 750M): **833 doctests, 907 tests, 0 failures** on the fleet. The vulkano-only architecture (C++ spirit
 backend dropped) merged 2026-07-13.
 
 | Feature | Status |

@@ -11,7 +11,7 @@
 > Nx.Backend gap is empty, every callback implemented — still holds. But
 > it predates two later changes on `main`: native **f32** compute (this
 > doc's op list shows f64-only) and the `Nx.Vulkan.Compiler` fusion
-> compiler. Current suite: **833 doctests, 903 tests, 0 failures** (this
+> compiler. Current suite: **833 doctests, 907 tests, 0 failures** (this
 > doc's "130 tests" is stale).
 
 **Date:** 2026-07-28

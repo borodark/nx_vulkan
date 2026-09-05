@@ -12,7 +12,7 @@ this repo are the opposite of what a single machine would have chosen.
 | mac-247 | GeForce GT 650M | Kepler | 2012 | FreeBSD | x86_64 |
 | jake-desktop | Tegra X1 (Jetson Nano) | Maxwell | 2015 | Ubuntu 18.04 | aarch64 |
 
-**833 doctests, 903 tests, 0 failures** on every row. Same source, same shaders,
+**833 doctests, 907 tests, 0 failures** on every row. Same source, same shaders,
 same SPIR-V.
 
 ---

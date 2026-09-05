@@ -19,7 +19,7 @@ worth doing. Where the two disagree, this one is newer.
 1. **§9 of this document — "contradictory or stale".** Start there, not at the
    top. Seven items, and three of them are numbers you will otherwise trust:
    `README`, `ROADMAP` and `T11` circulate three *different* suite counts, all
-   wrong (actual: **833 doctests, 903 tests**), and `ROADMAP.md` still carries
+   wrong (actual: **833 doctests, 907 tests**), and `ROADMAP.md` still carries
    the pre-reframing performance goal *above* the reach-not-speed paragraph, so
    stopping early gets you the old mission.
 2. **This document**, §1–§8.
@@ -556,14 +556,14 @@ W5 is "`@integer_dtype` empties, 409 doctests", W1 and W8 are lines in
 
 ## 8. How to verify you have not broken anything
 
-**The suite.** Measured on super-io at `ddb77e3` (2026-09-04):
+**The suite.** Measured on all four boxes at `28950b6` (2026-09-05):
 
 ```
 mix test
-#=> 833 doctests, 903 tests, 0 failures
+#=> 833 doctests, 907 tests, 0 failures
 
 sh scripts/strict_test.sh
-#=> 833 doctests, 903 tests, 0 failures, 163 excluded
+#=> 833 doctests, 907 tests, 0 failures, 163 excluded
 ```
 
 The doctest count is **833**, down from 851 by way of 843 — moving
@@ -637,11 +637,12 @@ session does not have to rediscover them.
 1. **Three different suite counts are in circulation.** `README.md` says
    "851 doctests, 439 tests"; `ROADMAP.md` and `LIMITATIONS.md` say
    "851 doctests, 415 tests"; `PLAN_AFTER_BACKWARD_PASS.md` T11 says
-   "843 doctests / 423 tests". Measured today: **833 doctests, 903 tests.** All
+   "843 doctests / 423 tests". Measured today: **833 doctests, 907 tests.** All
    three published figures are stale. *(And so was this line's own "measured
    today" figure, twice — a section about counts drifting is not exempt from
-   counts drifting. Re-measured on four boxes 2026-08-29, and again on
-   super-io 2026-09-04 after the property-test tier landed.)*
+   counts drifting. Re-measured on four boxes 2026-08-29, again on
+   super-io 2026-09-04 after the property-test tier landed, and again on all
+   four 2026-09-05 after the allowlist-integrity and strict-mode tests.)*
 2. **`docs/PARITY_STATUS.md`'s central claim is true and useless.** "Every
    `Nx.Backend` callback is implemented" has been true since July while 42 of 96
    dtype × op cells run on the host (§3.1). The document is not wrong; it is

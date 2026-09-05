@@ -123,7 +123,7 @@ roughly two minutes on super-io, longer on the Keplers.
 ## 5. Afterwards
 
 ```sh
-mix test                                # nx_vulkan: 833 doctests, 903 tests, 0 failures
+mix test                                # nx_vulkan: 833 doctests, 907 tests, 0 failures
 sh scripts/strict_test.sh               # strict: 0 failures, 163 excluded
 sh scripts/doctest_residency.sh         # residency: 755 / 833 (90.6%)
 ```

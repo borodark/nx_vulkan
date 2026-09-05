@@ -38,7 +38,7 @@ heuristic is raced on all four before it ships.
 | mac-247 | GT 650M (Kepler) | 2012 | FreeBSD | x86_64 |
 | jake-desktop | Tegra X1, Jetson Nano | 2015 | Ubuntu | aarch64 |
 
-**833 doctests, 903 tests, 0 failures** on every one of them. Two CPU
+**833 doctests, 907 tests, 0 failures** on every one of them. Two CPU
 architectures, three operating systems, four GPU generations spanning
 2012–2021, one set of
 SPIR-V binaries — and, where it is asserted, the same posterior bit for bit.

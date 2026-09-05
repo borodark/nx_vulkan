@@ -42,7 +42,7 @@ The C++ Elixir backend has since been **removed** (commit `bb94217`);
 | Pipeline cache persisted to disk | ✓ (UUID-validated, survives BEAM restarts) |
 | Multi-device routing (Intel iGPU alongside NVIDIA on legacy MBP) | ✗ — planned in [`MULTI_DEVICE_PLAN.md`](https://github.com/borodark/nx_vulkan/blob/main/docs/MULTI_DEVICE_PLAN.md) |
 
-Test coverage (2026-09): **833 doctests, 903 tests, 0 failures** on four boxes — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux) and a Tegra X1 Jetson Nano (unified memory, Ubuntu). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
+Test coverage (2026-09): **833 doctests, 907 tests, 0 failures** on four boxes — GT 650M (Kepler, FreeBSD), GT 750M (mac-248), RTX 3060 Ti (Ampere, Linux) and a Tegra X1 Jetson Nano (unified memory, Ubuntu). The spirit C++ backend and its test suite were dropped. Bench coverage committed to `bench_results/`.
 
 ## Stage breakdown
 
