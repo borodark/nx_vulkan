@@ -143,7 +143,6 @@ defmodule Nx.Vulkan.Fallback do
           :always
           | {:rank_at_least, pos_integer()}
           | {:dtype, Nx.Type.t()}
-          | :float_output
 
   @doc """
   Run `fun` with fallback recording enabled, returning `{result, counts}` where
@@ -250,9 +249,40 @@ defmodule Nx.Vulkan.Fallback do
   @spec mode() :: :allow | :warn | :raise
   def mode do
     case Process.get(@strict_key) do
-      nil -> Application.get_env(:nx_vulkan, :host_fallback, :allow)
+      nil -> validate_mode!(Application.get_env(:nx_vulkan, :host_fallback, :allow))
       mode -> mode
     end
+  end
+
+  # `strict/2` has always been guarded by `mode in @modes`; the config path was
+  # not, and the two entry points disagreeing is the whole defect. Measured
+  # before the fix: with `host_fallback: :raies`, an ALLOWLISTED op returned
+  # `:ok` and a non-allowlisted one raised CaseClauseError — "no case clause
+  # matching: :raies" — from inside enforce/3, naming neither the config key nor
+  # the misspelling.
+  #
+  # The serious half is the first row, not the second. A suite with no
+  # non-allowlisted fallback is exactly the case strict mode exists to certify,
+  # so on a genuinely clean codebase the typo was NEVER detected and
+  # `scripts/strict_test.sh` went green having enforced nothing. An instrument
+  # that reports clean while measuring nothing is the failure class this whole
+  # module exists to eliminate; it should not contain one.
+  #
+  # Raise rather than warn-and-degrade. Falling back to `:allow` on a bad value
+  # would reproduce the defect in a politer form: still on, still not enforcing.
+  defp validate_mode!(mode) when mode in @modes, do: mode
+
+  defp validate_mode!(other) do
+    raise ArgumentError, """
+    invalid `config :nx_vulkan, host_fallback: #{inspect(other)}`
+
+    Valid modes are #{Enum.map_join(@modes, ", ", &inspect/1)}.
+
+    This is raised rather than ignored because an unrecognised mode leaves
+    strict mode looking enabled while enforcing nothing: allowlisted fallbacks
+    return :ok as usual, so a suite with no refused op passes and certifies
+    nothing at all.
+    """
   end
 
   # Ops permitted to fall back. Each line: {fun, arity}, a condition, and the
@@ -262,13 +292,21 @@ defmodule Nx.Vulkan.Fallback do
   # Conditions:
   #   :always              — this callback has no GPU path at all
   #   {:rank_at_least, n}  — permitted only from rank n up; below that it is a bug
-  #   {:dtype, type}       — permitted only at exactly that output dtype. Use
-  #                          this rather than :float_output when a gap is
-  #                          dtype-specific: :float_output would also excuse
-  #                          the dtypes that DO run on the GPU, so a real
-  #                          regression there would pass silently.
-  #   :float_output        — permitted only when the OUTPUT is a float type; an
-  #                          integer result means the reason does not apply
+  #   {:dtype, type}       — permitted only at exactly that output dtype
+  #
+  # A fourth, `:float_output` ("permitted when the OUTPUT is any float type"),
+  # existed until 2026-09-05 and is recorded here because its life is the
+  # argument for keeping this vocabulary small. It was added when `{:pow, 3}`
+  # was caught excusing INTEGER pow with a reason about GLSL.std.450 lacking an
+  # f64 `pow` — true, and irrelevant to s32. It was then superseded by
+  # `{:dtype, t}` for the same entry, because once f32 broadcasting pow moved
+  # onto the GPU, `:float_output` would have gone on excusing an f32 fallback
+  # that had become a bug. That left it reachable from nowhere: `condition_met?/2`
+  # is private with one caller, `allowed?/2`, which closes over `@allowlist`, so
+  # a condition no entry carries cannot be exercised by any test. Two clauses
+  # that had never run, in the module whose whole job is refusing to certify
+  # what has not been checked. Deleted. Re-add it in three lines WITH the entry
+  # that needs it, so it arrives tested.
   @allowlist [
     # Was `:float_output` until 2026-09-01, covering f32 and f64 together. f32
     # broadcasting pow now runs on the GPU — GLSL.std.450 has a native f32
@@ -430,9 +468,6 @@ defmodule Nx.Vulkan.Fallback do
   # op nobody can see is an op nobody will fix.
   defp condition_met?({:dtype, type}, %Nx.Tensor{type: type}), do: true
   defp condition_met?({:dtype, _type}, _meta), do: false
-
-  defp condition_met?(:float_output, %Nx.Tensor{type: {f, _}}) when f in [:f, :bf], do: true
-  defp condition_met?(:float_output, _meta), do: false
 
   defp enforce(mode, op, meta) do
     if allowed?(op, meta) do

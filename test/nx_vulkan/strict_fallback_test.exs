@@ -135,6 +135,8 @@ defmodule Nx.Vulkan.StrictFallbackTest do
 
   describe "the allowlist" do
     test "every entry names one {fun, arity} or one Nx.Block struct, a condition, and a reason" do
+      float_meta = Nx.tensor([[1.0, 2.0]], type: {:f, 64}, backend: Nx.BinaryBackend)
+
       for {op, condition, reason} <- Fallback.allowlist() do
         # Exactly two shapes are legal, and both name ONE thing:
         #   {fun, arity}          — one backend callback
@@ -152,20 +154,37 @@ defmodule Nx.Vulkan.StrictFallbackTest do
                "{:block, arity} exempts every Nx.Block struct at once — the op-family " <>
                  "wildcard this list exists to forbid. Name the struct."
 
-        # Four conditions are legal, and the extra ones exist because a reason
-        # has to apply to the case it excuses. `:float_output` was added when
-        # `{:pow, 3}` was found excusing INTEGER pow with an argument about
-        # GLSL.std.450 lacking an f64 `pow` — true, and irrelevant to s32.
-        # `{:dtype, t}` was added for the same entry a second time: once f32
-        # broadcasting pow moved onto the GPU, `:float_output` would have gone
-        # on excusing an f32 fallback that is now a bug.
-        assert condition in [:always, :float_output] or
+        # Three conditions are legal, and the extra two exist because a reason
+        # has to apply to the case it excuses. A fourth, `:float_output`, was
+        # added when `{:pow, 3}` was found excusing INTEGER pow with an argument
+        # about GLSL.std.450 lacking an f64 `pow` — true, and irrelevant to s32.
+        # `{:dtype, t}` then superseded it for that same entry, because once f32
+        # broadcasting pow moved onto the GPU `:float_output` would have gone on
+        # excusing an f32 fallback that had become a bug. That left it carried by
+        # no entry, hence reachable by no test, and it was deleted on 2026-09-05.
+        assert condition == :always or
                  match?({:rank_at_least, n} when is_integer(n), condition) or
                  match?({:dtype, {k, b}} when is_atom(k) and is_integer(b), condition)
 
         assert is_binary(reason) and byte_size(reason) > 40,
                "allowlist entry #{inspect(op)} has no real reason: #{inspect(reason)}"
+
+        # The assertion above checks the condition against a list written HERE,
+        # which drifts. This one checks it against the code that consumes it: a
+        # condition with no `condition_met?/2` clause compiles cleanly and
+        # raises FunctionClauseError the first time an op carrying it is
+        # checked — under `:raise`, on a refused op, in somebody else's suite.
+        assert is_boolean(Fallback.allowed?(op, float_meta))
+        assert is_boolean(Fallback.allowed?(op, nil))
       end
+    end
+
+    test "no duplicate {op, condition} pairs — a second entry can never be reached" do
+      keys = for {op, condition, _reason} <- Fallback.allowlist(), do: {op, condition}
+      dupes = keys -- Enum.uniq(keys)
+
+      assert dupes == [],
+             "duplicate allowlist entries are dead lines nobody will notice: #{inspect(dupes)}"
     end
 
     test "a block kind is exempt alone — its neighbours in the family still raise" do
