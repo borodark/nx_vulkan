@@ -165,10 +165,48 @@ check takes seconds and the assumption cost a rebuild here. `-DENABLE_OPT=0`
 also produces identical output for plain `-V`, verified the same way, which
 matters on hosts without python3 to fetch SPIRV-Tools.
 
-JIT kernels are compiled the same way but at runtime by
-`Codegen.compile_cached/1`
-(`System.cmd("glslangValidator", ["-V", comp_path, "-o", spv_path])`) into the
-gitignored `priv/shader_cache/`.
+### Runtime compiles go through `Nx.Vulkan.Shader`, not `System.cmd`
+
+JIT and synthesised kernels are compiled at runtime, and there is now exactly
+ONE entry point for that — use it rather than shelling out:
+
+```elixir
+Nx.Vulkan.Shader.compile(glsl)                              # ~/.nx_vulkan/spv
+Nx.Vulkan.Shader.compile(glsl, cache_dir: dir, key: hash)   # your own cache
+#=> {:ok, spv_path} | {:error, %{exit: _, stderr: _, glsl_path: _}}
+#                   | {:error, %{invalid_spirv: _, glsl_path: _}}
+```
+
+`Synthesis.compile/1` (from a `%FamilySpec{}`) and `Codegen.compile_cached/1`
+(from GLSL) both delegate to it. It is public so a CONSUMER generating its own
+GLSL can call it with its own `cache_dir` — that gap is why eXMC grew a third
+glslang call site, and the boundary is recorded as decision 93 in the shared
+log: nx_vulkan owns GLSL → validated SPIR-V, the consumer owns the GLSL.
+
+**`glslangValidator` exiting 0 does NOT mean it wrote a valid module.** SPIR-V's
+per-instruction word count is a **16-bit** field, and a `const T[N]` literal
+becomes one `OpConstantComposite` needing `N + 3` words. Past the ceiling the
+field WRAPS and glslang still exits 0. Measured, glslang 15.1.0:
+
+    N        max instruction word count   glslang exit   binary
+    65530    65533                        0              valid
+    65533    7  (wrapped)                 0              CORRUPT
+
+Two consequences, which is why `Nx.Vulkan.Spirv` exists and why the cache
+validates on HIT and not only on write: vulkano's parser hits
+`assert!(word_count >= 1)` and **panics** rather than returning `ParseError`,
+and a content-addressed cache serves the corrupt artifact forever.
+
+If you must call glslang directly, call `Nx.Vulkan.Spirv.validate_file/1` on
+the result before caching or dispatching it. Note this ceiling is per
+INSTRUCTION; a consumer inlining data hit a much lower AGGREGATE driver limit
+first (~868-1302 elements summed across arrays), so do not assume the wrap
+explains a pipeline-creation failure.
+
+The `Codegen` cache is `~/.nx_vulkan/shader_cache`. It used to be
+`priv_dir(:nx_vulkan)/shader_cache` — a dependency's own install directory,
+shared across applications and read-only in some release layouts. Do not put a
+cache there.
 
 ## 4. Wiring a new static op end-to-end
 
@@ -256,7 +294,23 @@ fallback), to f32/f64 round-off. Concretely, from this repo:
   faster (fewer f64 MACs, big on f64-rate-limited GPUs) but only accurate enough
   when opted in. Conv-as-GEMM has the same f32acc/f64acc split.
 - **f64 transcendentals don't exist in SPIR-V** — boundary-cast through f32 (see
-  §1). Document the precision cost.
+  §1). Document the precision cost, and know where the cast BREAKS rather than
+  merely rounds: the f32 range is the ceiling, so `exp(float(x))` returns Inf
+  past `ln(f32_max) = 88.72`, and `exp(float(2x))` past half that, 44.36.
+  Measured per family on the 3060 Ti (`test/nx_vulkan/chain_boundary_test.exs`):
+
+      normal_f64        none to 700     no boundary cast anywhere
+      cauchy_f64        none to 700     log(1 + z^2) grows too slowly
+      studentt_f64      none to 700     same
+      exponential_f64   88.72           exp(float(q))
+      halfnormal_f64    44.36           exp(float(2q))
+      weibull_f64       44.36           same
+
+  This is IEEE, not driver behaviour, so it is identical fleet-wide. It matters
+  because a SAMPLER driving a scale parameter toward zero reaches these
+  magnitudes during warmup while every fixed-point test stays finite — the
+  finite-difference property in `docs/PROPERTY_TESTING.md` §6 cannot see it, by
+  construction, since it perturbs around a well-conditioned point.
 - **Contiguity**: kernels assume row-major contiguous buffers. The reduce path
   only fast-paths axis patterns that map to contiguous `(outer, reduce_size,
   inner)` slabs (`classify_reduce_axes`); anything else host-falls-back. Don't

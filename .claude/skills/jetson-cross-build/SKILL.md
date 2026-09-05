@@ -206,6 +206,25 @@ test is the one that executed:
     mix test --no-compile < /dev/null
     sha256sum priv/native/libnx_vulkan_vulkano.so   # must be unchanged
 
+**COMPARE ONLY WITHIN ONE `MIX_ENV`.** The artifact embeds its own absolute
+build path, so `_build/dev/...` and `_build/test/...` produce DIFFERENT bytes
+from identical source. Measured on super-io 2026-09-05, same commit:
+
+    mix compile                -> 71cf018235
+    MIX_ENV=test mix compile   -> fd64164779     (identical source)
+    mix compile                -> fd64164779     (dev did NOT take it back)
+
+And because `priv` is a symlink from both build trees, the two environments
+share ONE `.so` and the last writer keeps it — a `mix test` run can be
+executing the dev-env build, or vice versa. Same code, so this is a
+hash-reasoning hazard rather than a correctness one, but a cross-env comparison
+will report "the artifact changed" when nothing did, and that reads exactly
+like the swap this discipline exists to catch.
+
+Cargo itself is reproducible here: three consecutive forced rebuilds of
+identical source in one `MIX_ENV` gave one hash. A moving hash within a fixed
+env is real; across envs it is expected.
+
 ### `mix` swallows heredoc stdin
 
 `mix test` and `mix run` read stdin. Inside `ssh host 'bash -s'` with a heredoc
@@ -227,7 +246,7 @@ That second line is also the assertion that the box took the `unified` branch of
 `alloc_buffer` — worth reading, not skipping, since several code paths are
 no-ops only on that branch.
 
-Gate any deploy on the box's own correctness suite: **833 doctests, 907 tests,
+Gate any deploy on the box's own correctness suite: **833 doctests, 931 tests,
 0 failures** (871 before the 2026-09 property-test tier; 903 before the
 allowlist-integrity and strict-mode-validation tests). Note the suite prints a `GenServer terminating ** (RuntimeError)
 boom` trace from `node_test.exs` — that is an intentional test, not a failure.
