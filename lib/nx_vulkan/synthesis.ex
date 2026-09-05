@@ -68,49 +68,15 @@ defmodule Nx.Vulkan.Synthesis do
   `glslangValidator` failure.
   """
   def compile(%ShaderTemplate.FamilySpec{} = spec) do
-    glsl = ShaderTemplate.render(spec)
-    hash = :crypto.hash(:sha256, glsl) |> Base.encode16(case: :lower)
-    spv_path = Path.join(@cache_dir, "#{hash}.spv")
-
-    if File.exists?(spv_path) do
-      {:ok, spv_path}
-    else
-      File.mkdir_p!(@cache_dir)
-      compile_fresh(glsl, spv_path)
-    end
-  end
-
-  defp compile_fresh(glsl, spv_path) do
-    glsl_tmp = spv_path <> ".comp"
-    File.write!(glsl_tmp, glsl)
-
-    case System.cmd("glslangValidator", ["-V", glsl_tmp, "-o", spv_path], stderr_to_stdout: true) do
-      {_output, 0} ->
-        # glslangValidator exiting 0 does NOT mean it wrote a valid module: a
-        # single instruction over 65535 words wraps the 16-bit word-count field
-        # and the binary is corrupt while the exit code stays 0. Validate BEFORE
-        # returning, because this path caches by content hash — a corrupt .spv
-        # that reaches the cache is reused on every later run until deleted by
-        # hand, and vulkano PANICS the NIF on it rather than returning an error.
-        # See Nx.Vulkan.Spirv.
-        case Nx.Vulkan.Spirv.validate_file(spv_path) do
-          :ok ->
-            # `_ =` on purpose: the temp .comp is best-effort cleanup and a failed
-            # unlink must not fail a successful compile. Explicit so that
-            # :unmatched_returns stays on for the returns that DO matter.
-            _ = File.rm(glsl_tmp)
-            {:ok, spv_path}
-
-          {:error, why} ->
-            # Remove the corrupt artifact; leave the .comp so it can be inspected.
-            _ = File.rm(spv_path)
-            {:error, %{invalid_spirv: why, glsl_path: glsl_tmp}}
-        end
-
-      {output, code} ->
-        _ = File.rm(glsl_tmp)
-        {:error, %{exit: code, stderr: output, glsl_path: glsl_tmp}}
-    end
+    # Delegates to Nx.Vulkan.Shader, which is the single GLSL -> validated
+    # SPIR-V entry point for this library and for consumers generating their own
+    # GLSL. Identical behaviour to what this function did inline: same
+    # ~/.nx_vulkan/spv directory, same SHA-256 content key, same error shapes.
+    # What it gains is validation on cache HIT as well as on write, so a corrupt
+    # .spv written before that check existed is now repaired rather than served.
+    spec
+    |> ShaderTemplate.render()
+    |> Nx.Vulkan.Shader.compile()
   end
 
   @doc """

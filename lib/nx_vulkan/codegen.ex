@@ -569,41 +569,21 @@ defmodule Nx.Vulkan.Codegen do
   so a given fused kernel is compiled by glslangValidator exactly once.
   """
   def compile_cached(glsl) do
-    hash = :erlang.phash2(glsl, 0xFFFFFFFF)
-    cache_dir = Path.join(:code.priv_dir(:nx_vulkan), "shader_cache")
-    File.mkdir_p!(cache_dir)
-    spv_path = Path.join(cache_dir, "gen_#{Integer.to_string(hash, 16)}.spv")
-
-    if File.exists?(spv_path) do
-      {:ok, spv_path}
-    else
-      comp_path = spv_path <> ".comp"
-      File.write!(comp_path, glsl)
-
-      try do
-        case System.cmd("glslangValidator", ["-V", comp_path, "-o", spv_path],
-               stderr_to_stdout: true
-             ) do
-          {_, 0} ->
-            # Exit 0 is not proof of a valid module — see Nx.Vulkan.Spirv. This
-            # path caches by content hash too, so a corrupt binary would be
-            # reused indefinitely and panics the NIF rather than erroring.
-            case Nx.Vulkan.Spirv.validate_file(spv_path) do
-              :ok ->
-                {:ok, spv_path}
-
-              {:error, why} ->
-                _ = File.rm(spv_path)
-                {:error, why}
-            end
-
-          {out, _} ->
-            {:error, out}
-        end
-      after
-        File.rm(comp_path)
-      end
-    end
+    # Delegates to Nx.Vulkan.Shader — one glslang policy, one validator.
+    #
+    # TWO CHANGES from the inline version this replaces. The cache moved OUT of
+    # `:code.priv_dir(:nx_vulkan)/shader_cache`, which was a dependency's own
+    # install directory: shared by every application using this library and
+    # replaced on redeploy, and read-only in some release layouts. It now sits
+    # beside the other cache under the user's home. Existing entries are simply
+    # orphaned; they regenerate on first use.
+    #
+    # And the error is now a map rather than a bare string. All three call sites
+    # in Nx.Vulkan.Compiler match `{:error, _}`, so nothing needed changing.
+    Nx.Vulkan.Shader.compile(glsl,
+      cache_dir: Path.expand("~/.nx_vulkan/shader_cache"),
+      key: "gen_" <> Integer.to_string(:erlang.phash2(glsl, 0xFFFFFFFF), 16)
+    )
   end
 
   # The erf/expm1 approximations are f32-only — every op that calls them is in
