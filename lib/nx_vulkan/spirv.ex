@@ -23,8 +23,19 @@ defmodule Nx.Vulkan.Spirv do
   paths cache by content hash — the corrupt artifact is written to the cache
   and reused on every subsequent run until someone deletes it by hand.
 
-  A consumer that inlines tensor data as shader literals crosses this ceiling
-  by growing its *data*, with no change to its code.
+  A consumer that inlines tensor data as shader literals could cross this
+  ceiling by growing its *data*, with no change to its code.
+
+  **But do not assume this is the limit such a consumer will hit first.** The
+  case that prompted this check — eXMC inlining closure-captured tensors as
+  `const double[]` — turned out to sit two orders of magnitude BELOW the wrap:
+  its largest single array was 1350 elements, and it failed at pipeline
+  creation somewhere between 868 and 1302 elements summed across ~3 separate
+  arrays. That is an aggregate driver/compiler limit, not this per-instruction
+  one, and the two behave differently: below the wrap you get a clean
+  `Validated` error, at or above it you get a corrupt binary glslang called
+  fine. Splitting one large literal into several smaller ones evades THIS
+  ceiling and does nothing for that one.
 
   ## What is checked
 

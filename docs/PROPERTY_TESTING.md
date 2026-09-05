@@ -280,6 +280,30 @@ log space where a large `q_uc` legitimately overflows the f32 boundary cast in
 `exp()`. That is a documented limitation, not a bug, so fuzzing into it produces
 noise rather than signal.
 
+It is now *characterised* rather than merely asserted. Measured on the RTX 3060
+Ti at d=2, K=1 — the first |q| at which `logp` or `grad` goes non-finite:
+
+| family | threshold | why |
+|---|---|---|
+| `normal_f64` | none to 700 | no boundary cast anywhere |
+| `cauchy_f64` | none to 700 | `log(1 + z²)` grows too slowly to reach it |
+| `studentt_f64` | none to 700 | same |
+| `exponential_f64` | **88.72** | `exp(float(q))`, and ln(f32_max) = 88.7228 |
+| `halfnormal_f64` | **44.36** | `exp(float(2q))`, so half of it |
+| `weibull_f64` | **44.36** | same |
+
+The two numbers are exactly `ln(f32_max)` and `ln(f32_max)/2`. Nothing about
+this is device-specific — it is the IEEE f32 range meeting a cast the shader
+performs deliberately, because GLSL.std.450 has no f64 transcendentals.
+
+**What this means for a sampler.** A NUTS chain that drives a scale parameter
+toward zero can reach these magnitudes in unconstrained space *during warmup*
+while every fixed-point test stays finite, which is why the finite-difference
+property in §6 cannot see it: it perturbs around a well-conditioned point by
+construction. A failure that requires the sampler to get somewhere first is
+outside what any of these properties test, and `chain_boundary_test.exs` pins
+the thresholds rather than pretending otherwise.
+
 **Instances-do-not-bleed as a swept axis.** Strictly subsumed by per-instance
 bit-identity: if instance *i* equals its own single-dispatch reference for every
 *i*, and the inputs differ per instance, bleed is already excluded. The single
