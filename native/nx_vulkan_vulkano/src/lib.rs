@@ -137,10 +137,39 @@ fn get_or_create_pipeline(
     let spv_bytes = fs::read(spv_path).map_err(|e| format!("read spv: {e}"))?;
     let spv_words = bytes_to_u32_words(&spv_bytes)?;
 
-    let shader = unsafe {
+    // vulkano PARSES the SPIR-V here, and its parser asserts rather than
+    // returning its own ParseError: an instruction declaring a word count of 0
+    // hits `assert!(word_count >= 1)` (vulkano-0.34.2/src/shader/spirv/mod.rs:678)
+    // and unwinds. Rustler turns that into an opaque `:nif_panicked` with no
+    // indication of which shader or why.
+    //
+    // Reachable in practice, and not by a malformed file we wrote: glslang
+    // exits 0 while emitting an instruction whose 16-bit word count has wrapped,
+    // which a const array of more than ~65532 elements produces. Nx.Vulkan.Spirv
+    // now rejects those before they are cached, so this is the second line —
+    // it also covers any OTHER assert in vulkano's parser, which we do not
+    // enumerate and should not have to.
+    //
+    // AssertUnwindSafe: on the unwind path we construct a String and return it;
+    // nothing observes a half-mutated value, and `context` is behind an Arc.
+    let shader = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-            .map_err(|e| vk_err("ShaderModule", e))?
-    };
+            .map_err(|e| vk_err("ShaderModule", e))
+    }))
+    .map_err(|panic| {
+        let detail = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        format!(
+            "ShaderModule: vulkano panicked parsing {} ({} bytes): {detail}. \
+             The SPIR-V is malformed — most often an instruction whose 16-bit \
+             word count overflowed, which glslang emits while still exiting 0.",
+            spv_path,
+            spv_bytes.len()
+        )
+    })??;
 
     let entry = match op_code {
         Some(op) => {
@@ -541,6 +570,13 @@ fn upload_buffer_deferred(
     bytes: &[u8],
     usage: BufferUsage,
 ) -> Result<Subbuffer<[u8]>, String> {
+    // Same reason as alloc_buffer: the small-buffer path reaches
+    // Buffer::from_iter, which panics on an empty iterator.
+    if bytes.is_empty() {
+        return Err("upload_buffer_deferred: refusing an empty upload; Vulkan has no zero-sized buffers"
+            .to_string());
+    }
+
     let buf = alloc_buffer(
         context.mem_allocator.clone(),
         bytes.len(),
@@ -579,6 +615,13 @@ fn upload_buffer_staged(
     bytes: &[u8],
     usage: BufferUsage,
 ) -> Result<StagedUpload, String> {
+    // Same reason as alloc_buffer: the small-buffer path reaches
+    // Buffer::from_iter, which panics on an empty iterator.
+    if bytes.is_empty() {
+        return Err("upload_buffer_staged: refusing an empty upload; Vulkan has no zero-sized buffers"
+            .to_string());
+    }
+
     // Small-buffer fast path, checked BEFORE allocating anything so it does not
     // pay for a device-local buffer it would then discard. One allocation and
     // no copy, which is the allocation count this path had at 6b38aee.
@@ -781,6 +824,21 @@ fn alloc_buffer(
     n_bytes: usize,
     usage: BufferUsage,
 ) -> Result<Subbuffer<[u8]>, String> {
+    // Vulkan has no zero-sized buffers, and vulkano enforces that by PANICKING:
+    // `NonZeroDeviceSize::new(len).expect("empty slices are not valid buffer
+    // contents")` (vulkano-0.34.2/src/buffer/mod.rs:363). Through Rustler that
+    // surfaces as an opaque `:nif_panicked`.
+    //
+    // Nx refuses zero-sized shapes before a backend ever sees one — Nx.tensor([]),
+    // Nx.broadcast(0.0, {0}) and a zero-length slice all raise ArgumentError — so
+    // this is not reachable from ordinary tensor code. It IS reachable from a
+    // direct NativeV call, and from any future backend path that computes a byte
+    // count and gets zero. A boundary that turns bad input into a panic is worth
+    // one comparison to close.
+    if n_bytes == 0 {
+        return Err("alloc buffer: zero-sized buffers do not exist in Vulkan".to_string());
+    }
+
     // On unified memory, ask for host access directly and skip staging
     // entirely. The Jetson measured the unconditional staging path costing it
     // 47-152% on every boundary crossing for ZERO compute gain — its

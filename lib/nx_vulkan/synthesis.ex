@@ -86,11 +86,26 @@ defmodule Nx.Vulkan.Synthesis do
 
     case System.cmd("glslangValidator", ["-V", glsl_tmp, "-o", spv_path], stderr_to_stdout: true) do
       {_output, 0} ->
-        # `_ =` on purpose: the temp .comp is best-effort cleanup and a failed
-        # unlink must not fail a successful compile. Explicit so that
-        # :unmatched_returns stays on for the returns that DO matter.
-        _ = File.rm(glsl_tmp)
-        {:ok, spv_path}
+        # glslangValidator exiting 0 does NOT mean it wrote a valid module: a
+        # single instruction over 65535 words wraps the 16-bit word-count field
+        # and the binary is corrupt while the exit code stays 0. Validate BEFORE
+        # returning, because this path caches by content hash — a corrupt .spv
+        # that reaches the cache is reused on every later run until deleted by
+        # hand, and vulkano PANICS the NIF on it rather than returning an error.
+        # See Nx.Vulkan.Spirv.
+        case Nx.Vulkan.Spirv.validate_file(spv_path) do
+          :ok ->
+            # `_ =` on purpose: the temp .comp is best-effort cleanup and a failed
+            # unlink must not fail a successful compile. Explicit so that
+            # :unmatched_returns stays on for the returns that DO matter.
+            _ = File.rm(glsl_tmp)
+            {:ok, spv_path}
+
+          {:error, why} ->
+            # Remove the corrupt artifact; leave the .comp so it can be inspected.
+            _ = File.rm(spv_path)
+            {:error, %{invalid_spirv: why, glsl_path: glsl_tmp}}
+        end
 
       {output, code} ->
         _ = File.rm(glsl_tmp)

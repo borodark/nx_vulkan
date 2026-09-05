@@ -584,8 +584,21 @@ defmodule Nx.Vulkan.Codegen do
         case System.cmd("glslangValidator", ["-V", comp_path, "-o", spv_path],
                stderr_to_stdout: true
              ) do
-          {_, 0} -> {:ok, spv_path}
-          {out, _} -> {:error, out}
+          {_, 0} ->
+            # Exit 0 is not proof of a valid module — see Nx.Vulkan.Spirv. This
+            # path caches by content hash too, so a corrupt binary would be
+            # reused indefinitely and panics the NIF rather than erroring.
+            case Nx.Vulkan.Spirv.validate_file(spv_path) do
+              :ok ->
+                {:ok, spv_path}
+
+              {:error, why} ->
+                _ = File.rm(spv_path)
+                {:error, why}
+            end
+
+          {out, _} ->
+            {:error, out}
         end
       after
         File.rm(comp_path)
