@@ -86,6 +86,36 @@ struct CachedPipeline {
 static PIPELINE_CACHE: OnceLock<Mutex<std::collections::HashMap<(String, i32), CachedPipeline>>> =
     OnceLock::new();
 
+
+/// Format a vulkano error, keeping the cause.
+///
+/// vulkano 0.34's `Validated<E>` has an INVERTED Display/Debug pair
+/// (vulkano-0.34.2/src/lib.rs:466 and :476):
+///
+/// ```text
+/// impl<E> Display for Validated<E>            // "a non-validation error occurred"
+/// impl<E> Debug   for Validated<E> where E: Display   // "...occurred: OutOfDeviceMemory"
+/// ```
+///
+/// `Display` matches `Self::Error(_)` and THROWS THE INNER ERROR AWAY; only
+/// `Debug` keeps it. That is backwards from the usual instinct, which is how
+/// every `format!("ctx: {e}")` in this file came to delete the one word that
+/// mattered before it reached Elixir.
+///
+/// The cost of that is measured, not hypothetical: an exmc session spent a day
+/// establishing, from an n_obs x n_beta table across 33 posteriordb models and
+/// a SPIR-V size census, a cause that `{e:?}` would have printed outright.
+///
+/// Do NOT "fix" this back to `{e}`. This matches the variants explicitly rather
+/// than using `{e:?}` because `ValidationError` has a good `Display` of its own
+/// (context, problem, VUIDs) and Debug wraps it in a multi-line "Caused by:".
+fn vk_err<E: std::fmt::Display>(ctx: &str, e: vulkano::Validated<E>) -> String {
+    match e {
+        vulkano::Validated::Error(inner) => format!("{ctx}: {inner}"),
+        vulkano::Validated::ValidationError(inner) => format!("{ctx}: validation failed: {inner}"),
+    }
+}
+
 fn pipeline_cache() -> &'static Mutex<std::collections::HashMap<(String, i32), CachedPipeline>> {
     PIPELINE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
@@ -109,7 +139,7 @@ fn get_or_create_pipeline(
 
     let shader = unsafe {
         ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-            .map_err(|e| format!("ShaderModule: {e}"))?
+            .map_err(|e| vk_err("ShaderModule", e))?
     };
 
     let entry = match op_code {
@@ -134,14 +164,14 @@ fn get_or_create_pipeline(
         .into_pipeline_layout_create_info(context.device.clone())
         .map_err(|e| format!("layout info: {e}"))?;
     let layout = PipelineLayout::new(context.device.clone(), layout_info)
-        .map_err(|e| format!("PipelineLayout: {e}"))?;
+        .map_err(|e| vk_err("PipelineLayout", e))?;
 
     let pipeline = ComputePipeline::new(
         context.device.clone(),
         None,
         ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
     )
-    .map_err(|e| format!("ComputePipeline: {e}"))?;
+    .map_err(|e| vk_err("ComputePipeline", e))?;
 
     let cached = CachedPipeline { layout, pipeline };
 
@@ -188,7 +218,7 @@ fn ctx() -> Result<&'static VkContext, String> {
 
     let library = VulkanLibrary::new().map_err(|e| format!("VulkanLibrary::new: {e}"))?;
     let instance = Instance::new(library, InstanceCreateInfo::default())
-        .map_err(|e| format!("Instance::new: {e}"))?;
+        .map_err(|e| vk_err("Instance::new", e))?;
 
     let (physical, queue_family_index) = instance
         .enumerate_physical_devices()
@@ -269,7 +299,7 @@ fn ctx() -> Result<&'static VkContext, String> {
             ..Default::default()
         },
     )
-    .map_err(|e| format!("Device::new: {e}"))?;
+    .map_err(|e| vk_err("Device::new", e))?;
 
     let queue = queues.next().ok_or_else(|| "no queue".to_string())?;
 
@@ -572,7 +602,7 @@ fn upload_buffer_staged(
             },
             bytes.iter().copied(),
         )
-        .map_err(|e| format!("small upload: {e}"))?;
+        .map_err(|e| vk_err("small upload", e))?;
         return Ok((buf, None));
     }
 
@@ -605,7 +635,7 @@ fn upload_buffer_staged(
         },
         bytes.iter().copied(),
     )
-    .map_err(|e| format!("staging alloc (write): {e}"))?;
+    .map_err(|e| vk_err("staging alloc (write)", e))?;
 
     Ok((buf, Some(staging)))
 }
@@ -778,7 +808,7 @@ fn alloc_buffer(
             },
             n_bytes as u64,
         )
-        .map_err(|e| format!("alloc buffer (unified): {e}"));
+        .map_err(|e| vk_err("alloc buffer (unified)", e));
     }
 
     Buffer::new_slice::<u8>(
@@ -810,7 +840,7 @@ fn alloc_buffer(
         },
         n_bytes as u64,
     )
-    .map_err(|e| format!("alloc buffer: {e}"))
+    .map_err(|e| vk_err("alloc buffer", e))
 }
 
 /// Copy a DEVICE_LOCAL buffer into a host-visible staging buffer and hand the
@@ -848,7 +878,7 @@ fn staging_read<'a>(
         },
         n,
     )
-    .map_err(|e| format!("staging alloc (read): {e}"))?;
+    .map_err(|e| vk_err("staging alloc (read)", e))?;
 
     let mut cmd = new_cmd_builder(context)?;
     cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
@@ -918,7 +948,7 @@ fn staging_read_many<'a>(
             },
             src.len(),
         )
-        .map_err(|e| format!("staging alloc (read, batched): {e}"))?;
+        .map_err(|e| vk_err("staging alloc (read, batched)", e))?;
 
         cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
             src,
@@ -967,7 +997,7 @@ fn staging_write(context: &VkContext, dst: Subbuffer<[u8]>, bytes: &[u8]) -> Res
         },
         bytes.iter().copied(),
     )
-    .map_err(|e| format!("staging alloc (write): {e}"))?;
+    .map_err(|e| vk_err("staging alloc (write)", e))?;
 
     let mut cmd = new_cmd_builder(context)?;
     cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(staging, dst))
@@ -1013,7 +1043,7 @@ fn enqueue_staging_write(
         },
         bytes.iter().copied(),
     )
-    .map_err(|e| format!("staging alloc (write): {e}"))?;
+    .map_err(|e| vk_err("staging alloc (write)", e))?;
 
     let record: RecordFn = Box::new(move |cmd: &mut CmdBuilder| {
         cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(staging, dst))
@@ -1155,7 +1185,7 @@ fn record_readback(
             },
             src.len(),
         )
-        .map_err(|e| format!("staging alloc (recorded read): {e}"))?;
+        .map_err(|e| vk_err("staging alloc (recorded read)", e))?;
 
         cmd.copy_buffer(vulkano::command_buffer::CopyBufferInfo::buffers(
             src.clone(),
@@ -1333,14 +1363,14 @@ fn leapfrog_chain_synth<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
             CommandBufferUsage::SimultaneousUse,
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        .map_err(|e| vk_err("cmd builder", e))?;
 
         record_upload(&mut cmd, &q_staged)?;
         record_upload(&mut cmd, &p_staged)?;
@@ -1360,7 +1390,7 @@ fn leapfrog_chain_synth<'a>(
         let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
         let stagings = record_readback(context, &mut cmd, &outs)?;
 
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
 
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
@@ -1521,14 +1551,14 @@ fn leapfrog_chain_synth_f64<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
             CommandBufferUsage::SimultaneousUse,
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        .map_err(|e| vk_err("cmd builder", e))?;
 
         record_upload(&mut cmd, &q_staged)?;
         record_upload(&mut cmd, &p_staged)?;
@@ -1548,7 +1578,7 @@ fn leapfrog_chain_synth_f64<'a>(
         let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
         let stagings = record_readback(context, &mut cmd, &outs)?;
 
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
 
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
@@ -1711,14 +1741,14 @@ fn leapfrog_chain_synth_batch<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
             CommandBufferUsage::SimultaneousUse,
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        .map_err(|e| vk_err("cmd builder", e))?;
 
         record_upload(&mut cmd, &q_staged)?;
         record_upload(&mut cmd, &p_staged)?;
@@ -1741,7 +1771,7 @@ fn leapfrog_chain_synth_batch<'a>(
         let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
         let stagings = record_readback(context, &mut cmd, &outs)?;
 
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
 
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
@@ -1917,14 +1947,14 @@ fn leapfrog_chain_synth_batch_f64<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let mut cmd = AutoCommandBufferBuilder::primary(
             &context.cmd_allocator,
             context.queue.queue_family_index(),
             CommandBufferUsage::SimultaneousUse,
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        .map_err(|e| vk_err("cmd builder", e))?;
 
         record_upload(&mut cmd, &q_staged)?;
         record_upload(&mut cmd, &p_staged)?;
@@ -1947,7 +1977,7 @@ fn leapfrog_chain_synth_batch_f64<'a>(
         let outs = [q_chain_buf, p_chain_buf, grad_chain_buf, logp_chain_buf];
         let stagings = record_readback(context, &mut cmd, &outs)?;
 
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
 
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
@@ -2297,7 +2327,7 @@ fn apply_binary<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -2350,7 +2380,7 @@ fn apply_binary_broadcast<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
@@ -2395,7 +2425,7 @@ fn apply_compare<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let nwords = n.div_ceil(4);
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [nwords.div_ceil(256), 1, 1])
@@ -2443,7 +2473,7 @@ fn apply_select<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
@@ -2490,7 +2520,7 @@ fn apply_put_slice<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
@@ -2531,7 +2561,7 @@ fn apply_slice<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
@@ -2576,7 +2606,7 @@ fn apply_pad<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank }, [n.div_ceil(256), 1, 1])
     })();
@@ -2631,7 +2661,7 @@ fn apply_scatter<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
     })();
@@ -2703,7 +2733,7 @@ fn apply_scatter_ordered<'a>(
                 ],
                 [],
             )
-            .map_err(|e| format!("descriptor set: {e}"))
+            .map_err(|e| vk_err("descriptor set", e))
         };
 
         let mark_set = make_set(&mark)?;
@@ -2787,7 +2817,7 @@ fn apply_gather<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBcast { n, rank: k }, [n.div_ceil(256), 1, 1])
     })();
@@ -2834,7 +2864,7 @@ fn dispatch_generated<'a>(
             writes,
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -2883,7 +2913,7 @@ fn dispatch_generated_reduce<'a>(
             writes,
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         // Parallel tree reduce: one workgroup per output slot (each workgroup's
         // 256 threads cooperatively reduce that slot's axis). The shader
@@ -2938,7 +2968,7 @@ fn cast<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -2982,7 +3012,7 @@ fn cast_spec<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -3027,7 +3057,7 @@ fn apply_unary<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushN { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -3078,7 +3108,7 @@ fn reduce_axis<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let n_slots = outer * inner;
 
@@ -3131,7 +3161,7 @@ fn transpose_2d<'a>(
 
         let shader = unsafe {
             ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
+                .map_err(|e| vk_err("ShaderModule", e))?
         };
 
         let entry = shader
@@ -3143,14 +3173,14 @@ fn transpose_2d<'a>(
             .into_pipeline_layout_create_info(context.device.clone())
             .map_err(|e| format!("layout info: {e}"))?;
         let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
+            .map_err(|e| vk_err("PipelineLayout", e))?;
 
         let pipeline = ComputePipeline::new(
             context.device.clone(),
             None,
             ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
         )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        .map_err(|e| vk_err("ComputePipeline", e))?;
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -3161,7 +3191,7 @@ fn transpose_2d<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let gx = n.div_ceil(16);
         let gy = m.div_ceil(16);
@@ -3220,7 +3250,7 @@ fn window_scatter_max<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3269,7 +3299,7 @@ fn window_reduce<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3321,7 +3351,7 @@ fn broadcast_nd<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(context, &cached, set, PushBroadcastNd { n }, [n.div_ceil(256), 1, 1])
     })();
@@ -3366,7 +3396,7 @@ fn reverse_nd<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3425,7 +3455,7 @@ fn transpose_nd<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3488,7 +3518,7 @@ fn concat_nd<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3547,7 +3577,7 @@ fn matmul<'a>(
 
         let shader = unsafe {
             ShaderModule::new(context.device.clone(), ShaderModuleCreateInfo::new(&spv_words))
-                .map_err(|e| format!("ShaderModule: {e}"))?
+                .map_err(|e| vk_err("ShaderModule", e))?
         };
 
         let entry = shader
@@ -3559,14 +3589,14 @@ fn matmul<'a>(
             .into_pipeline_layout_create_info(context.device.clone())
             .map_err(|e| format!("layout info: {e}"))?;
         let layout = PipelineLayout::new(context.device.clone(), layout_info)
-            .map_err(|e| format!("PipelineLayout: {e}"))?;
+            .map_err(|e| vk_err("PipelineLayout", e))?;
 
         let pipeline = ComputePipeline::new(
             context.device.clone(),
             None,
             ComputePipelineCreateInfo::stage_layout(stage, layout.clone()),
         )
-        .map_err(|e| format!("ComputePipeline: {e}"))?;
+        .map_err(|e| vk_err("ComputePipeline", e))?;
 
         let set = PersistentDescriptorSet::new(
             &context.set_allocator,
@@ -3578,7 +3608,7 @@ fn matmul<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let gx = n.div_ceil(16);
         let gy = m.div_ceil(16);
@@ -3643,7 +3673,7 @@ fn matmul_batched<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         enqueue_dispatch(
             context,
@@ -3689,7 +3719,7 @@ fn matmul32<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let gx = (n + 31) / 32;
         let gy = (m + 31) / 32;
@@ -3787,7 +3817,7 @@ fn fft<'a>(
             context.queue.queue_family_index(),
             CommandBufferUsage::SimultaneousUse,
         )
-        .map_err(|e| format!("cmd builder: {e}"))?;
+        .map_err(|e| vk_err("cmd builder", e))?;
 
         record_upload(&mut cmd, &tw_staged)?;
 
@@ -3801,7 +3831,7 @@ fn fft<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("load descriptor set: {e}"))?;
+        .map_err(|e| vk_err("load descriptor set", e))?;
 
         let load_groups = (batch * n).div_ceil(64);
         cmd.bind_pipeline_compute(bitrev.pipeline.clone())
@@ -3829,7 +3859,7 @@ fn fft<'a>(
                 ],
                 [],
             )
-            .map_err(|e| format!("stage descriptor set: {e}"))?;
+            .map_err(|e| vk_err("stage descriptor set", e))?;
 
             cmd.bind_pipeline_compute(stage.pipeline.clone())
                 .map_err(|e| format!("bind pipeline: {e}"))?
@@ -3841,7 +3871,7 @@ fn fft<'a>(
                 .map_err(|e| format!("dispatch: {e}"))?;
         }
 
-        let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+        let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
         let future = sync::now(context.device.clone())
             .then_execute(context.queue.clone(), cmd_buf)
             .map_err(|e| format!("then_execute: {e}"))?;
@@ -3915,7 +3945,7 @@ fn conv_im2col<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         let groups = (n * o_total).saturating_mul(k).div_ceil(64);
         enqueue_dispatch(
@@ -3963,7 +3993,7 @@ fn conv_gemm<'a>(
             ],
             [],
         )
-        .map_err(|e| format!("descriptor set: {e}"))?;
+        .map_err(|e| vk_err("descriptor set", e))?;
 
         // Tiled conv GEMM: C = A·Wᵀ over (M = N·O_total rows, Cout cols), 16×16
         // workgroups. global x over Cout, global y over M.
@@ -4141,7 +4171,7 @@ fn batch_max() -> usize {
 /// fallback can do nothing but re-run the same failing call. Leaving the
 /// future armed cannot recover the device; it can only hide the reason.
 fn finish_and_disarm<F: GpuFuture>(context: &VkContext, future: F) -> Result<(), String> {
-    let flushed = future.flush().map_err(|e| format!("flush: {e}"));
+    let flushed = future.flush().map_err(|e| vk_err("flush", e));
 
     // Only wait if the submit itself went through. If flush failed there may
     // be nothing queued, and on a lost device wait_idle just fails again.
@@ -4171,7 +4201,7 @@ fn finish_and_disarm<F: GpuFuture>(context: &VkContext, future: F) -> Result<(),
 /// the final two the buffers stay marked in use and the next `buf.read()`
 /// fails with "resource in use".
 fn submit_and_wait(context: &VkContext, cmd: CmdBuilder) -> Result<(), String> {
-    let cmd_buf = cmd.build().map_err(|e| format!("build cmd: {e}"))?;
+    let cmd_buf = cmd.build().map_err(|e| vk_err("build cmd", e))?;
     let future = sync::now(context.device.clone())
         .then_execute(context.queue.clone(), cmd_buf)
         .map_err(|e| format!("then_execute: {e}"))?;
@@ -4185,7 +4215,7 @@ fn new_cmd_builder(context: &VkContext) -> Result<CmdBuilder, String> {
         context.queue.queue_family_index(),
         CommandBufferUsage::SimultaneousUse,
     )
-    .map_err(|e| format!("cmd builder: {e}"))
+    .map_err(|e| vk_err("cmd builder", e))
 }
 
 /// Replay every queued dispatch into one command buffer and submit it. The

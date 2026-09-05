@@ -20,6 +20,26 @@ import Config
 # says nothing about the code you just compiled. ALWAYS checksum
 # priv/native/libnx_vulkan_vulkano.so before and after. The skill documents the
 # procedure; this comment exists so the trap is visible from the config too.
+#
+# WHAT THE CHECKSUM DOES AND DOES NOT PROVE. It proves the artifact was not
+# REPLACED — which is the only thing this flag needs it for. It does NOT prove
+# "the Rust source did not change", and the difference matters because the
+# artifact embeds its own absolute build path. Measured on super-io 2026-09-05,
+# same source, same commit:
+#
+#     mix compile                -> 71cf018235...
+#     MIX_ENV=test mix compile   -> fd64164779...   (identical source)
+#     mix compile                -> fd64164779...   (dev did NOT take it back)
+#
+# So MIX_ENV alone flips the hash, because `_build/dev/...` and `_build/test/...`
+# appear inside the binary. And since `priv` is a symlink from both build trees,
+# the two environments share ONE artifact and the last writer keeps it — a dev
+# run can be executing the test-env build. Same code either way, so this is a
+# hash-reasoning hazard rather than a correctness one.
+#
+# Cargo itself IS reproducible here: three consecutive forced rebuilds of
+# identical source in one MIX_ENV gave one hash. Compare checksums only within
+# a fixed MIX_ENV; across envs they differ by construction, not by drift.
 if System.get_env("NXV_SKIP_NIF_BUILD") == "1" do
   IO.puts(:stderr, """
   [nx_vulkan] NXV_SKIP_NIF_BUILD=1 — Rustler will NOT build the crate;
