@@ -130,6 +130,21 @@ defmodule Nx.Vulkan.Fallback do
   @strict_key :nx_vulkan_fallback_strict
   @modes [:allow, :warn, :raise]
 
+  @typedoc """
+  When an allowlist entry applies. Every form here must have a matching
+  `condition_met?/2` clause — one that does not raises `FunctionClauseError` at
+  the first refused op, under `:raise`, in somebody else's suite.
+
+  This spec listed only the first two forms for a day after `{:dtype, _}` was
+  added; `mix dialyzer` with `:specdiffs` is what noticed, and
+  `test/nx_vulkan/fallback_test.exs` now asserts it without needing that flag.
+  """
+  @type condition ::
+          :always
+          | {:rank_at_least, pos_integer()}
+          | {:dtype, Nx.Type.t()}
+          | :float_output
+
   @doc """
   Run `fun` with fallback recording enabled, returning `{result, counts}` where
   `counts` maps `{function, arity}` of the backend callback that fell back to
@@ -383,9 +398,7 @@ defmodule Nx.Vulkan.Fallback do
   Exposed so a test can assert on it — an allowlist that only exists in a
   module attribute is one nobody reviews.
   """
-  @spec allowlist() :: [
-          {{atom(), arity() | module()}, :always | {:rank_at_least, pos_integer()}, String.t()}
-        ]
+  @spec allowlist() :: [{{atom(), arity() | module()}, condition(), String.t()}]
   def allowlist, do: @allowlist
 
   @doc """

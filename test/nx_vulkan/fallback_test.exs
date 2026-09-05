@@ -908,4 +908,63 @@ defmodule Nx.Vulkan.FallbackTest do
     end
   end
 
+  describe "the allowlist's own integrity" do
+    # `allowlist/0` is documented as existing "so a test can assert on it — an
+    # allowlist that only exists in a module attribute is one nobody reviews."
+    # This is that test, and it guards the failure mode that documentation
+    # cannot: a condition form with no `condition_met?/2` clause compiles
+    # cleanly and raises FunctionClauseError the first time an op carrying it
+    # is checked — which happens under `:raise`, on a refused op, in somebody
+    # else's suite.
+    #
+    # Found because `mix dialyzer` with `:specdiffs` reported the `allowlist/0`
+    # spec as unequal to its success typing: the spec still said the only
+    # conditions were `:always` and `{:rank_at_least, n}` a day after
+    # `{:dtype, {:f, 64}}` was added to narrow the `pow` entry. That flag is
+    # off by default because it costs six noise findings to catch this one, so
+    # the check lives here instead, where it is exact and runs every time.
+
+    defp valid_condition?(:always), do: true
+    defp valid_condition?(:float_output), do: true
+
+    defp valid_condition?({:rank_at_least, n}) when is_integer(n) and n > 0, do: true
+
+    defp valid_condition?({:dtype, {kind, bits}}) when is_atom(kind) and is_integer(bits),
+      do: true
+
+    defp valid_condition?(_other), do: false
+
+    test "every entry's condition is a form the checker actually handles" do
+      meta = Nx.tensor([[1.0, 2.0]], type: {:f, 64}, backend: Nx.BinaryBackend)
+
+      for {op, condition, reason} <- Fallback.allowlist() do
+        assert valid_condition?(condition),
+               "#{inspect(op)} carries an unrecognised condition #{inspect(condition)}"
+
+        assert is_binary(reason) and reason != "",
+               "#{inspect(op)} has no reason; the allowlist is one line per exemption WITH a reason"
+
+        # The load-bearing assertion. A condition with no `condition_met?/2`
+        # clause raises here rather than at a consumer's first refused op.
+        assert is_boolean(Fallback.allowed?(op, meta))
+        assert is_boolean(Fallback.allowed?(op, nil))
+      end
+    end
+
+    test "the null arm — the form check rejects a condition nobody implements" do
+      refute valid_condition?({:rank_at_most, 2})
+      refute valid_condition?(:sometimes)
+      refute valid_condition?({:dtype, :f64})
+      refute valid_condition?({:rank_at_least, 0})
+    end
+
+    test "no duplicate {op, condition} pairs — a second entry can never be reached" do
+      keys = for {op, condition, _reason} <- Fallback.allowlist(), do: {op, condition}
+      dupes = keys -- Enum.uniq(keys)
+
+      assert dupes == [],
+             "duplicate allowlist entries are dead lines nobody will notice: #{inspect(dupes)}"
+    end
+  end
+
 end

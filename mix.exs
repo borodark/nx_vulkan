@@ -33,10 +33,31 @@ defmodule Nx.Vulkan.MixProject do
         # :error_handling reports functions that only terminate by raising.
         # There is one deliberate case (`__shard_jit__/6`), filtered.
         #
-        # NOT enabled: :underspecs, :overspecs, :specdiffs. Those reported 13
-        # findings and every one was a spec deliberately narrower or wider than
-        # the inferred success typing, which is what a hand-written spec is FOR.
-        # Turning them on would trade a useful signal for noise.
+        # NOT enabled: :underspecs, :overspecs, :specdiffs. Re-run 2026-09-05:
+        # **7** findings, not the 13 this comment used to claim, and :specdiffs
+        # subsumes the other two (1 supertype, 5 subtype/missing_range, plus the
+        # contract_diff only it reports). Every one is a hand-written spec
+        # deliberately narrower or wider than the inferred success typing, which
+        # is what a spec is FOR:
+        #
+        #   - allowlist/0 returns a literal module attribute, so the success
+        #     typing enumerates every op name, every block module, the exact
+        #     {:rank_at_least, 5}, and a minimum binary size. NO generalising
+        #     spec can ever equal that. Permanent, unavoidable noise.
+        #   - count_total/1's inferred return is number() only because
+        #     Enum.sum/1's own spec says number(); the map values are
+        #     pos_integer(). The hand-written non_neg_integer() is the tighter
+        #     and correct one.
+        #   - mode/0 narrows Application.get_env's any() to the three-value
+        #     enum. See the note on validation in lib/nx_vulkan/fallback.ex.
+        #
+        # So the reasoning holds — BUT it nearly cost something. The
+        # allowlist/0 contract_diff, which fires unconditionally, had a real
+        # defect hiding inside its diff: the spec's condition union still said
+        # `:always | {:rank_at_least, _}` a day after `{:dtype, _}` was added.
+        # A permanently-noisy signal is exactly where that hides. The fix was
+        # not to enable the flag but to assert it exactly, in
+        # test/nx_vulkan/fallback_test.exs -> "the allowlist's own integrity".
         flags: [:unmatched_returns, :error_handling],
         plt_add_apps: [:nx, :ex_unit, :mix],
         plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
