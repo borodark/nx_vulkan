@@ -12,7 +12,7 @@ the toolchain pin.
 def deps do
   [
     {:nx, "~> 0.13"},
-    {:nx_vulkan, "~> 0.3"}
+    {:nx_vulkan, "~> 0.4"}
   ]
 end
 ```

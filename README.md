@@ -8,7 +8,7 @@ Metal never reached.
 ```elixir
 # mix.exs
 {:nx, "~> 0.13"},
-{:nx_vulkan, "~> 0.3"}
+{:nx_vulkan, "~> 0.4"}
 ```
 
 ```elixir
