@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-09-05)
+
+**The residency release.** 0.3.0 made the backward pass run on the GPU; 0.4.0
+is about finding everything else that was still leaving it. The instrument came
+first and the shaders followed: **398 → 755 of 833 upstream `Nx` doctests now
+run with host fallbacks *refused*** (47% → 90.6%), across ~44 new GLSL kernels
+and 9 new NIFs.
+
+A host fallback returns a bit-identical result — it computes on
+`Nx.BinaryBackend`, which is the reference every other test compares against —
+so no assertion on values can distinguish "ran on the GPU" from "silently
+didn't". Every number above is therefore a count of refusals, not of passes.
+
+Verified on four boxes before tagging — RTX 3060 Ti (Ampere, Linux), GT 750M and
+GT 650M (Kepler, FreeBSD), Tegra X1 (Jetson Nano, Ubuntu, aarch64): **833
+doctests, 931 tests, 0 failures**, strict mode green with 163 excluded, on
+every one.
+
+### BREAKING
+
+- **`Nx.Vulkan.Fast` removed.** See the migration table below.
+- **`Nx.Vulkan.Codegen.compile_cached/1` returns `{:error, map}`** where it
+  returned `{:error, binary}`, and caches to `~/.nx_vulkan/shader_cache` rather
+  than `priv_dir(:nx_vulkan)/shader_cache` — a dependency's own install
+  directory, shared between applications and read-only in some release layouts.
+  Existing entries are orphaned and regenerate.
+- **An unrecognised `config :nx_vulkan, host_fallback:` value now raises.** It
+  previously half-armed strict mode: allowlisted ops returned `:ok` as normal
+  and the first *refused* op raised `CaseClauseError`, so a suite with no
+  refusal passed while enforcing nothing.
 
 ### BREAKING — `Nx.Vulkan.Fast` removed
 
@@ -51,6 +80,128 @@ acceptance was unaffected. It accumulates in a summed absolute log-likelihood:
 N × 1.56e-8, which is 0.016 at N = 1e6, enough to matter for model comparison.
 
 
+### Added — strict mode, and the ratchet built on it
+
+- **`config :nx_vulkan, host_fallback: :allow | :warn | :raise`.** `:allow` is
+  the default and is meant to stay it. `:raise` refuses any fallback not on a
+  documented allowlist, and fires on the **first** refused op — before the
+  tensor leaves the device — so a failure names the cause rather than the
+  visible edge of a cascade. Scope it per-process with
+  `Nx.Vulkan.Fallback.strict/1,2`, safe inside an `async: true` suite.
+- **`Nx.Vulkan.Fallback.allowlist/0`** — 22 entries, one line each, naming a
+  single `{fun, arity}` and its reason. No wildcards: `{:transpose, 3}` is not
+  exempt, only `{:transpose, 3}` *at rank ≥ 5* is.
+- **`sh scripts/strict_test.sh`** runs the whole suite that way;
+  **`sh scripts/doctest_residency.sh`** prints the residency rate and fails
+  both if a doctest not in the register falls back *and* if one in the register
+  stops falling back, so the number only moves deliberately.
+
+### Added — ~44 GLSL kernels
+
+- **Integer and unsigned dtypes**, largely absent before: elementwise binary and
+  unary, broadcasting binary, compare, select, matmul, reductions and window
+  reductions for `s32` and `u32`, plus the `u8` mask paths.
+- **Reductions**: `argmax`/`argmin` (`argreduce_*`), `all`/`any`
+  (`allany_*`), reduce over a **middle** axis, and full f64 reduction.
+- **Scatter and gather**: `indexed_put`, `indexed_add`, and a `gather` that
+  rotates off-prefix axes rather than refusing them.
+- **`concat_nd`** — concatenate on any axis, which moved five ops at once;
+  `stack` routes through it and needed no kernel of its own.
+- **Batched matmul** (`matmul_batched_*`), closing `dot/7` entirely.
+- **`transpose_nd`** for any permutation, and eight cast
+  kernels bridging the narrow/wide and signed/unsigned boundaries.
+
+### Added — `put_slice` runs on the GPU
+
+`glsl/put_slice.comp`, an index-remap overlay: one thread per output element,
+reading the slice inside the window and the tensor outside it. Any 4/8-byte
+dtype, rank 1–4, integer or scalar-tensor start indices, starts clamped exactly
+as `Nx.BinaryBackend` clamps them. Rank > 4, sub-word dtypes and rank-0 tensors
+still host-fall-back.
+
+### Added — the f64 chain path
+
+- **`Nx.Vulkan.ChainShaderSpecsF64`** — six families (normal, cauchy,
+  exponential, halfnormal, studentt, weibull) generated from one parameterised
+  template rather than hand-written, and a **batched** dispatch running
+  `n_instances` chains as one workgroup each.
+- The six hand-written f64 chain shaders are **deleted**; they were superseded
+  and, as it turned out, undriveable.
+
+### Added — `Nx.Vulkan.Shader` and `Nx.Vulkan.Spirv`
+
+- **`Nx.Vulkan.Shader.compile/2`** is now the single GLSL → validated SPIR-V
+  entry point, with caller-supplied `:cache_dir` and `:key`. `Synthesis` and
+  `Codegen` both delegate to it. It is public because a consumer generating its
+  own GLSL previously had nothing to call — `Synthesis.compile/1` wants a
+  `%FamilySpec{}`, and the one path taking source text cached into this
+  package's own `priv`.
+- **`Nx.Vulkan.Spirv`** validates structure before anything is cached or
+  dispatched. `glslangValidator` can exit **0** and still write a corrupt
+  binary: SPIR-V's per-instruction word count is a **16-bit** field, and a
+  `const T[N]` literal needs `N + 3` words, so past ~65532 elements it wraps.
+  Measured: N=65530 valid, N=65533 corrupt, both exit 0. vulkano's parser
+  *panics* on the result rather than returning `ParseError`, and a
+  content-addressed cache would serve it forever.
+- **The cache self-heals** — validation runs on cache *hit*, not only on write,
+  so an artifact written before this existed is repaired rather than served.
+
+### Added — `NXV_SKIP_NIF_BUILD=1`
+
+Rustler does not build the crate and `priv/native/*.so` is used as-is, so a
+cross-built artifact survives the `mix compile` an Elixir change forces. This is
+what makes the Jetson's ~2-minute cross-build apply to every commit instead of
+Rust-only ones. **Checksum the artifact either side** — and compare within one
+`MIX_ENV`, because the `.so` embeds its own build path, so `_build/dev` and
+`_build/test` differ from identical source and share one file through a symlink.
+
+### Added — the property-test tier
+
+`test/nx_vulkan/chain_properties_test.exs` and `chain_boundary_test.exs`: the
+seven NIF guard branches (previously never observed to fire), the prefix
+property that padded batching depends on, batched-equals-single across a shape
+sweep, determinism, and `grad` checked against a central difference of `logp`
+rather than against a re-derived host reference. Rationale in
+[`docs/PROPERTY_TESTING.md`](docs/PROPERTY_TESTING.md), including why `h = 1e-3`
+beats `h = 1e-4` and where the f32 boundary cast overflows (88.72, or 44.36 for
+families using `exp(2q)`).
+
+### Fixed — the GPU was writing its output across PCIe
+
+Output buffers were allocated `PREFER_DEVICE | HOST_RANDOM_ACCESS`. The first is
+a preference and the second a requirement, and on a discrete card the
+host-visible types are not device-local — so the requirement won and every
+buffer lived in system RAM, with every shader store crossing the bus. Measured
+directly: a compute loop transferring nothing sustained **10.8 GB/s** of
+device-to-host traffic. The elementwise path now runs at 431 GB/s of a possible
+448 on the 3060 Ti.
+
+Staging is gated on a runtime unified-memory probe, because the repair has its
+own bill — every host-device crossing is ~40% slower — and the Jetson, where
+there is no bus to cross, pays it for nothing.
+
+### Fixed — chain-path correctness
+
+- **`d > 256` was unenforced.** Past that width the shader wrote an undefined
+  tail and summed `logp` over only the first 256 elements: a plausible number,
+  and a posterior over the wrong model. Harmless only by coincidence, and the
+  coincidence had an expiry date. Now guarded in all three chain NIFs.
+- **`n_instances` is bounded** by the device's real
+  `maxComputeWorkGroupCount[0]`, queried at runtime.
+- **A failed dispatch panicked the NIF** instead of returning an error.
+- **Zero-length buffers panicked** rather than erroring (`buf_alloc(0)`,
+  `buf_upload(<<>>)`). Not reachable from ordinary `Nx` code, which refuses
+  zero-sized shapes, but reachable from a direct `NativeV` call.
+
+### Fixed — NIF error strings discarded their cause
+
+vulkano 0.34's `Validated<E>` has an inverted `Display`/`Debug` pair: `Display`
+matches the inner error and **throws it away**; only `Debug` keeps it. 67 of 131
+`map_err` sites were losing the driver's actual message — classified by the type
+checker, not by eye, which is also how the other 64 were confirmed to be correct
+already. `"ComputePipeline: a non-validation error occurred"` was a full
+diagnostic, and it cost a downstream project a day.
+
 ### Fixed — scalars were refused by three capability gates
 
 `compare`, `select` and the broadcasting binary path all gated the GPU on
@@ -66,14 +217,6 @@ scalar support checks.
 Same bug class as the 0.3.0 backward-pass release: a gate written against the
 shapes one workload happens to produce.
 
-### Added — `put_slice` runs on the GPU
-
-`glsl/put_slice.comp`, an index-remap overlay: one thread per output element,
-reading the slice inside the window and the tensor outside it. Any 4/8-byte
-dtype, rank 1–4, integer or scalar-tensor start indices, starts clamped exactly
-as `Nx.BinaryBackend` clamps them. Rank > 4, sub-word dtypes and rank-0 tensors
-still host-fall-back.
-
 ### Fixed — `pad` refused a mistyped pad value
 
 `pad` has had a shader since 0.2.0, but its gate required the pad value to
@@ -87,6 +230,21 @@ tail re-entered `Nx.pad/3` with a *tensor* pad value, which merges types more
 strictly than the number Nx was originally given, and the differently-typed
 result was then filed under the callback's output type. Pre-existing; found by
 the parity sweep for the above.
+
+### Fixed — smaller, but wrong answers
+
+- **`concatenate` had no `word_copyable?` guard** — a wrong answer, found by
+  the fleet rather than by the suite.
+- **`pow` broadcast** was missing an arm, so `Nx.pow(t, 2.0)` left the GPU.
+- **Narrow broadcast**: a word copy cannot address a byte.
+- **Our shader caches were written under `~/.exmc`** — `mix test` was deleting a
+  consumer's.
+
+### Documentation
+
+README is now a front door; its content moved to `docs/CAPABILITIES.md`,
+`STANDING.md`, `BENCHMARKS.md`, `STRICT_MODE.md`, `BUILDING.md` and a new
+`FLEET.md`. `docs/PROPERTY_TESTING.md` is new.
 
 ## 0.3.0 (2026-08-08)
 
